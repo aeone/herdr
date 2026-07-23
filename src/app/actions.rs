@@ -2835,6 +2835,14 @@ impl AppState {
                 let _ = cache_updates;
                 Vec::new()
             }
+            // Mirror reconcile needs the App, not AppState, so it is handled in
+            // `App::handle_internal_event` before this state-only dispatch.
+            #[cfg(unix)]
+            AppEvent::RemoteSpacesPolled { target, result } => {
+                let _ = target;
+                let _ = result;
+                Vec::new()
+            }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),

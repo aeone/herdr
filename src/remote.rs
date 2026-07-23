@@ -1,5 +1,5 @@
 #[cfg(unix)]
-mod spaces;
+pub(crate) mod spaces;
 #[cfg(unix)]
 mod unix;
 

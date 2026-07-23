@@ -143,6 +143,14 @@ pub enum AppEvent {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },
+    /// A configured remote host was polled for its agent panes. `result`
+    /// carries the failure so an unreachable host can be logged and retried
+    /// without tearing down the mirrors it already has.
+    #[cfg(unix)]
+    RemoteSpacesPolled {
+        target: String,
+        result: Result<crate::remote::spaces::RemoteSpaceSnapshot, String>,
+    },
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,

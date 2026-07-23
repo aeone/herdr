@@ -333,6 +333,9 @@ impl App {
 
         self.start_git_status_refresh_if_due(now);
 
+        #[cfg(unix)]
+        self.start_remote_space_polls_if_due(now);
+
         if self
             .next_auto_update_check
             .is_some_and(|deadline| now >= deadline)

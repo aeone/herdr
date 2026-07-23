@@ -3983,6 +3983,11 @@ impl HeadlessServer {
             self.app.start_git_status_refresh_if_due(now);
         }
 
+        // Mirrors track the remote whether or not a client is attached, so the
+        // sidebar is already correct when one connects.
+        #[cfg(unix)]
+        self.app.start_remote_space_polls_if_due(now);
+
         if self
             .app
             .next_auto_update_check

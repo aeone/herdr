@@ -420,6 +420,8 @@ fn restore_workspace(
             next_public_tab_number,
             active_tab: snap.active_tab.min(tabs.len().saturating_sub(1)),
             tabs,
+            // Mirrors are never persisted, so a restored workspace is local.
+            remote_mirror: None,
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         })

@@ -390,6 +390,17 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # force keepalive or multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
 
+# Remote hosts whose agent panes are mirrored into the local Space list, so
+# local and remote agents appear side by side without a full `herdr --remote`
+# attach. Each mirrored space is a local pane running
+# `ssh -t <target> herdr terminal attach <terminal>`.
+# Requires ssh access to the host and a herdr server running there.
+# [[remote.spaces]]
+# target = "workbox"       # ssh target, same syntax as `herdr --remote`
+# session = "agents"       # optional remote session; omit for the default
+# label = "box"            # optional name prefix; defaults to the ssh target
+# poll_seconds = 30        # how often to re-read the host's agent panes
+
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.
 # allow_nested = false

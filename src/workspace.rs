@@ -165,8 +165,21 @@ pub struct Workspace {
     pub(crate) next_public_tab_number: usize,
     pub tabs: Vec<Tab>,
     pub active_tab: usize,
+    /// Set when this workspace mirrors a remote host's agent pane. Runtime-only
+    /// and deliberately absent from `WorkspaceSnapshot`: mirrors are derived
+    /// from a live remote, so they are rebuilt by polling rather than restored.
+    pub remote_mirror: Option<RemoteMirror>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
+}
+
+/// Identity of the remote pane a mirrored workspace stands in for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteMirror {
+    /// Configured SSH target this mirror came from.
+    pub target: String,
+    /// Stable per-host key, so repeated polls reuse the mirror.
+    pub key: String,
 }
 
 impl Deref for Workspace {
@@ -225,6 +238,7 @@ impl Workspace {
             next_public_tab_number: 2,
             tabs: vec![tab],
             active_tab: 0,
+            remote_mirror: None,
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         }
@@ -408,6 +422,7 @@ impl Workspace {
                 next_public_tab_number: 2,
                 tabs: vec![tab],
                 active_tab: 0,
+                remote_mirror: None,
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -1221,6 +1236,7 @@ impl Workspace {
             next_public_tab_number: 2,
             tabs: vec![tab],
             active_tab: 0,
+            remote_mirror: None,
             test_runtimes: HashMap::new(),
         }
     }

@@ -69,6 +69,12 @@ impl App {
             return;
         }
 
+        #[cfg(unix)]
+        if let AppEvent::RemoteSpacesPolled { target, result } = ev {
+            self.handle_remote_spaces_polled(target, result);
+            return;
+        }
+
         if let AppEvent::PrefixInputSource { active } = ev {
             // Monolithic path applies the switch here. Server mode forwards it to the foreground
             // client instead (see HeadlessServer::handle_internal_event_with_forwarding); should an

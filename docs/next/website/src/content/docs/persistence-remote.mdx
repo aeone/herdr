@@ -102,6 +102,33 @@ Use `--session` with `--remote` to attach to a named session on the remote host:
 herdr --remote workbox --session agents
 ```
 
+## Mixing remote spaces into the local sidebar
+
+`herdr --remote` replaces your whole session with the remote one. To instead see a remote host's agents *beside* your local ones, list the host under `[[remote.spaces]]`:
+
+```toml
+[[remote.spaces]]
+target = "workbox"       # ssh target, same syntax as --remote
+session = "agents"       # optional remote session; omit for the default
+label = "box"            # optional name prefix; defaults to the ssh target
+poll_seconds = 30        # how often to re-read the host's agent panes
+```
+
+Herdr polls each configured host over SSH, asks the remote Herdr for its panes, and adds one local space per remote *agent* pane, named `<label>/<remote space>`. Selecting one attaches to that remote pane, so the agent is fully interactive.
+
+Repeat the block for as many hosts as you want. Each host is polled independently.
+
+Notes on what gets mirrored and when:
+
+- Only panes the remote recognizes as agents are mirrored, so plain shells on the host stay out of your sidebar.
+- Mirrored spaces are derived state. They are never written to `session.json`, and they reappear by polling after a restart rather than being restored.
+- Mirrors appear without stealing focus, and are removed when their remote pane goes away.
+- When a poll fails, existing mirrors are left in place and the host is retried on the next interval, so a brief network drop does not clear and repopulate your sidebar.
+- Remote space names are not unique. When several mirrored spaces would share a name, Herdr appends a number.
+- Each host needs SSH access and a Herdr server already running there. Herdr looks for `herdr` on the remote `PATH`, then in `~/.local/bin`, `~/.cargo/bin`, `/usr/local/bin`, and `/opt/homebrew/bin`. Unlike `--remote`, it never installs a remote binary.
+
+Mirroring is Unix-only, matching remote attach.
+
 ## Direct terminal attach
 
 Full Herdr attach opens the whole workspace UI. Direct attach opens one server-owned terminal in your current terminal.

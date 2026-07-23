@@ -262,18 +262,45 @@ pub fn capture(
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
 ) -> SessionSnapshot {
+    // Remote mirrors are derived from a live host and are rebuilt by polling,
+    // so they are dropped here. `active` and `selected` are positions in this
+    // list, so both have to be rebased onto the surviving workspaces.
+    let persisted_position = persisted_positions(workspaces);
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
+            .filter(|workspace| workspace.remote_mirror.is_none())
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
             .collect(),
-        active,
-        selected,
+        active: active.and_then(|idx| persisted_position.get(idx).copied().flatten()),
+        // A selection resting on a mirror has no persisted equivalent, so it
+        // falls back to the first workspace rather than to a stale index.
+        selected: persisted_position
+            .get(selected)
+            .copied()
+            .flatten()
+            .unwrap_or(0),
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
     }
+}
+
+/// Maps each workspace index to its index in the persisted list, or `None`
+/// when that workspace is a remote mirror and is not persisted at all.
+fn persisted_positions(workspaces: &[Workspace]) -> Vec<Option<usize>> {
+    let mut next = 0;
+    workspaces
+        .iter()
+        .map(|workspace| {
+            workspace.remote_mirror.is_none().then(|| {
+                let position = next;
+                next += 1;
+                position
+            })
+        })
+        .collect()
 }
 
 fn capture_workspace(
@@ -388,8 +415,11 @@ pub fn capture_history(
 ) -> SessionHistorySnapshot {
     SessionHistorySnapshot {
         version: SNAPSHOT_VERSION,
+        // Restore pairs history with workspaces by position, so this must drop
+        // exactly what `capture` drops or history lands on the wrong workspace.
         workspaces: workspaces
             .iter()
+            .filter(|workspace| workspace.remote_mirror.is_none())
             .map(|workspace| WorkspaceHistorySnapshot {
                 tabs: workspace
                     .tabs
@@ -913,6 +943,75 @@ mod tests {
         assert_eq!(tab.root_pane, Some(root.raw()));
         assert!(tab.zoomed);
         assert_eq!(tab.panes.len(), 2);
+    }
+
+    fn mark_remote_mirror(state: &mut AppState, ws_idx: usize, key: &str) {
+        state.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
+            target: "workbox".into(),
+            key: key.into(),
+        });
+    }
+
+    #[test]
+    fn capture_omits_remote_mirrors_and_rebases_active_and_selected() {
+        let mut state = state_with_workspaces(&["local-a", "mirror", "local-b"]);
+        mark_remote_mirror(&mut state, 1, "workbox\u{1f}w1\u{1f}term-1");
+        state.active = Some(2);
+        state.selected = 2;
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(snapshot.workspaces.len(), 2);
+        // "local-b" sat at index 2 locally but is index 1 once the mirror goes.
+        assert_eq!(snapshot.active, Some(1));
+        assert_eq!(snapshot.selected, 1);
+    }
+
+    #[test]
+    fn capture_drops_focus_resting_on_a_remote_mirror() {
+        let mut state = state_with_workspaces(&["local", "mirror"]);
+        mark_remote_mirror(&mut state, 1, "workbox\u{1f}w1\u{1f}term-1");
+        state.active = Some(1);
+        state.selected = 1;
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(snapshot.workspaces.len(), 1);
+        // A mirror has no persisted equivalent, so focus must not point past
+        // the end of the persisted list.
+        assert_eq!(snapshot.active, None);
+        assert_eq!(snapshot.selected, 0);
+    }
+
+    #[test]
+    fn capture_history_drops_the_same_workspaces_as_capture() {
+        let mut state = state_with_workspaces(&["local-a", "mirror", "local-b"]);
+        mark_remote_mirror(&mut state, 1, "workbox\u{1f}w1\u{1f}term-1");
+        let terminal_runtimes = TerminalRuntimeRegistry::new();
+
+        let snapshot = capture_from_state_with_runtimes(&state, &terminal_runtimes);
+        let history = capture_history(&state.workspaces, &terminal_runtimes);
+
+        // Restore pairs the two lists by index, so they must stay the same
+        // length and describe the same workspaces in the same order.
+        assert_eq!(history.workspaces.len(), snapshot.workspaces.len());
+        assert_eq!(
+            history.workspaces[1].tabs.len(),
+            snapshot.workspaces[1].tabs.len()
+        );
+    }
+
+    #[test]
+    fn capture_keeps_every_workspace_when_no_mirrors_exist() {
+        let mut state = state_with_workspaces(&["one", "two"]);
+        state.active = Some(1);
+        state.selected = 1;
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(snapshot.workspaces.len(), 2);
+        assert_eq!(snapshot.active, Some(1));
+        assert_eq!(snapshot.selected, 1);
     }
 
     #[test]

@@ -15,6 +15,8 @@ mod creation;
 mod ids;
 mod input;
 mod popup;
+#[cfg(unix)]
+mod remote_mirrors;
 mod runtime;
 mod runtime_mutations;
 mod session;
@@ -148,6 +150,13 @@ pub struct App {
     /// even when an App-internal drain consumes the event before the forwarding drain.
     pub(crate) local_input_source_switch: bool,
     pub(crate) config_reloaded_from_disk: bool,
+    /// Remote hosts whose agent panes are mirrored into the local Space list.
+    #[cfg(unix)]
+    pub(crate) remote_spaces: Vec<crate::config::RemoteSpaceConfig>,
+    #[cfg(unix)]
+    pub(crate) manage_ssh_config: bool,
+    #[cfg(unix)]
+    pub(crate) remote_space_polls: HashMap<String, remote_mirrors::RemoteSpacePoll>,
     prefix_input_source: Box<dyn crate::platform::PrefixInputSource>,
 }
 
@@ -777,6 +786,12 @@ impl App {
             local_terminal_notifications: true,
             local_input_source_switch: true,
             config_reloaded_from_disk: false,
+            #[cfg(unix)]
+            remote_spaces: config.remote.spaces.clone(),
+            #[cfg(unix)]
+            manage_ssh_config: config.remote.manage_ssh_config,
+            #[cfg(unix)]
+            remote_space_polls: HashMap::new(),
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
     }
@@ -1451,6 +1466,19 @@ impl App {
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
+                #[cfg(unix)]
+                {
+                    // Hosts dropped from config keep their mirrors until the
+                    // next reconcile, which has no snapshot to compare against;
+                    // clearing their poll state stops them being polled again.
+                    self.remote_spaces = config.remote.spaces.clone();
+                    self.manage_ssh_config = config.remote.manage_ssh_config;
+                    self.remote_space_polls.retain(|target, _| {
+                        self.remote_spaces
+                            .iter()
+                            .any(|space| space.target == *target)
+                    });
+                }
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
                 if !self.state.local_sound_playback && self.state.sound != config.ui.sound {

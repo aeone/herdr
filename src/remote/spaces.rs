@@ -72,6 +72,38 @@ pub(crate) fn attach_argv(
     argv
 }
 
+/// Names for every mirrored pane in a snapshot, aligned with `panes`.
+///
+/// Remote workspace labels are not unique — a host can easily have several
+/// spaces called `lifestream`, and one space can host several agents. Names
+/// that collide get a numeric suffix in snapshot order so each mirror stays
+/// distinguishable in the sidebar.
+pub(crate) fn mirror_labels(panes: &[RemoteAgentPane], label: &str) -> Vec<String> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for pane in panes {
+        *counts.entry(pane.workspace_label.as_str()).or_default() += 1;
+    }
+
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    panes
+        .iter()
+        .map(|pane| {
+            let base = pane.mirror_label(label);
+            if counts
+                .get(pane.workspace_label.as_str())
+                .is_none_or(|total| *total <= 1)
+            {
+                return base;
+            }
+            let ordinal = seen
+                .entry(pane.workspace_label.as_str())
+                .and_modify(|seen| *seen += 1)
+                .or_insert(1);
+            format!("{base} {ordinal}")
+        })
+        .collect()
+}
+
 /// What one poll of a host found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteSpaceSnapshot {
@@ -396,6 +428,53 @@ mod tests {
         let err = parse_discovery_output(&stdout).expect_err("propagates remote error");
 
         assert!(err.to_string().contains("server_unavailable"), "{err}");
+    }
+
+    fn pane(workspace_id: &str, workspace_label: &str, terminal_id: &str) -> RemoteAgentPane {
+        RemoteAgentPane {
+            terminal_id: terminal_id.into(),
+            workspace_id: workspace_id.into(),
+            workspace_label: workspace_label.into(),
+            agent: Some("claude".into()),
+        }
+    }
+
+    #[test]
+    fn mirror_labels_disambiguate_repeated_remote_workspace_names() {
+        // The real macOS host had five spaces named "lifestream".
+        let panes = [
+            pane("w1", "lifestream", "term-1"),
+            pane("wK", "baby-names", "term-2"),
+            pane("wJ", "lifestream", "term-3"),
+        ];
+
+        assert_eq!(
+            mirror_labels(&panes, "valkyrie"),
+            [
+                "valkyrie/lifestream 1",
+                "valkyrie/baby-names",
+                "valkyrie/lifestream 2",
+            ]
+        );
+    }
+
+    #[test]
+    fn mirror_labels_disambiguate_two_agents_in_one_remote_workspace() {
+        let panes = [
+            pane("w6", "rycelia", "term-1"),
+            pane("w6", "rycelia", "term-2"),
+        ];
+
+        let labels = mirror_labels(&panes, "valkyrie");
+
+        assert_eq!(labels, ["valkyrie/rycelia 1", "valkyrie/rycelia 2"]);
+    }
+
+    #[test]
+    fn mirror_labels_leave_unique_names_unsuffixed() {
+        let panes = [pane("wK", "baby-names", "term-1")];
+
+        assert_eq!(mirror_labels(&panes, "valkyrie"), ["valkyrie/baby-names"]);
     }
 
     #[test]
