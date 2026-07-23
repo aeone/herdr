@@ -285,6 +285,29 @@ mod tests {
         .to_string()
     }
 
+    /// Captured from `herdr` on a real macOS host, where most panes are plain
+    /// shells and agent panes carry a nested `agent_session` object. The live
+    /// host reported 26 panes across 23 workspaces with only 4 agents, which is
+    /// the ratio that makes the agent-only filter worth having.
+    #[test]
+    fn discovery_ignores_shell_panes_and_tolerates_agent_session_metadata() {
+        let workspaces = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"active_tab_id":"w1:t1","agent_status":"unknown","focused":false,"label":"lifestream","number":1,"pane_count":1,"tab_count":1,"workspace_id":"w1"},{"active_tab_id":"wK:t1","agent_status":"idle","focused":false,"label":"baby-names","number":17,"pane_count":1,"tab_count":1,"workspace_id":"wK"},{"active_tab_id":"wV:t1","agent_status":"blocked","focused":true,"label":"save-reddit","number":22,"pane_count":1,"tab_count":1,"workspace_id":"wV"}]}}"#;
+        let panes = r#"{"id":"cli:pane:list","result":{"panes":[{"agent_status":"unknown","cwd":"/Users/ryielle/lifestream","focused":false,"pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","terminal_id":"term_shell","workspace_id":"w1"},{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"2ed90e44-493d-4c47-97d1-55c55c9ba47d"},"agent_status":"idle","cwd":"/Users/ryielle/lifestream/baby-names","focused":false,"pane_id":"wK:p1","revision":0,"tab_id":"wK:t1","terminal_id":"term_baby","workspace_id":"wK"},{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"cd06f84f-138f-4c9f-86e8-bceecfe1ef1e"},"agent_status":"blocked","cwd":"/Users/ryielle/lifestream","focused":true,"pane_id":"wV:p1","revision":0,"tab_id":"wV:t1","terminal_id":"term_reddit","workspace_id":"wV"}],"type":"pane_list"}}"#;
+        let stdout = format!("/opt/homebrew/bin/herdr\n{workspaces}\n{panes}\n");
+
+        let snapshot = parse_discovery_output(&stdout).expect("parses live macOS output");
+
+        assert_eq!(snapshot.remote_herdr, "/opt/homebrew/bin/herdr");
+        assert_eq!(
+            snapshot
+                .panes
+                .iter()
+                .map(|pane| pane.workspace_label.as_str())
+                .collect::<Vec<_>>(),
+            ["baby-names", "save-reddit"]
+        );
+    }
+
     #[test]
     fn discovery_keeps_agent_panes_and_resolves_workspace_labels() {
         let stdout = format!(
