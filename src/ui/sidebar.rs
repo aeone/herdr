@@ -439,7 +439,46 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             }
         }
     }
+    if app.sidebar_spaces.hide_when_in_agents {
+        entries = hide_entries_listed_in_agent_panel(app, entries);
+    }
     entries
+}
+
+/// Hides spaces the Agent panel already lists. The active workspace is kept so
+/// the current space never disappears from its primary navigation surface;
+/// sidebar navigation follows this filtered order through
+/// `visible_workspace_order`, so hidden spaces are simply skipped.
+fn hide_entries_listed_in_agent_panel(
+    app: &AppState,
+    entries: Vec<WorkspaceListEntry>,
+) -> Vec<WorkspaceListEntry> {
+    let hidden = agent_panel_entries(app)
+        .into_iter()
+        .map(|entry| entry.ws_idx)
+        .filter(|ws_idx| app.active != Some(*ws_idx))
+        .collect::<std::collections::HashSet<_>>();
+    if hidden.is_empty() {
+        return entries;
+    }
+
+    let mut kept = Vec::with_capacity(entries.len());
+    // Tracks a hidden worktree parent so the first surviving child can take its
+    // place as the group header instead of dangling at the indented level.
+    let mut parent_hidden = false;
+    for WorkspaceListEntry::Workspace { ws_idx, indented } in entries {
+        if !indented {
+            parent_hidden = hidden.contains(&ws_idx);
+            if parent_hidden {
+                continue;
+            }
+        } else if hidden.contains(&ws_idx) {
+            continue;
+        }
+        let indented = indented && !std::mem::take(&mut parent_hidden);
+        kept.push(WorkspaceListEntry::Workspace { ws_idx, indented });
+    }
+    kept
 }
 
 pub(crate) fn workspace_list_rect(area: Rect, split_ratio: f32) -> Rect {
@@ -2278,6 +2317,76 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             });
         }
         ws
+    }
+
+    fn attach_agent(app: &mut AppState, ws_idx: usize, agent: Agent) {
+        let tab = &app.workspaces[ws_idx].tabs[0];
+        let pane_id = tab.root_pane;
+        let terminal_id = tab.panes[&pane_id].attached_terminal_id.clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .expect("test terminal")
+            .detected_agent = Some(agent);
+    }
+
+    fn listed_workspaces(app: &AppState) -> Vec<(usize, bool)> {
+        workspace_list_entries(app)
+            .into_iter()
+            .map(|WorkspaceListEntry::Workspace { ws_idx, indented }| (ws_idx, indented))
+            .collect()
+    }
+
+    #[test]
+    fn hide_when_in_agents_drops_only_spaces_the_agent_panel_already_lists() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("with-agent"),
+            Workspace::test_new("plain"),
+            Workspace::test_new("also-agent"),
+        ];
+        app.ensure_test_terminals();
+        app.active = None;
+        attach_agent(&mut app, 0, Agent::Claude);
+        attach_agent(&mut app, 2, Agent::Codex);
+
+        assert_eq!(
+            listed_workspaces(&app),
+            [(0, false), (1, false), (2, false)]
+        );
+
+        app.sidebar_spaces.hide_when_in_agents = true;
+        assert_eq!(listed_workspaces(&app), [(1, false)]);
+    }
+
+    #[test]
+    fn hide_when_in_agents_keeps_the_active_space_visible() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("a"), Workspace::test_new("b")];
+        app.ensure_test_terminals();
+        attach_agent(&mut app, 0, Agent::Claude);
+        attach_agent(&mut app, 1, Agent::Claude);
+        app.active = Some(1);
+        app.sidebar_spaces.hide_when_in_agents = true;
+
+        assert_eq!(listed_workspaces(&app), [(1, false)]);
+    }
+
+    #[test]
+    fn hide_when_in_agents_promotes_a_surviving_child_when_its_parent_is_hidden() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            workspace_with_worktree_space("main", Some("repo-key"), "/repo/herdr"),
+            workspace_with_worktree_space("issue", Some("repo-key"), "/repo/herdr-issue"),
+            workspace_with_worktree_space("review", Some("repo-key"), "/repo/herdr-review"),
+        ];
+        app.ensure_test_terminals();
+        app.active = None;
+        attach_agent(&mut app, 0, Agent::Claude);
+
+        assert_eq!(listed_workspaces(&app), [(0, false), (1, true), (2, true)]);
+
+        app.sidebar_spaces.hide_when_in_agents = true;
+        assert_eq!(listed_workspaces(&app), [(1, false), (2, true)]);
     }
 
     fn workspace_with_git_space(name: &str, key: &str) -> crate::workspace::Workspace {

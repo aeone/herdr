@@ -410,6 +410,9 @@ pub struct SpacesSidebarConfig {
     #[serde(deserialize_with = "deserialize_sidebar_rows")]
     pub rows: SpaceSidebarRows,
     pub row_gap: u16,
+    /// Hide spaces whose panes already appear in the Agent panel, so a space
+    /// with agents is listed once instead of in both sections.
+    pub hide_when_in_agents: bool,
 }
 
 impl Default for SpacesSidebarConfig {
@@ -420,6 +423,7 @@ impl Default for SpacesSidebarConfig {
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ],
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
+            hide_when_in_agents: false,
         }
     }
 }

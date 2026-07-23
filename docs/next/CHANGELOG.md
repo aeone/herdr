@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Added
+- Added `ui.sidebar.spaces.hide_when_in_agents` to hide spaces the Agent panel already lists, keeping the active space visible.
+
 ### Changed
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
