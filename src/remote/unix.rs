@@ -450,13 +450,13 @@ impl Drop for ManagedSshConfig {
     }
 }
 
-struct RemoteSsh {
+pub(super) struct RemoteSsh {
     target: String,
     managed_config: Option<ManagedSshConfig>,
 }
 
 impl RemoteSsh {
-    fn new(target: String, manage_ssh_config: bool) -> Self {
+    pub(super) fn new(target: String, manage_ssh_config: bool) -> Self {
         let managed_config = if manage_ssh_config {
             write_managed_ssh_config()
                 .inspect_err(|err| {
@@ -493,7 +493,7 @@ impl RemoteSsh {
         command
     }
 
-    fn sh_output(&self, script: &str) -> io::Result<Output> {
+    pub(super) fn sh_output(&self, script: &str) -> io::Result<Output> {
         let mut child = self
             .command()
             .arg("/bin/sh -s")

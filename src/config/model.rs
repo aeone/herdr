@@ -866,13 +866,50 @@ pub struct RemoteConfig {
     /// Add keepalive fallbacks and private connection reuse for `herdr --remote`.
     /// Set false to run plain ssh unchanged. Default: true.
     pub manage_ssh_config: bool,
+    /// Remote hosts whose agent panes are mirrored into the local Space list.
+    pub spaces: Vec<RemoteSpaceConfig>,
 }
 
 impl Default for RemoteConfig {
     fn default() -> Self {
         Self {
             manage_ssh_config: true,
+            spaces: Vec::new(),
         }
+    }
+}
+
+fn default_remote_space_poll_seconds() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct RemoteSpaceConfig {
+    /// SSH target, using the same syntax as `herdr --remote`.
+    pub target: String,
+    /// Remote Herdr session name. Defaults to the remote default session.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// Name prefix for mirrored spaces. Defaults to the SSH target.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Seconds between remote pane polls. Default: 30.
+    #[serde(default = "default_remote_space_poll_seconds")]
+    pub poll_seconds: u64,
+}
+
+// Read by the remote-space reconcile loop, which is not wired up yet.
+#[allow(dead_code)]
+impl RemoteSpaceConfig {
+    /// Prefix mirrored space names carry so they read as belonging to a host.
+    pub fn display_label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.target)
+    }
+
+    /// Poll interval clamped away from zero so a misconfigured value cannot
+    /// turn the poller into a busy loop against SSH.
+    pub fn poll_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.poll_seconds.max(1))
     }
 }
 

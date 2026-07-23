@@ -1,4 +1,6 @@
 #[cfg(unix)]
+mod spaces;
+#[cfg(unix)]
 mod unix;
 
 #[cfg(unix)]
