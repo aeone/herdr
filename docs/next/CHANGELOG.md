@@ -4,6 +4,7 @@
 
 ### Added
 - Added `ui.sidebar.spaces.hide_when_in_agents` to hide spaces the Agent panel already lists, keeping the active space visible.
+- Added a `remote_host` sidebar token, rendered in its own accent colour, so mirrored machines read distinctly from workspace names.
 - Added `[[remote.spaces]]` to mirror a remote host's agent panes into the local Space list, so local and remote agents appear side by side without a full `herdr --remote` attach. Unix-only.
 
 ### Changed

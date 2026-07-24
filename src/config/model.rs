@@ -883,9 +883,13 @@ fn default_remote_space_poll_seconds() -> u64 {
     30
 }
 
+/// `target` value that means "another Herdr session on this machine".
+pub const LOCAL_REMOTE_SPACE_TARGET: &str = "local";
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct RemoteSpaceConfig {
-    /// SSH target, using the same syntax as `herdr --remote`.
+    /// SSH target, using the same syntax as `herdr --remote`. Use `"local"` to
+    /// mirror another Herdr session on this machine instead of over ssh.
     pub target: String,
     /// Remote Herdr session name. Defaults to the remote default session.
     #[serde(default)]
@@ -910,6 +914,12 @@ impl RemoteSpaceConfig {
     /// turn the poller into a busy loop against SSH.
     pub fn poll_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.poll_seconds.max(1))
+    }
+
+    /// Whether this entry mirrors a session on this machine rather than a
+    /// remote host. Local mirroring skips ssh entirely, so it needs no keys.
+    pub fn is_local(&self) -> bool {
+        self.target == LOCAL_REMOTE_SPACE_TARGET
     }
 }
 

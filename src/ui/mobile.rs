@@ -1161,6 +1161,7 @@ mod tests {
             tab_idx: 0,
             pane_id: PaneId::from_raw(1),
             primary_label: "herdr".into(),
+            remote_host: None,
             primary_tab_label: primary_tab_label.map(str::to_string),
             pane_label: None,
             terminal_title: None,

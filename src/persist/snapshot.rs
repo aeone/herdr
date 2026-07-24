@@ -948,6 +948,7 @@ mod tests {
     fn mark_remote_mirror(state: &mut AppState, ws_idx: usize, key: &str) {
         state.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
             target: "workbox".into(),
+            host_label: "workbox".into(),
             key: key.into(),
         });
     }

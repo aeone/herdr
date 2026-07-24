@@ -39,9 +39,10 @@ impl RemoteAgentPane {
         )
     }
 
-    /// Name for the mirrored local space, prefixed so it reads as remote.
-    pub(crate) fn mirror_label(&self, label: &str) -> String {
-        format!("{label}/{}", self.workspace_label)
+    /// Name for the mirrored local space. The host is not baked in: it is a
+    /// separate `remote_host` sidebar token so it can be styled on its own.
+    pub(crate) fn mirror_label(&self) -> String {
+        self.workspace_label.clone()
     }
 }
 
@@ -54,6 +55,30 @@ pub(crate) fn attach_argv(
     pane: &RemoteAgentPane,
     remote_herdr: &str,
 ) -> Vec<String> {
+    if space.is_local() {
+        // No ssh hop, so the attach runs the local binary directly. The pane
+        // would otherwise inherit this server's own session and socket
+        // overrides and attach to itself, so they are cleared explicitly.
+        let mut argv = vec![
+            "env".to_string(),
+            "-u".to_string(),
+            "HERDR_SOCKET_PATH".to_string(),
+            "-u".to_string(),
+            "HERDR_CLIENT_SOCKET_PATH".to_string(),
+        ];
+        match space.session.as_deref() {
+            Some(session) => argv.push(format!("{}={session}", crate::session::SESSION_ENV_VAR)),
+            None => {
+                argv.push("-u".to_string());
+                argv.push(crate::session::SESSION_ENV_VAR.to_string());
+            }
+        }
+        argv.push(remote_herdr.to_string());
+        argv.push("terminal".to_string());
+        argv.push("attach".to_string());
+        argv.push(pane.terminal_id.clone());
+        return argv;
+    }
     let mut argv = vec!["ssh".to_string(), "-t".to_string(), space.target.clone()];
     let mut remote = String::new();
     if let Some(session) = space.session.as_deref() {
@@ -78,7 +103,7 @@ pub(crate) fn attach_argv(
 /// spaces called `lifestream`, and one space can host several agents. Names
 /// that collide get a numeric suffix in snapshot order so each mirror stays
 /// distinguishable in the sidebar.
-pub(crate) fn mirror_labels(panes: &[RemoteAgentPane], label: &str) -> Vec<String> {
+pub(crate) fn mirror_labels(panes: &[RemoteAgentPane]) -> Vec<String> {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for pane in panes {
         *counts.entry(pane.workspace_label.as_str()).or_default() += 1;
@@ -88,7 +113,7 @@ pub(crate) fn mirror_labels(panes: &[RemoteAgentPane], label: &str) -> Vec<Strin
     panes
         .iter()
         .map(|pane| {
-            let base = pane.mirror_label(label);
+            let base = pane.mirror_label();
             if counts
                 .get(pane.workspace_label.as_str())
                 .is_none_or(|total| *total <= 1)
@@ -121,8 +146,12 @@ pub(crate) fn discover(
     space: &RemoteSpaceConfig,
     manage_ssh_config: bool,
 ) -> io::Result<RemoteSpaceSnapshot> {
-    let ssh = RemoteSsh::new(space.target.clone(), manage_ssh_config);
-    let output = ssh.sh_output(&discovery_script(space.session.as_deref()))?;
+    let script = discovery_script(space.session.as_deref());
+    let output = if space.is_local() {
+        local_sh_output(&script)?
+    } else {
+        RemoteSsh::new(space.target.clone(), manage_ssh_config).sh_output(&script)?
+    };
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "remote space discovery failed on {}: {}",
@@ -131,6 +160,29 @@ pub(crate) fn discover(
         )));
     }
     parse_discovery_output(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Runs the same discovery script through a local shell, for `target = "local"`.
+fn local_sh_output(script: &str) -> io::Result<std::process::Output> {
+    use std::io::Write;
+
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-s")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        // A local mirror must not inherit this server's own session or socket
+        // overrides, or it would discover itself. The script re-exports the
+        // configured session when one is set.
+        .env_remove(crate::session::SESSION_ENV_VAR)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .spawn()?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin.write_all(script.as_bytes())?;
+    }
+    drop(child.stdin.take());
+    child.wait_with_output()
 }
 
 /// Shell run on the remote host. It resolves a herdr binary the same way a
@@ -449,12 +501,8 @@ mod tests {
         ];
 
         assert_eq!(
-            mirror_labels(&panes, "valkyrie"),
-            [
-                "valkyrie/lifestream 1",
-                "valkyrie/baby-names",
-                "valkyrie/lifestream 2",
-            ]
+            mirror_labels(&panes),
+            ["lifestream 1", "baby-names", "lifestream 2"]
         );
     }
 
@@ -465,16 +513,16 @@ mod tests {
             pane("w6", "rycelia", "term-2"),
         ];
 
-        let labels = mirror_labels(&panes, "valkyrie");
+        let labels = mirror_labels(&panes);
 
-        assert_eq!(labels, ["valkyrie/rycelia 1", "valkyrie/rycelia 2"]);
+        assert_eq!(labels, ["rycelia 1", "rycelia 2"]);
     }
 
     #[test]
     fn mirror_labels_leave_unique_names_unsuffixed() {
         let panes = [pane("wK", "baby-names", "term-1")];
 
-        assert_eq!(mirror_labels(&panes, "valkyrie"), ["valkyrie/baby-names"]);
+        assert_eq!(mirror_labels(&panes), ["baby-names"]);
     }
 
     #[test]
@@ -488,7 +536,7 @@ mod tests {
 
         assert_eq!(pane.mirror_key("workbox"), pane.mirror_key("workbox"));
         assert_ne!(pane.mirror_key("workbox"), pane.mirror_key("other"));
-        assert_eq!(pane.mirror_label("box"), "box/api-server");
+        assert_eq!(pane.mirror_label(), "api-server");
     }
 
     #[test]
@@ -508,6 +556,45 @@ mod tests {
         assert_eq!(
             argv[3],
             "'/home/you/.local/bin/herdr' terminal attach 'term-1'"
+        );
+    }
+
+    #[test]
+    fn local_attach_argv_skips_ssh_and_clears_inherited_session() {
+        let mut space = space("local");
+        space.session = None;
+        let pane = pane("w1", "api", "term-1");
+
+        let argv = attach_argv(&space, &pane, "/usr/bin/herdr");
+
+        assert_eq!(argv[0], "env");
+        // Without these the pane inherits the running server's session and
+        // sockets, and attaches to itself instead of the other session.
+        assert!(argv.contains(&"-u".to_string()));
+        assert!(argv.contains(&"HERDR_SESSION".to_string()));
+        assert!(argv.contains(&"HERDR_SOCKET_PATH".to_string()));
+        assert!(!argv.contains(&"ssh".to_string()));
+        assert_eq!(argv[argv.len() - 3..], ["terminal", "attach", "term-1"]);
+    }
+
+    #[test]
+    fn local_attach_argv_targets_a_named_local_session() {
+        let mut space = space("local");
+        space.session = Some("work".into());
+
+        let argv = attach_argv(&space, &pane("w1", "api", "term-1"), "herdr");
+
+        assert!(argv.contains(&"HERDR_SESSION=work".to_string()));
+        assert!(!argv.contains(&"ssh".to_string()));
+    }
+
+    #[test]
+    fn only_the_local_target_skips_ssh() {
+        assert!(space("local").is_local());
+        assert!(!space("workbox").is_local());
+        assert_eq!(
+            attach_argv(&space("workbox"), &pane("w1", "a", "t"), "herdr")[0],
+            "ssh"
         );
     }
 

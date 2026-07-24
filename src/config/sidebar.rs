@@ -108,6 +108,8 @@ pub enum AgentSidebarToken {
     Tab,
     Pane,
     Agent,
+    /// Host prefix for an agent mirrored from a remote Herdr; empty otherwise.
+    RemoteHost,
     TerminalTitle,
     TerminalTitleStripped,
     Custom(String),
@@ -122,6 +124,8 @@ pub enum SpaceSidebarToken {
     StateIcon,
     StateText,
     Workspace,
+    /// Host prefix for a space mirrored from a remote Herdr; empty otherwise.
+    RemoteHost,
     Branch,
     GitStatus,
     Custom(String),
@@ -238,6 +242,7 @@ fn agent_token_name(token: &AgentSidebarToken) -> String {
         AgentSidebarToken::Tab => "tab".into(),
         AgentSidebarToken::Pane => "pane".into(),
         AgentSidebarToken::Agent => "agent".into(),
+        AgentSidebarToken::RemoteHost => "remote_host".into(),
         AgentSidebarToken::TerminalTitle => "terminal_title".into(),
         AgentSidebarToken::TerminalTitleStripped => "terminal_title_stripped".into(),
         AgentSidebarToken::Custom(name) => format!("${name}"),
@@ -250,6 +255,7 @@ fn space_token_name(token: &SpaceSidebarToken) -> String {
         SpaceSidebarToken::StateIcon => "state_icon".into(),
         SpaceSidebarToken::StateText => "state_text".into(),
         SpaceSidebarToken::Workspace => "workspace".into(),
+        SpaceSidebarToken::RemoteHost => "remote_host".into(),
         SpaceSidebarToken::Branch => "branch".into(),
         SpaceSidebarToken::GitStatus => "git_status".into(),
         SpaceSidebarToken::Custom(name) => format!("${name}"),
@@ -292,6 +298,7 @@ impl<'de> Deserialize<'de> for AgentSidebarToken {
                 ("tab", Self::Tab),
                 ("pane", Self::Pane),
                 ("agent", Self::Agent),
+                ("remote_host", Self::RemoteHost),
                 ("terminal_title", Self::TerminalTitle),
                 ("terminal_title_stripped", Self::TerminalTitleStripped),
             ],
@@ -336,6 +343,7 @@ impl<'de> Deserialize<'de> for SpaceSidebarToken {
                 ("state_icon", Self::StateIcon),
                 ("state_text", Self::StateText),
                 ("workspace", Self::Workspace),
+                ("remote_host", Self::RemoteHost),
                 ("branch", Self::Branch),
                 ("git_status", Self::GitStatus),
             ],
@@ -393,6 +401,7 @@ impl Default for AgentsSidebarConfig {
             rows: vec![
                 vec![
                     AgentSidebarToken::StateIcon,
+                    AgentSidebarToken::RemoteHost,
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
@@ -419,7 +428,11 @@ impl Default for SpacesSidebarConfig {
     fn default() -> Self {
         Self {
             rows: vec![
-                vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
+                vec![
+                    SpaceSidebarToken::StateIcon,
+                    SpaceSidebarToken::RemoteHost,
+                    SpaceSidebarToken::Workspace,
+                ],
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ],
             row_gap: DEFAULT_SIDEBAR_ROW_GAP,
@@ -447,6 +460,7 @@ mod tests {
             vec![
                 vec![
                     AgentSidebarToken::StateIcon,
+                    AgentSidebarToken::RemoteHost,
                     AgentSidebarToken::Workspace,
                     AgentSidebarToken::Tab,
                 ],
@@ -458,7 +472,11 @@ mod tests {
         assert_eq!(
             config.spaces.rows,
             vec![
-                vec![SpaceSidebarToken::StateIcon, SpaceSidebarToken::Workspace],
+                vec![
+                    SpaceSidebarToken::StateIcon,
+                    SpaceSidebarToken::RemoteHost,
+                    SpaceSidebarToken::Workspace,
+                ],
                 vec![SpaceSidebarToken::Branch, SpaceSidebarToken::GitStatus],
             ]
         );

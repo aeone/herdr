@@ -25,6 +25,8 @@ pub(crate) struct AgentPanelEntry {
     pub tab_idx: usize,
     pub pane_id: crate::layout::PaneId,
     pub primary_label: String,
+    /// Host prefix when this agent's workspace mirrors a remote Herdr.
+    pub remote_host: Option<String>,
     pub primary_tab_label: Option<String>,
     pub pane_label: Option<String>,
     pub terminal_title: Option<String>,
@@ -152,6 +154,10 @@ fn collect_agent_panel_entries_with_runtimes(
         .flat_map(|(ws_idx, ws)| {
             let multi_tab = ws.tabs.len() > 1;
             let workspace_label = ws.display_name_from(&app.terminals, terminal_runtimes);
+            let remote_host = ws
+                .remote_mirror
+                .as_ref()
+                .map(|mirror| mirror.host_label.clone());
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
@@ -165,6 +171,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         tab_idx: detail.tab_idx,
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
+                        remote_host: remote_host.clone(),
                         primary_tab_label: show_tab.then_some(detail.tab_label),
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
@@ -209,6 +216,10 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
         &app.sidebar_spaces,
         SpaceTokenContext {
             workspace: &label,
+            remote_host: ws
+                .remote_mirror
+                .as_ref()
+                .map(|mirror| mirror.host_label.as_str()),
             branch: ws.branch().as_deref(),
             state_text: state_label(state, seen),
             ahead_behind: ws.git_ahead_behind(),
@@ -981,6 +992,7 @@ fn resolved_token_spans(
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::TerminalTitle(text)
             | ResolvedTokenKind::Branch(text)
+            | ResolvedTokenKind::RemoteHost(text)
             | ResolvedTokenKind::Custom(text) => display_width(text),
             _ => 0,
         })
@@ -1056,6 +1068,10 @@ fn resolved_token_spans(
             break;
         }
     }
+    // Mirrored spaces and agents carry a host prefix. It gets its own accent so
+    // the machine reads as distinct from the workspace name beside it; a
+    // per-token `fg` in config still overrides this.
+    let remote_host_style = Style::default().fg(p.peach);
     let mut spans = Vec::new();
     for (position, index) in visible_indices.iter().copied().enumerate() {
         let token = &resolved[index];
@@ -1113,6 +1129,12 @@ fn resolved_token_spans(
                         apply_token_style(Style::default().fg(p.red), token.style),
                     ));
                 }
+            }
+            ResolvedTokenKind::RemoteHost(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(remote_host_style, token.style),
+                ));
             }
             ResolvedTokenKind::TerminalTitle(text) | ResolvedTokenKind::Custom(text) => {
                 spans.push(Span::styled(
@@ -1247,6 +1269,10 @@ fn render_workspace_list(
             &app.sidebar_spaces,
             SpaceTokenContext {
                 workspace: &display_label,
+                remote_host: ws
+                    .remote_mirror
+                    .as_ref()
+                    .map(|mirror| mirror.host_label.as_str()),
                 branch: ws.branch().as_deref(),
                 state_text: state_label(display_state, display_seen),
                 ahead_behind: ws.git_ahead_behind(),

@@ -114,7 +114,20 @@ label = "box"            # optional name prefix; defaults to the ssh target
 poll_seconds = 30        # how often to re-read the host's agent panes
 ```
 
-Herdr polls each configured host over SSH, asks the remote Herdr for its panes, and adds one local space per remote *agent* pane, named `<label>/<remote space>`. Selecting one attaches to that remote pane, so the agent is fully interactive.
+Herdr polls each configured host over SSH, asks the remote Herdr for its panes, and adds one local space per remote *agent* pane. Selecting one attaches to that remote pane, so the agent is fully interactive.
+
+The host is shown by the `remote_host` sidebar token rather than baked into the space name, so you can colour it separately from the workspace name. See [sidebar row layouts](/docs/configuration/#sidebar-row-layouts).
+
+To mirror another Herdr session on the same machine, set `target = "local"` and name the session. This needs no SSH access at all:
+
+```toml
+[[remote.spaces]]
+target = "local"
+session = "work"
+label = "work"
+```
+
+Herdr refuses a local entry that points at the session it is running in, since each mirror pane is itself an agent pane and it would mirror its own mirrors without bound.
 
 Repeat the block for as many hosts as you want. Each host is polled independently.
 

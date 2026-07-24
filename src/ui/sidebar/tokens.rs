@@ -18,6 +18,7 @@ pub(super) enum ResolvedTokenKind {
     Tab(String),
     Pane(String),
     Agent(String),
+    RemoteHost(String),
     TerminalTitle(String),
     Branch(String),
     GitStatus { ahead: usize, behind: usize },
@@ -65,6 +66,9 @@ pub(super) fn agent_rows(
                         AgentSidebarToken::Agent => {
                             entry.agent_label.clone().map(ResolvedTokenKind::Agent)
                         }
+                        AgentSidebarToken::RemoteHost => {
+                            entry.remote_host.clone().map(ResolvedTokenKind::RemoteHost)
+                        }
                         AgentSidebarToken::TerminalTitle => entry
                             .terminal_title
                             .clone()
@@ -90,6 +94,8 @@ pub(super) fn agent_rows(
 
 pub(super) struct SpaceTokenContext<'a> {
     pub workspace: &'a str,
+    /// Host prefix when this space mirrors a remote Herdr.
+    pub remote_host: Option<&'a str>,
     pub branch: Option<&'a str>,
     pub state_text: &'a str,
     pub ahead_behind: Option<(usize, usize)>,
@@ -117,6 +123,9 @@ pub(super) fn space_rows(
                         SpaceSidebarToken::Workspace => {
                             Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
                         }
+                        SpaceSidebarToken::RemoteHost => context
+                            .remote_host
+                            .map(|host| ResolvedTokenKind::RemoteHost(host.to_string())),
                         SpaceSidebarToken::Branch if !context.suppress_git_details => context
                             .branch
                             .map(|branch| ResolvedTokenKind::Branch(branch.to_string())),
@@ -159,6 +168,7 @@ mod tests {
 
     fn entry() -> AgentPanelEntry {
         AgentPanelEntry {
+            remote_host: None,
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),
@@ -294,6 +304,7 @@ mod tests {
             space_rows(
                 &config,
                 SpaceTokenContext {
+                    remote_host: None,
                     workspace: "feature",
                     branch: Some("worktree/feature"),
                     state_text: "idle",
@@ -321,6 +332,7 @@ mod tests {
             space_rows(
                 &config,
                 SpaceTokenContext {
+                    remote_host: None,
                     workspace: "repo",
                     branch: None,
                     state_text: "idle",

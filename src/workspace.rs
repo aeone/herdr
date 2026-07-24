@@ -178,6 +178,8 @@ pub struct Workspace {
 pub struct RemoteMirror {
     /// Configured SSH target this mirror came from.
     pub target: String,
+    /// Display prefix for the host, from `label` or the target.
+    pub host_label: String,
     /// Stable per-host key, so repeated polls reuse the mirror.
     pub key: String,
 }

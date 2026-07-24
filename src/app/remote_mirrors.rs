@@ -46,7 +46,7 @@ pub(crate) fn plan_remote_mirrors(
     space: &RemoteSpaceConfig,
     snapshot: &RemoteSpaceSnapshot,
 ) -> Vec<MirrorAction> {
-    let labels = mirror_labels(&snapshot.panes, space.display_label());
+    let labels = mirror_labels(&snapshot.panes);
     let desired: Vec<(String, String)> = snapshot
         .panes
         .iter()
@@ -126,6 +126,20 @@ pub(crate) fn mirrors_for_unconfigured_hosts(
         .collect()
 }
 
+/// Whether a local entry points at the session this server is running as.
+///
+/// Mirroring your own session is unbounded recursion: each mirror pane is an
+/// agent pane, so the next poll would mirror the mirrors.
+fn mirrors_own_session(space: &RemoteSpaceConfig) -> bool {
+    let own = crate::session::active_name()
+        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+    let target = space
+        .session
+        .clone()
+        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+    own == target
+}
+
 /// Per-host polling bookkeeping, so a slow or unreachable host neither blocks
 /// the render loop nor stacks up overlapping ssh calls.
 #[derive(Debug, Default)]
@@ -145,6 +159,11 @@ impl App {
     pub(crate) fn start_remote_space_polls_if_due(&mut self, now: std::time::Instant) {
         let spaces = self.config_remote_spaces();
         for space in spaces {
+            // Mirroring the session we are running in would discover our own
+            // mirror panes and mirror those in turn, without bound.
+            if space.is_local() && mirrors_own_session(&space) {
+                continue;
+            }
             let poll = self
                 .remote_space_polls
                 .entry(space.target.clone())
@@ -244,6 +263,7 @@ impl App {
                 } => {
                     if let Err(err) = self.create_remote_mirror(
                         &space.target,
+                        space.display_label(),
                         &key,
                         &label,
                         &argv,
@@ -285,6 +305,7 @@ impl App {
         &mut self,
         target: &str,
         key: &str,
+        host_label: &str,
         label: &str,
         argv: &[String],
         agent: Option<&str>,
@@ -322,6 +343,7 @@ impl App {
         workspace.custom_name = Some(label.to_string());
         workspace.remote_mirror = Some(RemoteMirror {
             target: target.to_string(),
+            host_label: host_label.to_string(),
             key: key.to_string(),
         });
 
@@ -375,6 +397,7 @@ mod tests {
         workspace.custom_name = Some(label.to_string());
         workspace.remote_mirror = Some(RemoteMirror {
             target: target.into(),
+            host_label: target.into(),
             key: key.into(),
         });
         workspace
@@ -404,7 +427,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(labels, ["workbox/api", "workbox/web"]);
+        assert_eq!(labels, ["api", "web"]);
         assert_eq!(plan.len(), 2);
     }
 
@@ -428,11 +451,7 @@ mod tests {
     fn plan_is_empty_when_mirrors_already_match_the_remote() {
         let workspaces = vec![
             local("local"),
-            mirror(
-                "workbox",
-                &key_for("workbox", "w1", "term-1"),
-                "workbox/api",
-            ),
+            mirror("workbox", &key_for("workbox", "w1", "term-1"), "api"),
         ];
 
         let plan = plan_remote_mirrors(
@@ -447,16 +466,8 @@ mod tests {
     #[test]
     fn plan_closes_mirrors_whose_remote_pane_disappeared() {
         let workspaces = vec![
-            mirror(
-                "workbox",
-                &key_for("workbox", "w1", "term-1"),
-                "workbox/api",
-            ),
-            mirror(
-                "workbox",
-                &key_for("workbox", "w2", "term-2"),
-                "workbox/web",
-            ),
+            mirror("workbox", &key_for("workbox", "w1", "term-1"), "api"),
+            mirror("workbox", &key_for("workbox", "w2", "term-2"), "web"),
         ];
 
         let plan = plan_remote_mirrors(
@@ -472,9 +483,9 @@ mod tests {
     fn plan_closes_in_descending_index_order_so_applying_stays_valid() {
         let workspaces = vec![
             local("local"),
-            mirror("workbox", &key_for("workbox", "w1", "term-1"), "workbox/a"),
-            mirror("workbox", &key_for("workbox", "w2", "term-2"), "workbox/b"),
-            mirror("workbox", &key_for("workbox", "w3", "term-3"), "workbox/c"),
+            mirror("workbox", &key_for("workbox", "w1", "term-1"), "a"),
+            mirror("workbox", &key_for("workbox", "w2", "term-2"), "b"),
+            mirror("workbox", &key_for("workbox", "w3", "term-3"), "c"),
         ];
 
         let plan = plan_remote_mirrors(&workspaces, &space("workbox"), &snapshot(vec![]));
@@ -501,12 +512,8 @@ mod tests {
     #[test]
     fn plan_only_touches_mirrors_from_the_polled_host() {
         let workspaces = vec![
-            mirror(
-                "workbox",
-                &key_for("workbox", "w1", "term-1"),
-                "workbox/api",
-            ),
-            mirror("other", &key_for("other", "w1", "term-9"), "other/logs"),
+            mirror("workbox", &key_for("workbox", "w1", "term-1"), "api"),
+            mirror("other", &key_for("other", "w1", "term-9"), "logs"),
         ];
 
         // An empty poll for one host must leave the other host's mirrors alone.
@@ -520,7 +527,7 @@ mod tests {
         let workspaces = vec![mirror(
             "workbox",
             &key_for("workbox", "w1", "term-1"),
-            "workbox/api",
+            "api",
         )];
 
         let plan = plan_remote_mirrors(
@@ -533,7 +540,7 @@ mod tests {
             plan,
             vec![MirrorAction::Rename {
                 ws_idx: 0,
-                label: "workbox/api-server".into(),
+                label: "api-server".into(),
             }]
         );
     }
@@ -543,7 +550,7 @@ mod tests {
         let workspaces = vec![mirror(
             "workbox",
             &key_for("workbox", "w1", "term-1"),
-            "workbox/lifestream",
+            "lifestream",
         )];
 
         // A second space with the same remote name arrives, so the existing
@@ -562,11 +569,11 @@ mod tests {
             vec![
                 MirrorAction::Rename {
                     ws_idx: 0,
-                    label: "workbox/lifestream 1".into(),
+                    label: "lifestream 1".into(),
                 },
                 MirrorAction::Create {
                     key: key_for("workbox", "w2", "term-2"),
-                    label: "workbox/lifestream 2".into(),
+                    label: "lifestream 2".into(),
                     argv: attach_argv(
                         &space("workbox"),
                         &agent_pane("w2", "lifestream", "term-2"),
@@ -598,9 +605,9 @@ mod tests {
     fn removing_a_host_from_config_strands_no_mirrors() {
         let workspaces = vec![
             local("local"),
-            mirror("workbox", &key_for("workbox", "w1", "t1"), "workbox/api"),
-            mirror("other", &key_for("other", "w1", "t2"), "other/logs"),
-            mirror("workbox", &key_for("workbox", "w2", "t3"), "workbox/web"),
+            mirror("workbox", &key_for("workbox", "w1", "t1"), "api"),
+            mirror("other", &key_for("other", "w1", "t2"), "logs"),
+            mirror("workbox", &key_for("workbox", "w2", "t3"), "web"),
         ];
 
         // Config now lists only "other"; nothing will ever poll workbox again.
@@ -614,7 +621,7 @@ mod tests {
     fn configured_hosts_keep_their_mirrors() {
         let workspaces = vec![
             local("local"),
-            mirror("workbox", &key_for("workbox", "w1", "t1"), "workbox/api"),
+            mirror("workbox", &key_for("workbox", "w1", "t1"), "api"),
         ];
 
         let stale = mirrors_for_unconfigured_hosts(&workspaces, &[space("workbox")]);
@@ -626,12 +633,25 @@ mod tests {
     fn clearing_every_host_removes_every_mirror_but_no_local_space() {
         let workspaces = vec![
             local("local"),
-            mirror("workbox", &key_for("workbox", "w1", "t1"), "workbox/api"),
+            mirror("workbox", &key_for("workbox", "w1", "t1"), "api"),
         ];
 
         let stale = mirrors_for_unconfigured_hosts(&workspaces, &[]);
 
         assert_eq!(stale, vec![1]);
+    }
+
+    #[test]
+    fn a_local_entry_for_our_own_session_is_refused() {
+        // The default session is what an entry with no session name means, and
+        // tests run without HERDR_SESSION set, so this is self-mirroring.
+        let mut own = space("local");
+        own.session = None;
+        assert!(mirrors_own_session(&own));
+
+        let mut other = space("local");
+        other.session = Some("work".into());
+        assert!(!mirrors_own_session(&other));
     }
 
     #[test]
@@ -648,6 +668,6 @@ mod tests {
         let MirrorAction::Create { label, .. } = &plan[0] else {
             panic!("expected a create action, got {plan:?}");
         };
-        assert_eq!(label, "box/api");
+        assert_eq!(label, "api");
     }
 }
