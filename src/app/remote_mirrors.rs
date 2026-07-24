@@ -9,6 +9,8 @@
 //! Planning is separated from applying so the reconcile rules are testable
 //! without spawning PTYs or reaching the network.
 
+use std::time::Duration;
+
 use crate::config::RemoteSpaceConfig;
 use crate::remote::spaces::{attach_argv, mirror_labels, RemoteSpaceSnapshot};
 use crate::workspace::{RemoteMirror, Workspace};
@@ -157,6 +159,64 @@ pub(crate) fn mirrors_for_unconfigured_hosts(
         .collect()
 }
 
+/// Long-lived per-host worker: hold the live feed when available, poll when not.
+///
+/// The feed pushes a snapshot on every change, so status and structure track
+/// the host in real time. A remote without the feed (older binary) makes the
+/// feed return immediately; the worker then polls on the host's interval and
+/// re-probes the feed each cycle, so an upgraded remote upgrades to push.
+fn run_remote_space_worker(
+    space: RemoteSpaceConfig,
+    manage_ssh_config: bool,
+    event_tx: tokio::sync::mpsc::Sender<crate::events::AppEvent>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
+    use crate::remote::spaces::FeedOutcome;
+
+    let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+    let emit = |result: std::io::Result<crate::remote::spaces::RemoteSpaceSnapshot>| {
+        let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteSpacesPolled {
+            target: space.target.clone(),
+            result: result.map_err(|err| err.to_string()),
+        });
+    };
+
+    while !stopped() {
+        let outcome = crate::remote::spaces::run_feed(
+            &space,
+            manage_ssh_config,
+            |snapshot| emit(snapshot),
+            &stopped,
+        );
+
+        if stopped() {
+            break;
+        }
+
+        match outcome {
+            // The feed ended after streaming; reconnect after a short pause so a
+            // dropped connection does not spin.
+            Ok(FeedOutcome::Streamed) => sleep_unless_stopped(Duration::from_secs(2), &stop),
+            // No feed on this remote (or it errored): poll once, then wait the
+            // configured interval before trying the feed again.
+            Ok(FeedOutcome::Unavailable) | Err(_) => {
+                emit(crate::remote::spaces::discover(&space, manage_ssh_config));
+                sleep_unless_stopped(space.poll_interval(), &stop);
+            }
+        }
+    }
+}
+
+fn sleep_unless_stopped(total: Duration, stop: &std::sync::atomic::AtomicBool) {
+    // Wake often so a config reload that stops the worker is noticed promptly.
+    let step = Duration::from_millis(250);
+    let mut waited = Duration::ZERO;
+    while waited < total && !stop.load(std::sync::atomic::Ordering::Relaxed) {
+        std::thread::sleep(step.min(total - waited));
+        waited += step;
+    }
+}
+
 /// Whether a local entry points at the session this server is running as.
 ///
 /// Mirroring your own session is unbounded recursion: each mirror pane is an
@@ -171,12 +231,10 @@ fn mirrors_own_session(space: &RemoteSpaceConfig) -> bool {
     own == target
 }
 
-/// Per-host polling bookkeeping, so a slow or unreachable host neither blocks
-/// the render loop nor stacks up overlapping ssh calls.
-#[derive(Debug, Default)]
-pub(crate) struct RemoteSpacePoll {
-    pub(crate) in_flight: bool,
-    pub(crate) next_poll: Option<std::time::Instant>,
+/// A running per-host worker. Setting `stop` ends the worker's loop; the worker
+/// tries the live push feed and falls back to polling for hosts without it.
+pub(crate) struct RemoteSpaceWorker {
+    pub(crate) stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl App {
@@ -184,40 +242,50 @@ impl App {
         self.remote_spaces.clone()
     }
 
-    /// Starts a background poll for every configured host whose interval has
-    /// elapsed. Each host is polled on its own thread; results come back as
-    /// [`crate::events::AppEvent::RemoteSpacesPolled`].
-    pub(crate) fn start_remote_space_polls_if_due(&mut self, now: std::time::Instant) {
-        let spaces = self.config_remote_spaces();
-        for space in spaces {
+    /// Ensures one long-lived worker is running per configured host.
+    ///
+    /// A worker holds a live event feed when the remote supports it, so mirrors
+    /// track the host in real time, and falls back to interval polling when it
+    /// does not. Results arrive as [`crate::events::AppEvent::RemoteSpacesPolled`],
+    /// the same path a poll used, so reconcile is unchanged.
+    pub(crate) fn start_remote_space_polls_if_due(&mut self, _now: std::time::Instant) {
+        for space in self.config_remote_spaces() {
             // Mirroring the session we are running in would discover our own
             // mirror panes and mirror those in turn, without bound.
             if space.is_local() && mirrors_own_session(&space) {
                 continue;
             }
-            let poll = self
-                .remote_space_polls
-                .entry(space.target.clone())
-                .or_default();
-            if poll.in_flight || poll.next_poll.is_some_and(|deadline| now < deadline) {
+            if self.remote_space_workers.contains_key(&space.target) {
                 continue;
             }
-            poll.in_flight = true;
-            // The next deadline is set when the result lands, so a poll that
-            // takes longer than the interval cannot immediately re-fire.
-            poll.next_poll = None;
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.remote_space_workers.insert(
+                space.target.clone(),
+                RemoteSpaceWorker { stop: stop.clone() },
+            );
 
             let event_tx = self.event_tx.clone();
             let manage_ssh_config = self.manage_ssh_config;
             std::thread::spawn(move || {
-                let result = crate::remote::spaces::discover(&space, manage_ssh_config)
-                    .map_err(|err| err.to_string());
-                let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteSpacesPolled {
-                    target: space.target.clone(),
-                    result,
-                });
+                run_remote_space_worker(space, manage_ssh_config, event_tx, stop);
             });
         }
+    }
+
+    /// Stops worker threads whose host is no longer configured.
+    pub(crate) fn stop_unconfigured_remote_space_workers(&mut self) {
+        self.remote_space_workers.retain(|target, worker| {
+            let keep = self
+                .remote_spaces
+                .iter()
+                .any(|space| space.target == *target);
+            if !keep {
+                worker
+                    .stop
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            keep
+        });
     }
 
     /// Drops mirrors for hosts that config no longer lists. Called on config
@@ -246,21 +314,17 @@ impl App {
             .into_iter()
             .find(|space| space.target == target)
         else {
-            // The host was removed from config while its poll was in flight.
-            self.remote_space_polls.remove(&target);
+            // The host was removed from config while an update was in flight.
+            self.remote_space_workers.remove(&target);
             return;
         };
 
         match result {
             Ok(snapshot) => self.reconcile_remote_mirrors(&space, &snapshot),
             Err(err) => {
-                tracing::warn!(target = %target, %err, "remote space poll failed");
+                tracing::warn!(target = %target, %err, "remote space update failed");
             }
         }
-
-        let poll = self.remote_space_polls.entry(target).or_default();
-        poll.in_flight = false;
-        poll.next_poll = std::time::Instant::now().checked_add(space.poll_interval());
     }
 
     /// Brings mirrors for one configured host in line with `snapshot`.

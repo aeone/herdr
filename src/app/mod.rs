@@ -156,7 +156,7 @@ pub struct App {
     #[cfg(unix)]
     pub(crate) manage_ssh_config: bool,
     #[cfg(unix)]
-    pub(crate) remote_space_polls: HashMap<String, remote_mirrors::RemoteSpacePoll>,
+    pub(crate) remote_space_workers: HashMap<String, remote_mirrors::RemoteSpaceWorker>,
     prefix_input_source: Box<dyn crate::platform::PrefixInputSource>,
 }
 
@@ -793,7 +793,7 @@ impl App {
             #[cfg(unix)]
             manage_ssh_config: config.remote.manage_ssh_config,
             #[cfg(unix)]
-            remote_space_polls: HashMap::new(),
+            remote_space_workers: HashMap::new(),
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
     }
@@ -1476,11 +1476,7 @@ impl App {
                     // A host dropped from config is never polled again, so its
                     // mirrors have to be torn down here or they linger for the
                     // life of the server.
-                    self.remote_space_polls.retain(|target, _| {
-                        self.remote_spaces
-                            .iter()
-                            .any(|space| space.target == *target)
-                    });
+                    self.stop_unconfigured_remote_space_workers();
                     self.close_mirrors_for_unconfigured_hosts();
                 }
                 self.state.agent_panel_scroll = 0;

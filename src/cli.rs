@@ -9,6 +9,7 @@ use crate::api::schema::{
 };
 
 mod agent;
+mod agent_feed;
 mod api;
 mod completion;
 mod integration;

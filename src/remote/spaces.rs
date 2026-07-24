@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 use std::io;
+use std::io::BufRead;
 
 use crate::api::schema::response::ResponseResult;
 use crate::config::RemoteSpaceConfig;
@@ -150,7 +151,7 @@ pub(crate) fn discover(
     space: &RemoteSpaceConfig,
     manage_ssh_config: bool,
 ) -> io::Result<RemoteSpaceSnapshot> {
-    let script = discovery_script(space.session.as_deref());
+    let script = discovery_script(space.session.as_deref(), space.is_local());
     let output = if space.is_local() {
         local_sh_output(&script)?
     } else {
@@ -189,11 +190,119 @@ fn local_sh_output(script: &str) -> io::Result<std::process::Output> {
     child.wait_with_output()
 }
 
-/// Shell run on the remote host. It resolves a herdr binary the same way a
-/// non-login `ssh host herdr ...` would fail to, then prints the binary path
-/// followed by the two JSON list responses, one per line.
-fn discovery_script(session: Option<&str>) -> String {
-    let mut script = String::from(
+/// What a feed attempt ended up doing, so the caller knows whether the remote
+/// supports the push feed or should fall back to polling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FeedOutcome {
+    /// The feed streamed at least one block before ending — the remote has it.
+    Streamed,
+    /// The feed produced no blocks (old binary, missing command, or an error).
+    Unavailable,
+}
+
+/// Runs `herdr agent feed` on the host and calls `on_snapshot` for each pushed
+/// block, parsing it exactly as a poll response.
+///
+/// Returns when the feed process ends or `should_continue` goes false. The feed
+/// pushes a block on startup and on every relevant change, so this is the live
+/// alternative to [`discover`].
+pub(crate) fn run_feed(
+    space: &RemoteSpaceConfig,
+    manage_ssh_config: bool,
+    mut on_snapshot: impl FnMut(io::Result<RemoteSpaceSnapshot>),
+    should_continue: &dyn Fn() -> bool,
+) -> io::Result<FeedOutcome> {
+    let script = feed_script(space.session.as_deref(), space.is_local());
+    let mut child = if space.is_local() {
+        spawn_local_streaming_script(&script)?
+    } else {
+        RemoteSsh::new(space.target.clone(), manage_ssh_config).spawn_streaming_script(&script)?
+    };
+
+    let mut streamed = false;
+    if let Some(stdout) = child.stdout.take() {
+        let reader = std::io::BufReader::new(stdout);
+        let mut block = Vec::new();
+        for line in reader.lines() {
+            if !should_continue() {
+                break;
+            }
+            let Ok(line) = line else { break };
+            if line.trim().is_empty() {
+                continue;
+            }
+            block.push(line);
+            // A block is the same three lines a poll returns: binary path,
+            // workspace list, pane list.
+            if block.len() == 3 {
+                streamed = true;
+                on_snapshot(parse_discovery_output(&block.join("\n"), space.mirror_all));
+                block.clear();
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    Ok(if streamed {
+        FeedOutcome::Streamed
+    } else {
+        FeedOutcome::Unavailable
+    })
+}
+
+fn spawn_local_streaming_script(script: &str) -> io::Result<std::process::Child> {
+    use std::io::Write;
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-s")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .env_remove(crate::session::SESSION_ENV_VAR)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_CLIENT_SOCKET_PATH")
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(script.as_bytes())?;
+        stdin.flush()?;
+    }
+    Ok(child)
+}
+
+/// Like [`discovery_script`] but execs the streaming `agent feed` instead of
+/// the one-shot list commands.
+fn feed_script(session: Option<&str>, local: bool) -> String {
+    let mut script = herdr_bin_script(local);
+    if let Some(session) = session {
+        script.push_str(&format!(
+            "{}={}\nexport {}\n",
+            crate::session::SESSION_ENV_VAR,
+            shell_quote(session),
+            crate::session::SESSION_ENV_VAR
+        ));
+    }
+    script.push_str("exec \"$herdr_bin\" agent feed\n");
+    script
+}
+
+/// Shell prologue that puts a herdr binary in `$herdr_bin`.
+///
+/// Locally it must be the running binary, since a mirror of a fork session
+/// polled through an older `herdr` on PATH would hit a protocol mismatch. Over
+/// ssh the remote resolves its own from PATH and common install paths.
+fn herdr_bin_script(local: bool) -> String {
+    if local {
+        let current = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.to_str().map(str::to_string))
+            .unwrap_or_else(|| "herdr".to_string());
+        return format!(
+            "set -e
+herdr_bin={}
+",
+            shell_quote(&current)
+        );
+    }
+    String::from(
         r#"set -e
 herdr_bin=$(command -v herdr 2>/dev/null || true)
 if [ -z "$herdr_bin" ]; then
@@ -209,7 +318,14 @@ if [ -z "$herdr_bin" ]; then
   exit 127
 fi
 "#,
-    );
+    )
+}
+
+/// Shell run on the remote host. It resolves a herdr binary the same way a
+/// non-login `ssh host herdr ...` would fail to, then prints the binary path
+/// followed by the two JSON list responses, one per line.
+fn discovery_script(session: Option<&str>, local: bool) -> String {
+    let mut script = herdr_bin_script(local);
     if let Some(session) = session {
         script.push_str(&format!(
             "{}={}\nexport {}\n",

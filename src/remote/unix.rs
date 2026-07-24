@@ -493,6 +493,25 @@ impl RemoteSsh {
         command
     }
 
+    /// Spawns `sh -s` over ssh with the script on stdin and stdout piped, for
+    /// streaming a long-lived remote command such as the agent feed.
+    pub(super) fn spawn_streaming_script(&self, script: &str) -> io::Result<std::process::Child> {
+        let mut child = self
+            .command()
+            .arg("/bin/sh -s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(script.as_bytes())?;
+            stdin.flush()?;
+            // Dropping stdin closes it so the remote shell runs the script and
+            // then execs the streaming command, whose output we read.
+        }
+        Ok(child)
+    }
+
     pub(super) fn sh_output(&self, script: &str) -> io::Result<Output> {
         let mut child = self
             .command()
