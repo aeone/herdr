@@ -27,6 +27,8 @@ pub(crate) struct AgentPanelEntry {
     pub primary_label: String,
     /// Host prefix when this agent's workspace mirrors a remote Herdr.
     pub remote_host: Option<String>,
+    /// Resolved colour for that prefix, if the host configured one.
+    pub remote_host_color: Option<ratatui::style::Color>,
     pub primary_tab_label: Option<String>,
     pub pane_label: Option<String>,
     pub terminal_title: Option<String>,
@@ -230,6 +232,11 @@ fn collect_agent_panel_entries_with_runtimes(
                 .remote_mirror
                 .as_ref()
                 .map(|mirror| mirror.host_label.clone());
+            let remote_host_color = ws
+                .remote_mirror
+                .as_ref()
+                .and_then(|mirror| mirror.host_color.as_deref())
+                .map(crate::config::parse_color);
             ws.pane_details(&app.terminals)
                 .into_iter()
                 .map(move |detail| {
@@ -244,6 +251,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         pane_id: detail.pane_id,
                         primary_label: workspace_label.clone(),
                         remote_host: remote_host.clone(),
+                        remote_host_color,
                         primary_tab_label: show_tab.then_some(detail.tab_label),
                         pane_label: detail.pane_label,
                         terminal_title: detail.terminal_title,
@@ -292,6 +300,11 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
                 .remote_mirror
                 .as_ref()
                 .map(|mirror| mirror.host_label.as_str()),
+            remote_host_color: ws
+                .remote_mirror
+                .as_ref()
+                .and_then(|mirror| mirror.host_color.as_deref())
+                .map(crate::config::parse_color),
             branch: ws.branch().as_deref(),
             state_text: state_label(state, seen),
             ahead_behind: ws.git_ahead_behind(),
@@ -1076,8 +1089,8 @@ fn resolved_token_spans(
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::TerminalTitle(text)
             | ResolvedTokenKind::Branch(text)
-            | ResolvedTokenKind::RemoteHost(text)
             | ResolvedTokenKind::Custom(text) => display_width(text),
+            ResolvedTokenKind::RemoteHost { text, .. } => display_width(text),
             _ => 0,
         })
         .collect::<Vec<_>>();
@@ -1215,8 +1228,8 @@ fn resolved_token_spans(
                     ));
                 }
             }
-            ResolvedTokenKind::RemoteHost(text) => {
-                let hue = remote_host_style.fg(remote_host_color(text, p));
+            ResolvedTokenKind::RemoteHost { text, color } => {
+                let hue = remote_host_style.fg(color.unwrap_or_else(|| remote_host_color(text, p)));
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     apply_token_style(hue, token.style),
@@ -1359,6 +1372,11 @@ fn render_workspace_list(
                     .remote_mirror
                     .as_ref()
                     .map(|mirror| mirror.host_label.as_str()),
+                remote_host_color: ws
+                    .remote_mirror
+                    .as_ref()
+                    .and_then(|mirror| mirror.host_color.as_deref())
+                    .map(crate::config::parse_color),
                 branch: ws.branch().as_deref(),
                 state_text: state_label(display_state, display_seen),
                 ahead_behind: ws.git_ahead_behind(),

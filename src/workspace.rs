@@ -180,6 +180,8 @@ pub struct RemoteMirror {
     pub target: String,
     /// Display prefix for the host, from `label` or the target.
     pub host_label: String,
+    /// Configured colour for the host prefix, if any (raw config string).
+    pub host_color: Option<String>,
     /// Stable per-host key, so repeated polls reuse the mirror.
     pub key: String,
 }

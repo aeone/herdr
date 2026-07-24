@@ -949,6 +949,7 @@ mod tests {
         state.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
             target: "workbox".into(),
             host_label: "workbox".into(),
+            host_color: None,
             key: key.into(),
         });
     }

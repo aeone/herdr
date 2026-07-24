@@ -907,6 +907,10 @@ pub struct RemoteSpaceConfig {
     /// spaces mirror their first pane. Default: false.
     #[serde(default)]
     pub mirror_all: bool,
+    /// Colour for this host's sidebar prefix. Accepts the same values as theme
+    /// colours (hex, named, rgb). Defaults to a stable colour per host name.
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 // Read by the remote-space reconcile loop, which is not wired up yet.

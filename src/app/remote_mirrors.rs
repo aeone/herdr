@@ -103,9 +103,6 @@ pub(crate) fn plan_remote_mirrors(
     plan
 }
 
-/// Source name Herdr records for mirror state reports.
-const REMOTE_MIRROR_STATE_SOURCE: &str = "herdr:remote-mirror";
-
 /// Maps a remote's reported status onto local state plus its seen flag.
 ///
 /// `done` is the remote's way of saying "idle, with output you have not looked
@@ -132,6 +129,7 @@ pub(crate) fn remote_mirror_record(space: &RemoteSpaceConfig, key: &str) -> Remo
     RemoteMirror {
         target: space.target.clone(),
         host_label: space.display_label().to_string(),
+        host_color: space.color.clone(),
         key: key.to_string(),
     }
 }
@@ -275,15 +273,6 @@ impl App {
         if plan.is_empty() {
             return;
         }
-        tracing::info!(
-            target = %space.target,
-            panes = snapshot.panes.len(),
-            creates = plan.iter().filter(|a| matches!(a, MirrorAction::Create { .. })).count(),
-            closes = plan.iter().filter(|a| matches!(a, MirrorAction::Close { .. })).count(),
-            renames = plan.iter().filter(|a| matches!(a, MirrorAction::Rename { .. })).count(),
-            mirrors = self.state.workspaces.iter().filter(|w| w.remote_mirror.is_some()).count(),
-            "reconciling remote mirrors"
-        );
 
         let mut closed = 0usize;
         for action in plan {
@@ -354,7 +343,7 @@ impl App {
             let (state, seen) = remote_state_and_seen(pane.status);
             self.handle_internal_event(crate::events::AppEvent::HookStateReported {
                 pane_id,
-                source: REMOTE_MIRROR_STATE_SOURCE.to_string(),
+                source: crate::detect::REMOTE_MIRROR_HOOK_SOURCE.to_string(),
                 agent_label,
                 state,
                 message: None,
@@ -493,6 +482,7 @@ mod tests {
             label: None,
             poll_seconds: 30,
             mirror_all: false,
+            color: None,
         }
     }
 

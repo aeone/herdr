@@ -406,6 +406,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # label = "box"            # optional name prefix; defaults to the ssh target
 # poll_seconds = 30        # how often to re-read the host's agent panes
 # mirror_all = false       # mirror every space, not only those hosting an agent
+# color = "blue"           # colour for this host's sidebar prefix (theme-colour value)
 
 [experimental]
 # Allow launching herdr from inside a herdr-managed pane.

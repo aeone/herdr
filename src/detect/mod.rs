@@ -280,7 +280,18 @@ pub fn should_skip_state_update(agent: Option<Agent>, screen_content: &str) -> b
     agent.is_some_and(|agent| manifest::should_skip_state_update(agent, screen_content))
 }
 
+/// Source name used for status a remote Herdr reports about a mirrored pane.
+///
+/// Registered as a full-lifecycle authority below so the mirror trusts the
+/// remote's reported state and ignores screen-detecting the ssh session, which
+/// cannot read the remote's OSC title and misreads the streamed screen.
+pub(crate) const REMOTE_MIRROR_HOOK_SOURCE: &str = "herdr:remote-mirror";
+
 pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> bool {
+    // The mirror source is authoritative for whatever agent the remote named.
+    if source == REMOTE_MIRROR_HOOK_SOURCE {
+        return !agent_label.is_empty();
+    }
     matches!(
         (source, agent_label),
         ("herdr:pi", "pi")
@@ -611,6 +622,31 @@ fn is_generic_runtime_or_shell(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_mirror_source_is_full_lifecycle_for_any_named_agent() {
+        // Mirrors report the remote's authoritative state; this is what makes
+        // the mirror ignore screen-detecting the ssh session, which cannot see
+        // the remote's OSC title.
+        assert!(full_lifecycle_hook_authority(
+            REMOTE_MIRROR_HOOK_SOURCE,
+            "claude"
+        ));
+        assert!(full_lifecycle_hook_authority(
+            REMOTE_MIRROR_HOOK_SOURCE,
+            "codex"
+        ));
+        // An empty label is not an agent, so it does not get authority.
+        assert!(!full_lifecycle_hook_authority(
+            REMOTE_MIRROR_HOOK_SOURCE,
+            ""
+        ));
+        // Unrelated sources still need their exact (source, agent) pair.
+        assert!(!full_lifecycle_hook_authority(
+            "herdr:remote-mirror-x",
+            "claude"
+        ));
+    }
 
     fn foreground_process(
         pid: u32,

@@ -342,6 +342,7 @@ mod tests {
             label: None,
             poll_seconds: 30,
             mirror_all: false,
+            color: None,
         }
     }
 

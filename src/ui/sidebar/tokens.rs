@@ -18,10 +18,17 @@ pub(super) enum ResolvedTokenKind {
     Tab(String),
     Pane(String),
     Agent(String),
-    RemoteHost(String),
+    RemoteHost {
+        text: String,
+        /// Configured host colour, resolved; None falls back to a hashed hue.
+        color: Option<ratatui::style::Color>,
+    },
     TerminalTitle(String),
     Branch(String),
-    GitStatus { ahead: usize, behind: usize },
+    GitStatus {
+        ahead: usize,
+        behind: usize,
+    },
     Custom(String),
 }
 
@@ -45,48 +52,53 @@ pub(super) fn agent_rows(
         .rows_for_agent(entry.agent)
         .iter()
         .filter_map(|row| {
-            let resolved = row
-                .iter()
-                .filter_map(|configured| {
-                    let (token, style) = configured.parts();
-                    let kind = match token {
-                        AgentSidebarToken::StateIcon => Some(ResolvedTokenKind::StateIcon),
-                        AgentSidebarToken::StateText => {
-                            Some(ResolvedTokenKind::StateText(state_text.to_string()))
-                        }
-                        AgentSidebarToken::Workspace => {
-                            Some(ResolvedTokenKind::Workspace(entry.primary_label.clone()))
-                        }
-                        AgentSidebarToken::Tab => {
-                            entry.primary_tab_label.clone().map(ResolvedTokenKind::Tab)
-                        }
-                        AgentSidebarToken::Pane => {
-                            entry.pane_label.clone().map(ResolvedTokenKind::Pane)
-                        }
-                        AgentSidebarToken::Agent => {
-                            entry.agent_label.clone().map(ResolvedTokenKind::Agent)
-                        }
-                        AgentSidebarToken::RemoteHost => {
-                            entry.remote_host.clone().map(ResolvedTokenKind::RemoteHost)
-                        }
-                        AgentSidebarToken::TerminalTitle => entry
-                            .terminal_title
-                            .clone()
-                            .map(ResolvedTokenKind::TerminalTitle),
-                        AgentSidebarToken::TerminalTitleStripped => entry
-                            .terminal_title_stripped
-                            .clone()
-                            .map(ResolvedTokenKind::TerminalTitle),
-                        AgentSidebarToken::Custom(name) => entry
-                            .tokens
-                            .get(name)
-                            .cloned()
-                            .map(ResolvedTokenKind::Custom),
-                        AgentSidebarToken::Styled { .. } => None,
-                    }?;
-                    Some(ResolvedToken::new(kind, style))
-                })
-                .collect::<Vec<_>>();
+            let resolved =
+                row.iter()
+                    .filter_map(|configured| {
+                        let (token, style) = configured.parts();
+                        let kind = match token {
+                            AgentSidebarToken::StateIcon => Some(ResolvedTokenKind::StateIcon),
+                            AgentSidebarToken::StateText => {
+                                Some(ResolvedTokenKind::StateText(state_text.to_string()))
+                            }
+                            AgentSidebarToken::Workspace => {
+                                Some(ResolvedTokenKind::Workspace(entry.primary_label.clone()))
+                            }
+                            AgentSidebarToken::Tab => {
+                                entry.primary_tab_label.clone().map(ResolvedTokenKind::Tab)
+                            }
+                            AgentSidebarToken::Pane => {
+                                entry.pane_label.clone().map(ResolvedTokenKind::Pane)
+                            }
+                            AgentSidebarToken::Agent => {
+                                entry.agent_label.clone().map(ResolvedTokenKind::Agent)
+                            }
+                            AgentSidebarToken::RemoteHost => {
+                                entry.remote_host.clone().map(|text| {
+                                    ResolvedTokenKind::RemoteHost {
+                                        text,
+                                        color: entry.remote_host_color,
+                                    }
+                                })
+                            }
+                            AgentSidebarToken::TerminalTitle => entry
+                                .terminal_title
+                                .clone()
+                                .map(ResolvedTokenKind::TerminalTitle),
+                            AgentSidebarToken::TerminalTitleStripped => entry
+                                .terminal_title_stripped
+                                .clone()
+                                .map(ResolvedTokenKind::TerminalTitle),
+                            AgentSidebarToken::Custom(name) => entry
+                                .tokens
+                                .get(name)
+                                .cloned()
+                                .map(ResolvedTokenKind::Custom),
+                            AgentSidebarToken::Styled { .. } => None,
+                        }?;
+                        Some(ResolvedToken::new(kind, style))
+                    })
+                    .collect::<Vec<_>>();
             (!resolved.is_empty()).then_some(resolved)
         })
         .collect()
@@ -96,6 +108,8 @@ pub(super) struct SpaceTokenContext<'a> {
     pub workspace: &'a str,
     /// Host prefix when this space mirrors a remote Herdr.
     pub remote_host: Option<&'a str>,
+    /// Resolved colour for that prefix, if the host configured one.
+    pub remote_host_color: Option<ratatui::style::Color>,
     pub branch: Option<&'a str>,
     pub state_text: &'a str,
     pub ahead_behind: Option<(usize, usize)>,
@@ -123,9 +137,14 @@ pub(super) fn space_rows(
                         SpaceSidebarToken::Workspace => {
                             Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
                         }
-                        SpaceSidebarToken::RemoteHost => context
-                            .remote_host
-                            .map(|host| ResolvedTokenKind::RemoteHost(host.to_string())),
+                        SpaceSidebarToken::RemoteHost => {
+                            context
+                                .remote_host
+                                .map(|host| ResolvedTokenKind::RemoteHost {
+                                    text: host.to_string(),
+                                    color: context.remote_host_color,
+                                })
+                        }
                         SpaceSidebarToken::Branch if !context.suppress_git_details => context
                             .branch
                             .map(|branch| ResolvedTokenKind::Branch(branch.to_string())),
@@ -155,6 +174,10 @@ pub(super) fn separator(previous: &ResolvedToken, current: &ResolvedToken) -> &'
         || matches!(current.kind, ResolvedTokenKind::GitStatus { .. })
     {
         " "
+    } else if matches!(previous.kind, ResolvedTokenKind::RemoteHost { .. }) {
+        // The host reads as a tight prefix on the name that follows it, so the
+        // dot hugs both sides: "sera·lifestream", not "sera · lifestream".
+        "·"
     } else {
         " · "
     }
@@ -169,6 +192,7 @@ mod tests {
     fn entry() -> AgentPanelEntry {
         AgentPanelEntry {
             remote_host: None,
+            remote_host_color: None,
             ws_idx: 0,
             tab_idx: 0,
             pane_id: crate::layout::PaneId::from_raw(1),
@@ -305,6 +329,7 @@ mod tests {
                 &config,
                 SpaceTokenContext {
                     remote_host: None,
+                    remote_host_color: None,
                     workspace: "feature",
                     branch: Some("worktree/feature"),
                     state_text: "idle",
@@ -333,6 +358,7 @@ mod tests {
                 &config,
                 SpaceTokenContext {
                     remote_host: None,
+                    remote_host_color: None,
                     workspace: "repo",
                     branch: None,
                     state_text: "idle",
@@ -344,6 +370,58 @@ mod tests {
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Custom(
                 "2 changes".into()
             ))]]
+        );
+    }
+    #[test]
+    fn host_prefix_hugs_the_name_with_a_tight_dot() {
+        let host = ResolvedToken::unstyled(ResolvedTokenKind::RemoteHost {
+            text: "sera".into(),
+            color: None,
+        });
+        let name = ResolvedToken::unstyled(ResolvedTokenKind::Workspace("lifestream".into()));
+
+        assert_eq!(separator(&host, &name), "\u{b7}");
+    }
+
+    #[test]
+    fn ordinary_tokens_keep_spaced_dots() {
+        let branch = ResolvedToken::unstyled(ResolvedTokenKind::Branch("main".into()));
+        let workspace = ResolvedToken::unstyled(ResolvedTokenKind::Workspace("repo".into()));
+
+        assert_eq!(separator(&workspace, &branch), " \u{b7} ");
+    }
+
+    #[test]
+    fn a_configured_host_colour_rides_on_the_resolved_token() {
+        let config = SpacesSidebarConfig {
+            rows: vec![vec![
+                SpaceSidebarToken::RemoteHost,
+                SpaceSidebarToken::Workspace,
+            ]],
+            ..SpacesSidebarConfig::default()
+        };
+        let tokens = std::collections::HashMap::new();
+        let rows = space_rows(
+            &config,
+            SpaceTokenContext {
+                workspace: "lifestream",
+                remote_host: Some("sera"),
+                remote_host_color: Some(ratatui::style::Color::Blue),
+                branch: None,
+                state_text: "idle",
+                ahead_behind: None,
+                tokens: &tokens,
+                suppress_git_details: false,
+            },
+        );
+
+        let host = &rows[0][0];
+        assert_eq!(
+            host.kind,
+            ResolvedTokenKind::RemoteHost {
+                text: "sera".into(),
+                color: Some(ratatui::style::Color::Blue),
+            }
         );
     }
 }
