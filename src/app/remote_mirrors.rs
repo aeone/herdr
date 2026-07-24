@@ -103,6 +103,18 @@ pub(crate) fn plan_remote_mirrors(
     plan
 }
 
+/// Builds the mirror record a created workspace carries.
+///
+/// Production and tests share this so a mirror's stored identity can never
+/// drift from the identity `plan_remote_mirrors` looks it up by.
+pub(crate) fn remote_mirror_record(space: &RemoteSpaceConfig, key: &str) -> RemoteMirror {
+    RemoteMirror {
+        target: space.target.clone(),
+        host_label: space.display_label().to_string(),
+        key: key.to_string(),
+    }
+}
+
 /// Mirrors whose host is no longer configured, in descending index order.
 ///
 /// A host removed from config is never polled again, so reconcile never sees
@@ -242,6 +254,15 @@ impl App {
         if plan.is_empty() {
             return;
         }
+        tracing::info!(
+            target = %space.target,
+            panes = snapshot.panes.len(),
+            creates = plan.iter().filter(|a| matches!(a, MirrorAction::Create { .. })).count(),
+            closes = plan.iter().filter(|a| matches!(a, MirrorAction::Close { .. })).count(),
+            renames = plan.iter().filter(|a| matches!(a, MirrorAction::Rename { .. })).count(),
+            mirrors = self.state.workspaces.iter().filter(|w| w.remote_mirror.is_some()).count(),
+            "reconciling remote mirrors"
+        );
 
         let mut closed = 0usize;
         for action in plan {
@@ -261,14 +282,10 @@ impl App {
                     argv,
                     agent,
                 } => {
-                    if let Err(err) = self.create_remote_mirror(
-                        &space.target,
-                        space.display_label(),
-                        &key,
-                        &label,
-                        &argv,
-                        agent.as_deref(),
-                    ) {
+                    let mirror = remote_mirror_record(space, &key);
+                    if let Err(err) =
+                        self.create_remote_mirror(mirror, &label, &argv, agent.as_deref())
+                    {
                         tracing::warn!(
                             target = %space.target,
                             %err,
@@ -296,16 +313,33 @@ impl App {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // Closing goes through the selected workspace, so the user's own
+        // selection has to be restored afterwards by identity: a mirror
+        // disappearing must never move their cursor to another space.
+        let selected_id = self
+            .state
+            .workspaces
+            .get(self.state.selected)
+            .map(|workspace| workspace.id.clone())
+            .filter(|_| self.state.selected != ws_idx);
         self.state.selected = ws_idx;
         self.state.close_selected_workspace();
+        if let Some(selected_id) = selected_id {
+            if let Some(restored) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == selected_id)
+            {
+                self.state.selected = restored;
+            }
+        }
         self.state.remove_plugin_pane_records(pane_ids);
     }
 
     fn create_remote_mirror(
         &mut self,
-        target: &str,
-        key: &str,
-        host_label: &str,
+        mirror: RemoteMirror,
         label: &str,
         argv: &[String],
         agent: Option<&str>,
@@ -341,11 +375,7 @@ impl App {
             extra_env,
         )?;
         workspace.custom_name = Some(label.to_string());
-        workspace.remote_mirror = Some(RemoteMirror {
-            target: target.to_string(),
-            host_label: host_label.to_string(),
-            key: key.to_string(),
-        });
+        workspace.remote_mirror = Some(mirror);
 
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
@@ -391,16 +421,77 @@ mod tests {
         Workspace::test_new(name)
     }
 
-    /// A workspace standing in for an already-created mirror.
+    /// A workspace standing in for an already-created mirror. Uses the same
+    /// record constructor production does, so a mismatch between how a mirror
+    /// is stored and how it is looked up cannot hide behind the helper.
     fn mirror(target: &str, key: &str, label: &str) -> Workspace {
         let mut workspace = Workspace::test_new(label);
         workspace.custom_name = Some(label.to_string());
-        workspace.remote_mirror = Some(RemoteMirror {
-            target: target.into(),
-            host_label: target.into(),
-            key: key.into(),
-        });
+        workspace.remote_mirror = Some(remote_mirror_record(&space(target), key));
         workspace
+    }
+
+    /// Applies a plan's creates the way `reconcile_remote_mirrors` does, minus
+    /// the PTY, so a plan can be fed back through the planner.
+    fn apply_creates(
+        workspaces: &mut Vec<Workspace>,
+        space: &RemoteSpaceConfig,
+        plan: &[MirrorAction],
+    ) {
+        for action in plan {
+            if let MirrorAction::Create { key, label, .. } = action {
+                let mut workspace = Workspace::test_new(label);
+                workspace.custom_name = Some(label.clone());
+                workspace.remote_mirror = Some(remote_mirror_record(space, key));
+                workspaces.push(workspace);
+            }
+        }
+    }
+
+    #[test]
+    fn a_second_poll_after_creating_mirrors_is_a_no_op() {
+        // Regression: the mirror record once stored the host label in the key
+        // field, so no mirror ever matched and every poll closed and recreated
+        // the whole set, churning panes and stealing the user's selection.
+        let space = space("workbox");
+        let snapshot = snapshot(vec![
+            agent_pane("w1", "api", "term-1"),
+            agent_pane("w2", "web", "term-2"),
+        ]);
+        let mut workspaces = vec![local("local")];
+
+        let first = plan_remote_mirrors(&workspaces, &space, &snapshot);
+        apply_creates(&mut workspaces, &space, &first);
+        let second = plan_remote_mirrors(&workspaces, &space, &snapshot);
+
+        assert_eq!(first.len(), 2);
+        assert_eq!(second, Vec::new(), "a settled mirror set must not churn");
+    }
+
+    #[test]
+    fn a_created_mirror_stores_the_key_the_planner_looks_it_up_by() {
+        let space = space("workbox");
+        let pane = agent_pane("w1", "api", "term-1");
+
+        let record = remote_mirror_record(&space, &pane.mirror_key(&space.target));
+
+        assert_eq!(record.key, pane.mirror_key("workbox"));
+        assert_eq!(record.target, "workbox");
+        assert_eq!(record.host_label, "workbox");
+    }
+
+    #[test]
+    fn a_configured_label_does_not_leak_into_the_mirror_key() {
+        let mut space = space("workbox.example.com");
+        space.label = Some("box".into());
+        let pane = agent_pane("w1", "api", "term-1");
+        let key = pane.mirror_key(&space.target);
+
+        let record = remote_mirror_record(&space, &key);
+
+        assert_eq!(record.host_label, "box");
+        assert_eq!(record.key, key);
+        assert_ne!(record.key, record.host_label);
     }
 
     fn key_for(target: &str, workspace_id: &str, terminal_id: &str) -> String {

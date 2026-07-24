@@ -1490,6 +1490,10 @@ pub struct AppState {
     pub sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig,
     /// Ratio of sidebar height allocated to the workspaces section.
     pub sidebar_section_split: f32,
+    /// Size sections from content instead of the stored divider position.
+    pub sidebar_section_split_auto: bool,
+    /// Content-derived ratio for this frame, recomputed by `compute_view`.
+    pub sidebar_auto_split_ratio: Option<f32>,
     pub agent_panel_sort: AgentPanelSort,
     /// Transient session-wide projection override for the built-in Agents view.
     pub agent_view_override: Option<crate::api::schema::AgentViewSetParams>,
@@ -1671,6 +1675,17 @@ impl AppState {
 
     pub fn is_prefix_key(&self, key: crate::input::TerminalKey) -> bool {
         crate::config::terminal_key_matches_combo(key, (self.prefix_code, self.prefix_mods))
+    }
+
+    /// Divider position to render with: the content-derived ratio when
+    /// `sidebar_section_split_auto` is on, otherwise the stored one.
+    pub fn sidebar_split_ratio(&self) -> f32 {
+        if self.sidebar_section_split_auto {
+            self.sidebar_auto_split_ratio
+                .unwrap_or(self.sidebar_section_split)
+        } else {
+            self.sidebar_section_split
+        }
     }
 
     pub fn estimate_pane_size(&self) -> (u16, u16) {
@@ -1869,6 +1884,8 @@ impl AppState {
             sidebar_collapsed: false,
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
+            sidebar_section_split_auto: false,
+            sidebar_auto_split_ratio: None,
             agent_panel_sort: AgentPanelSort::Spaces,
             agent_view_override: None,
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),

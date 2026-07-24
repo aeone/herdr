@@ -632,6 +632,8 @@ impl App {
             sidebar_collapsed: config.ui.sidebar_start_collapsed,
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
+            sidebar_section_split_auto: config.ui.sidebar_section_split_auto,
+            sidebar_auto_split_ratio: None,
             agent_panel_sort,
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
@@ -1466,6 +1468,7 @@ impl App {
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
+                self.state.sidebar_section_split_auto = config.ui.sidebar_section_split_auto;
                 #[cfg(unix)]
                 {
                     self.remote_spaces = config.remote.spaces.clone();

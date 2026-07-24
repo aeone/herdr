@@ -58,6 +58,81 @@ fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
     (ws_h, detail_h)
 }
 
+/// Total rows the Space list would use if nothing constrained it.
+fn workspace_list_content_rows(app: &AppState) -> u16 {
+    let entries = workspace_list_entries(app);
+    entries
+        .iter()
+        .enumerate()
+        .map(|(entry_idx, entry)| {
+            let WorkspaceListEntry::Workspace { ws_idx, indented } = entry;
+            let height = app
+                .workspaces
+                .get(*ws_idx)
+                .map(|ws| workspace_row_height(app, ws, *indented))
+                .unwrap_or(1);
+            height.saturating_add(workspace_entry_gap(app, &entries, entry_idx, *indented))
+        })
+        .fold(0u16, |total, rows| total.saturating_add(rows))
+}
+
+/// Total rows the Agent panel would use if nothing constrained it.
+fn agent_panel_content_rows(app: &AppState) -> u16 {
+    let entries = agent_panel_entries(app);
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let height = resolved_agent_rows(app, entry)
+                .len()
+                .max(1)
+                .min(u16::MAX as usize) as u16;
+            height.saturating_add(agent_entry_gap(app, index, entries.len()))
+        })
+        .fold(0u16, |total, rows| total.saturating_add(rows))
+}
+
+/// Divider ratio that gives each section as much as its content needs.
+///
+/// When both fit there is nothing to solve and the sections keep their natural
+/// sizes. When one overflows, the section that fits is given exactly what it
+/// needs and the overflowing one takes the rest, which is the case that
+/// motivates this: a short Space list should not hold back a long Agent list.
+pub(crate) fn content_split_ratio(app: &AppState, area: Rect) -> Option<f32> {
+    let (ws_area, _) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let total = ws_area.height.saturating_add(
+        expanded_sidebar_sections(area, app.sidebar_section_split)
+            .1
+            .height,
+    );
+    if total < 6 {
+        return None;
+    }
+
+    // Each section spends rows on its own header and footer chrome, so compare
+    // what the bodies actually need.
+    let spaces_needed = workspace_list_content_rows(app)
+        .saturating_add(WORKSPACE_SECTION_HEADER_ROWS)
+        .saturating_add(1);
+    let agents_needed = agent_panel_content_rows(app).saturating_add(AGENT_PANEL_HEADER_ROWS);
+
+    let min = 3u16;
+    let max = total.saturating_sub(min);
+    if max <= min {
+        return None;
+    }
+
+    let spaces = if spaces_needed.saturating_add(agents_needed) <= total {
+        // Everything fits; keep the Space list at its natural size and let the
+        // Agent panel keep the slack, so new agents have room to appear.
+        spaces_needed
+    } else {
+        spaces_needed.min(total.saturating_sub(agents_needed.min(max)))
+    };
+    let spaces = spaces.clamp(min, max);
+    Some(f32::from(spaces) / f32::from(total))
+}
+
 pub(crate) fn expanded_sidebar_sections(area: Rect, split_ratio: f32) -> (Rect, Rect) {
     let content = Rect::new(area.x, area.y, area.width.saturating_sub(1), area.height);
     if content.width == 0 || content.height == 0 {
@@ -1068,10 +1143,10 @@ fn resolved_token_spans(
             break;
         }
     }
-    // Mirrored spaces and agents carry a host prefix. It gets its own accent so
-    // the machine reads as distinct from the workspace name beside it; a
-    // per-token `fg` in config still overrides this.
-    let remote_host_style = Style::default().fg(p.peach);
+    // Mirrored spaces and agents carry a host prefix. It is deliberately quiet:
+    // it labels where a row came from rather than competing with the name
+    // beside it. A per-token `fg` in config overrides this.
+    let remote_host_style = Style::default().fg(p.overlay1).add_modifier(Modifier::DIM);
     let mut spans = Vec::new();
     for (position, index) in visible_indices.iter().copied().enumerate() {
         let token = &resolved[index];
@@ -2360,6 +2435,64 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .map(|WorkspaceListEntry::Workspace { ws_idx, indented }| (ws_idx, indented))
             .collect()
+    }
+
+    #[test]
+    fn auto_split_gives_a_long_agent_list_the_room_a_short_space_list_leaves() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("only")];
+        app.ensure_test_terminals();
+        attach_agent(&mut app, 0, Agent::Claude);
+        for _ in 0..12 {
+            app.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+        }
+        app.ensure_test_terminals();
+        let area = Rect::new(0, 0, 30, 40);
+
+        let ratio = content_split_ratio(&app, area).expect("a ratio for a tall sidebar");
+
+        // One space against many agents: the divider should sit well above the
+        // middle so the Agent panel gets the slack.
+        assert!(
+            ratio < 0.5,
+            "expected agents to take the slack, got {ratio}"
+        );
+    }
+
+    #[test]
+    fn auto_split_keeps_both_sections_usable_when_content_is_lopsided() {
+        let mut app = AppState::test_new();
+        app.workspaces = (0..20)
+            .map(|i| Workspace::test_new(&format!("ws{i}")))
+            .collect();
+        app.ensure_test_terminals();
+        let area = Rect::new(0, 0, 30, 24);
+
+        let ratio = content_split_ratio(&app, area).expect("a ratio for a tall sidebar");
+
+        // Even with no agents at all, the Agent panel keeps its minimum so its
+        // header never vanishes.
+        assert!(ratio <= 0.9, "space list must not take the whole sidebar");
+        assert!(ratio >= 0.1, "agent panel must not take the whole sidebar");
+    }
+
+    #[test]
+    fn auto_split_is_ignored_when_the_sidebar_is_too_short_to_divide() {
+        let app = AppState::test_new();
+
+        assert_eq!(content_split_ratio(&app, Rect::new(0, 0, 30, 4)), None);
+    }
+
+    #[test]
+    fn split_ratio_follows_the_stored_divider_until_auto_is_enabled() {
+        let mut app = AppState::test_new();
+        app.sidebar_section_split = 0.25;
+        app.sidebar_auto_split_ratio = Some(0.75);
+
+        assert_eq!(app.sidebar_split_ratio(), 0.25);
+
+        app.sidebar_section_split_auto = true;
+        assert_eq!(app.sidebar_split_ratio(), 0.75);
     }
 
     #[test]

@@ -782,6 +782,9 @@ pub struct UiConfig {
     pub sidebar_max_width: u16,
     /// Start with the sidebar collapsed. Default: false.
     pub sidebar_start_collapsed: bool,
+    /// Size the Space and Agent sections from how much content each has,
+    /// instead of the fixed divider position. Default: false.
+    pub sidebar_section_split_auto: bool,
     /// Collapsed sidebar presentation. Default: compact.
     pub sidebar_collapsed_mode: SidebarCollapsedModeConfig,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
@@ -1042,6 +1045,7 @@ impl Default for UiConfig {
             sidebar_min_width: 18,
             sidebar_max_width: 36,
             sidebar_start_collapsed: false,
+            sidebar_section_split_auto: false,
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,

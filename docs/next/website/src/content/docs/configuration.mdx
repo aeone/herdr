@@ -313,7 +313,7 @@ rows = [
 
 `fg` accepts strict `#RGB` or `#RRGGBB`. `bold` and `dim` accept booleans. Omitted fields preserve the token's contextual style; explicit `false` removes that modifier. Styling applies to one occurrence, so the same token may look different in another row or agent override. A foreground override replaces all semantic foregrounds inside that occurrence: for example, styled `git_status` ahead and behind counts use one color instead of their default green and red. Token styles never change separators or row backgrounds.
 
-`remote_host` renders in its own accent colour so a mirrored machine reads as distinct from the workspace name beside it. Give it an inline `fg` to pick your own:
+`remote_host` renders dimmed by default so it labels where a row came from without competing with the name beside it. Give it an inline `fg` to pick your own:
 
 ```toml
 [ui.sidebar.spaces]
@@ -321,6 +321,17 @@ rows = [["state_icon", { token = "remote_host", fg = "#f38ba8", bold = true }, "
 ```
 
 `row_gap` controls the blank terminal rows between entries, independently for the Agent and Space panels. It defaults to `0`, which packs entries together; set it to `1` to restore the previous spacing. It does not add spacing between the content lines declared in `rows`. Consecutive indented worktree children remain packed as one Space group.
+
+### Sizing the Space and Agent sections
+
+The sidebar divider sits where you drag it. Set `sidebar_section_split_auto` to size the two sections from their content instead:
+
+```toml
+[ui]
+sidebar_section_split_auto = true
+```
+
+When both lists fit, nothing changes. When one overflows, the section that fits is given exactly what it needs and the overflowing one takes the rest, so a short Space list does not hold back a long Agent list. Each section keeps a minimum height so neither header disappears. The dragged position is remembered and used again when this is `false`.
 
 ### Hiding spaces the Agent panel already lists
 

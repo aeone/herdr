@@ -10,7 +10,7 @@ impl AppState {
         if self.sidebar_collapsed || sidebar.width <= 1 || sidebar.height == 0 {
             return Rect::default();
         }
-        crate::ui::workspace_list_rect(sidebar, self.sidebar_section_split)
+        crate::ui::workspace_list_rect(sidebar, self.sidebar_split_ratio())
     }
 
     pub(super) fn agent_panel_rect(&self) -> Rect {
@@ -19,7 +19,7 @@ impl AppState {
             return Rect::default();
         }
         let (_, detail_area) =
-            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_section_split);
+            crate::ui::expanded_sidebar_sections(sidebar, self.sidebar_split_ratio());
         detail_area
     }
 

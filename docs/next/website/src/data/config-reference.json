@@ -566,6 +566,12 @@
           "description": "Maximum sidebar width (columns) when expanded."
         },
         {
+          "key": "ui.sidebar_section_split_auto",
+          "type": "boolean",
+          "default": "false",
+          "description": "Size the Space and Agent sidebar sections from how much content each has instead of the fixed divider position, so a short list does not hold back a long one."
+        },
+        {
           "key": "ui.sidebar_start_collapsed",
           "type": "boolean",
           "default": "false",

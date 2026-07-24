@@ -240,8 +240,14 @@ fn compute_view_internal(
         .unwrap_or((Rect::default(), main_area));
 
     if !app.sidebar_collapsed {
+        // Recomputed before any layout is derived from it, so the whole frame
+        // agrees on where the divider sits.
+        app.sidebar_auto_split_ratio = app
+            .sidebar_section_split_auto
+            .then(|| sidebar::content_split_ratio(app, sidebar_area))
+            .flatten();
         app.workspace_scroll = normalized_workspace_scroll(app, sidebar_area, app.workspace_scroll);
-        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_section_split);
+        let (_, detail_area) = expanded_sidebar_sections(sidebar_area, app.sidebar_split_ratio());
         let max_agent_scroll = agent_panel_scroll_metrics(app, detail_area).max_offset_from_bottom;
         app.agent_panel_scroll = app.agent_panel_scroll.min(max_agent_scroll);
     } else {

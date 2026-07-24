@@ -309,6 +309,11 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Show detected/reported agent labels in split pane borders when no manual pane name is set.
 # show_agent_labels_on_pane_borders = false
 
+# Size the Space and Agent sidebar sections from how much content each has,
+# instead of the divider position, so a short list does not hold back a long one.
+# The divider can still be dragged; it is used again when this is false.
+# sidebar_section_split_auto = false
+
 # Hide the tab row when a workspace has exactly one tab.
 # New tabs can still be created with the configured keybinding.
 # hide_tab_bar_when_single_tab = false
