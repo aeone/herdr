@@ -492,6 +492,7 @@ mod tests {
             session: None,
             label: None,
             poll_seconds: 30,
+            mirror_all: false,
         }
     }
 

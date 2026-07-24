@@ -112,6 +112,7 @@ target = "workbox"       # ssh target, same syntax as --remote
 session = "agents"       # optional remote session; omit for the default
 label = "box"            # optional name prefix; defaults to the ssh target
 poll_seconds = 30        # how often to re-read the host's agent panes
+mirror_all = false       # mirror every space, not only those with an agent
 ```
 
 Herdr polls each configured host over SSH, asks the remote Herdr for its panes, and adds one local space per remote *agent* pane. Selecting one attaches to that remote pane, so the agent is fully interactive.
@@ -133,7 +134,7 @@ Repeat the block for as many hosts as you want. Each host is polled independentl
 
 Notes on what gets mirrored and when:
 
-- Only panes the remote recognizes as agents are mirrored, so plain shells on the host stay out of your sidebar.
+- By default only panes the remote recognizes as agents are mirrored, so plain shells on the host stay out of your sidebar. Set `mirror_all = true` on a host to mirror every space instead; agent-less spaces are mirrored by their first pane. This is what to use when you want the host's whole sidebar, not just its agents, but it opens one SSH attach per mirrored space.
 - Mirrored spaces are derived state. They are never written to `session.json`, and they reappear by polling after a restart rather than being restored.
 - Mirrors appear without stealing focus, and are removed when their remote pane goes away.
 - When a poll fails, existing mirrors are left in place and the host is retried on the next interval, so a brief network drop does not clear and repopulate your sidebar.

@@ -903,6 +903,10 @@ pub struct RemoteSpaceConfig {
     /// Seconds between remote pane polls. Default: 30.
     #[serde(default = "default_remote_space_poll_seconds")]
     pub poll_seconds: u64,
+    /// Mirror every remote space, not only those hosting an agent. Agent-less
+    /// spaces mirror their first pane. Default: false.
+    #[serde(default)]
+    pub mirror_all: bool,
 }
 
 // Read by the remote-space reconcile loop, which is not wired up yet.

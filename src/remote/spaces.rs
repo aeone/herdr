@@ -163,7 +163,7 @@ pub(crate) fn discover(
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    parse_discovery_output(&String::from_utf8_lossy(&output.stdout))
+    parse_discovery_output(&String::from_utf8_lossy(&output.stdout), space.mirror_all)
 }
 
 /// Runs the same discovery script through a local shell, for `target = "local"`.
@@ -229,7 +229,7 @@ fi
 
 /// Parses the three-line discovery output: binary path, workspace list JSON,
 /// pane list JSON.
-fn parse_discovery_output(stdout: &str) -> io::Result<RemoteSpaceSnapshot> {
+fn parse_discovery_output(stdout: &str, mirror_all: bool) -> io::Result<RemoteSpaceSnapshot> {
     let mut lines = stdout.lines().filter(|line| !line.trim().is_empty());
     let remote_herdr = lines
         .next()
@@ -244,7 +244,7 @@ fn parse_discovery_output(stdout: &str) -> io::Result<RemoteSpaceSnapshot> {
         .ok_or_else(|| io::Error::other("remote space discovery returned no pane list"))?;
 
     let workspace_labels = parse_workspace_labels(workspaces_line)?;
-    let panes = parse_agent_panes(panes_line, &workspace_labels)?;
+    let panes = parse_mirror_panes(panes_line, &workspace_labels, mirror_all)?;
     Ok(RemoteSpaceSnapshot {
         remote_herdr,
         panes,
@@ -276,20 +276,41 @@ fn parse_workspace_labels(line: &str) -> io::Result<std::collections::HashMap<St
         .collect())
 }
 
-fn parse_agent_panes(
+/// Panes to mirror from a pane list.
+///
+/// Agent panes are always mirrored. With `mirror_all`, every other space is
+/// mirrored too by its first pane, so agent-less shells show up as well; the
+/// default keeps the sidebar to just the agents.
+fn parse_mirror_panes(
     line: &str,
     workspace_labels: &std::collections::HashMap<String, String>,
+    mirror_all: bool,
 ) -> io::Result<Vec<RemoteAgentPane>> {
     let ResponseResult::PaneList { panes } = parse_result(line, "pane list")? else {
         return Err(io::Error::other(
             "remote pane list had an unexpected result type",
         ));
     };
+    let is_agent =
+        |pane: &crate::api::schema::PaneInfo| pane.agent.is_some() || pane.display_agent.is_some();
+    let agent_workspaces: std::collections::HashSet<String> = panes
+        .iter()
+        .filter(|pane| is_agent(pane))
+        .map(|pane| pane.workspace_id.clone())
+        .collect();
+    // One shell mirror per agent-less workspace, from its first listed pane.
+    let mut shell_workspaces = std::collections::HashSet::new();
     Ok(panes
         .into_iter()
-        // Only panes the remote recognizes as agents are worth mirroring; a
-        // bare shell is not something you want cluttering the local sidebar.
-        .filter(|pane| pane.agent.is_some() || pane.display_agent.is_some())
+        .filter(|pane| {
+            if is_agent(pane) {
+                return true;
+            }
+            if !mirror_all || agent_workspaces.contains(&pane.workspace_id) {
+                return false;
+            }
+            shell_workspaces.insert(pane.workspace_id.clone())
+        })
         .map(|pane| {
             let workspace_label = workspace_labels
                 .get(&pane.workspace_id)
@@ -320,6 +341,7 @@ mod tests {
             session: None,
             label: None,
             poll_seconds: 30,
+            mirror_all: false,
         }
     }
 
@@ -384,7 +406,7 @@ mod tests {
         let panes = r#"{"id":"cli:pane:list","result":{"panes":[{"agent_status":"unknown","cwd":"/Users/ryielle/lifestream","focused":false,"pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","terminal_id":"term_shell","workspace_id":"w1"},{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"2ed90e44-493d-4c47-97d1-55c55c9ba47d"},"agent_status":"idle","cwd":"/Users/ryielle/lifestream/baby-names","focused":false,"pane_id":"wK:p1","revision":0,"tab_id":"wK:t1","terminal_id":"term_baby","workspace_id":"wK"},{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"cd06f84f-138f-4c9f-86e8-bceecfe1ef1e"},"agent_status":"blocked","cwd":"/Users/ryielle/lifestream","focused":true,"pane_id":"wV:p1","revision":0,"tab_id":"wV:t1","terminal_id":"term_reddit","workspace_id":"wV"}],"type":"pane_list"}}"#;
         let stdout = format!("/opt/homebrew/bin/herdr\n{workspaces}\n{panes}\n");
 
-        let snapshot = parse_discovery_output(&stdout).expect("parses live macOS output");
+        let snapshot = parse_discovery_output(&stdout, false).expect("parses live macOS output");
 
         assert_eq!(snapshot.remote_herdr, "/opt/homebrew/bin/herdr");
         assert_eq!(
@@ -405,7 +427,7 @@ mod tests {
             pane_list_json()
         );
 
-        let snapshot = parse_discovery_output(&stdout).expect("parses");
+        let snapshot = parse_discovery_output(&stdout, false).expect("parses");
 
         assert_eq!(snapshot.remote_herdr, "/home/you/.local/bin/herdr");
         assert_eq!(
@@ -433,7 +455,7 @@ mod tests {
             "\n",
         );
 
-        let snapshot = parse_discovery_output(stdout).expect("parses live output");
+        let snapshot = parse_discovery_output(stdout, false).expect("parses live output");
 
         // The shell pane in w2 carries no agent and must not be mirrored.
         assert_eq!(
@@ -463,6 +485,43 @@ mod tests {
     }
 
     #[test]
+    fn mirror_all_includes_agent_less_spaces_by_their_first_pane() {
+        let workspaces = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"active_tab_id":"w1:t1","agent_status":"idle","focused":false,"label":"api","number":1,"pane_count":1,"tab_count":1,"workspace_id":"w1"},{"active_tab_id":"w2:t1","agent_status":"unknown","focused":false,"label":"scratch","number":2,"pane_count":2,"tab_count":1,"workspace_id":"w2"}]}}"#;
+        // w1 has an agent; w2 is a two-pane shell workspace with none.
+        let panes = r#"{"id":"cli:pane:list","result":{"panes":[{"agent":"claude","agent_status":"idle","focused":false,"pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","terminal_id":"term-a","workspace_id":"w1"},{"agent_status":"unknown","focused":false,"pane_id":"w2:p1","revision":0,"tab_id":"w2:t1","terminal_id":"term-b","workspace_id":"w2"},{"agent_status":"unknown","focused":false,"pane_id":"w2:p2","revision":0,"tab_id":"w2:t1","terminal_id":"term-c","workspace_id":"w2"}],"type":"pane_list"}}"#;
+        let stdout = format!(
+            "herdr
+{workspaces}
+{panes}
+"
+        );
+
+        let agents_only = parse_discovery_output(&stdout, false).expect("parses");
+        assert_eq!(
+            agents_only
+                .panes
+                .iter()
+                .map(|p| p.workspace_label.as_str())
+                .collect::<Vec<_>>(),
+            ["api"]
+        );
+
+        let all = parse_discovery_output(&stdout, true).expect("parses");
+        // The shell workspace appears once, via its first pane, with no agent.
+        assert_eq!(
+            all.panes
+                .iter()
+                .map(|p| (
+                    p.workspace_label.as_str(),
+                    p.terminal_id.as_str(),
+                    p.agent.is_some()
+                ))
+                .collect::<Vec<_>>(),
+            [("api", "term-a", true), ("scratch", "term-b", false)]
+        );
+    }
+
+    #[test]
     fn discovery_falls_back_to_workspace_id_when_the_label_is_missing() {
         let workspaces = serde_json::json!({
             "id": "cli:workspace:list",
@@ -471,7 +530,7 @@ mod tests {
         .to_string();
         let stdout = format!("herdr\n{}\n{}\n", workspaces, pane_list_json());
 
-        let snapshot = parse_discovery_output(&stdout).expect("parses");
+        let snapshot = parse_discovery_output(&stdout, false).expect("parses");
 
         assert_eq!(snapshot.panes[0].workspace_label, "w1");
     }
@@ -485,7 +544,7 @@ mod tests {
         .to_string();
         let stdout = format!("herdr\n{}\n{}\n", workspace_list_json(), error);
 
-        let err = parse_discovery_output(&stdout).expect_err("propagates remote error");
+        let err = parse_discovery_output(&stdout, false).expect_err("propagates remote error");
 
         assert!(err.to_string().contains("server_unavailable"), "{err}");
     }
