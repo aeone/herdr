@@ -103,6 +103,29 @@ pub(crate) fn plan_remote_mirrors(
     plan
 }
 
+/// Mirrors whose host is no longer configured, in descending index order.
+///
+/// A host removed from config is never polled again, so reconcile never sees
+/// it and its mirrors would otherwise stay in the sidebar for the life of the
+/// server.
+pub(crate) fn mirrors_for_unconfigured_hosts(
+    workspaces: &[Workspace],
+    configured: &[RemoteSpaceConfig],
+) -> Vec<usize> {
+    workspaces
+        .iter()
+        .enumerate()
+        .filter(|(_, workspace)| {
+            workspace
+                .remote_mirror
+                .as_ref()
+                .is_some_and(|mirror| !configured.iter().any(|space| space.target == mirror.target))
+        })
+        .map(|(ws_idx, _)| ws_idx)
+        .rev()
+        .collect()
+}
+
 /// Per-host polling bookkeeping, so a slow or unreachable host neither blocks
 /// the render loop nor stacks up overlapping ssh calls.
 #[derive(Debug, Default)]
@@ -145,6 +168,19 @@ impl App {
                 });
             });
         }
+    }
+
+    /// Drops mirrors for hosts that config no longer lists. Called on config
+    /// reload, where the removed host will never be polled again.
+    pub(crate) fn close_mirrors_for_unconfigured_hosts(&mut self) {
+        let stale = mirrors_for_unconfigured_hosts(&self.state.workspaces, &self.remote_spaces);
+        if stale.is_empty() {
+            return;
+        }
+        for ws_idx in stale {
+            self.close_mirror_at(ws_idx);
+        }
+        self.shutdown_detached_terminal_runtimes();
     }
 
     /// Applies a completed poll. A failed poll only reschedules: existing
@@ -556,6 +592,46 @@ mod tests {
         // The mirror pane's foreground process is ssh, so the agent name has to
         // travel with the plan for the HERDR_AGENT hint.
         assert_eq!(agent.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn removing_a_host_from_config_strands_no_mirrors() {
+        let workspaces = vec![
+            local("local"),
+            mirror("workbox", &key_for("workbox", "w1", "t1"), "workbox/api"),
+            mirror("other", &key_for("other", "w1", "t2"), "other/logs"),
+            mirror("workbox", &key_for("workbox", "w2", "t3"), "workbox/web"),
+        ];
+
+        // Config now lists only "other"; nothing will ever poll workbox again.
+        let stale = mirrors_for_unconfigured_hosts(&workspaces, &[space("other")]);
+
+        // Descending order so applying them in sequence stays valid.
+        assert_eq!(stale, vec![3, 1]);
+    }
+
+    #[test]
+    fn configured_hosts_keep_their_mirrors() {
+        let workspaces = vec![
+            local("local"),
+            mirror("workbox", &key_for("workbox", "w1", "t1"), "workbox/api"),
+        ];
+
+        let stale = mirrors_for_unconfigured_hosts(&workspaces, &[space("workbox")]);
+
+        assert_eq!(stale, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn clearing_every_host_removes_every_mirror_but_no_local_space() {
+        let workspaces = vec![
+            local("local"),
+            mirror("workbox", &key_for("workbox", "w1", "t1"), "workbox/api"),
+        ];
+
+        let stale = mirrors_for_unconfigured_hosts(&workspaces, &[]);
+
+        assert_eq!(stale, vec![1]);
     }
 
     #[test]

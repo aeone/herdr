@@ -1468,16 +1468,17 @@ impl App {
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 #[cfg(unix)]
                 {
-                    // Hosts dropped from config keep their mirrors until the
-                    // next reconcile, which has no snapshot to compare against;
-                    // clearing their poll state stops them being polled again.
                     self.remote_spaces = config.remote.spaces.clone();
                     self.manage_ssh_config = config.remote.manage_ssh_config;
+                    // A host dropped from config is never polled again, so its
+                    // mirrors have to be torn down here or they linger for the
+                    // life of the server.
                     self.remote_space_polls.retain(|target, _| {
                         self.remote_spaces
                             .iter()
                             .any(|space| space.target == *target)
                     });
+                    self.close_mirrors_for_unconfigured_hosts();
                 }
                 self.state.agent_panel_scroll = 0;
                 self.state.accent = crate::config::parse_color(&config.ui.accent);
