@@ -278,7 +278,7 @@ impl AppState {
         }
         let rect = crate::ui::sidebar_section_divider_rect(
             self.view.sidebar_rect,
-            self.sidebar_section_split,
+            self.sidebar_split_ratio(),
         );
         rect.width > 0
             && col >= rect.x
@@ -419,7 +419,7 @@ impl AppState {
 
         let (_, detail_area) = crate::ui::expanded_sidebar_sections(
             self.view.sidebar_rect,
-            self.sidebar_section_split,
+            self.sidebar_split_ratio(),
         );
         let rect = crate::ui::agent_panel_toggle_rect(detail_area, self.agent_panel_sort);
         rect.width > 0

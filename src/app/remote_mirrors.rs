@@ -103,6 +103,27 @@ pub(crate) fn plan_remote_mirrors(
     plan
 }
 
+/// Source name Herdr records for mirror state reports.
+const REMOTE_MIRROR_STATE_SOURCE: &str = "herdr:remote-mirror";
+
+/// Maps a remote's reported status onto local state plus its seen flag.
+///
+/// `done` is the remote's way of saying "idle, with output you have not looked
+/// at", which locally is idle with `seen` cleared.
+fn remote_state_and_seen(
+    status: crate::api::schema::AgentStatus,
+) -> (crate::detect::AgentState, bool) {
+    use crate::api::schema::AgentStatus;
+    use crate::detect::AgentState;
+    match status {
+        AgentStatus::Idle => (AgentState::Idle, true),
+        AgentStatus::Done => (AgentState::Idle, false),
+        AgentStatus::Working => (AgentState::Working, true),
+        AgentStatus::Blocked => (AgentState::Blocked, true),
+        AgentStatus::Unknown => (AgentState::Unknown, true),
+    }
+}
+
 /// Builds the mirror record a created workspace carries.
 ///
 /// Production and tests share this so a mirror's stored identity can never
@@ -298,6 +319,63 @@ impl App {
         if closed > 0 {
             self.shutdown_detached_terminal_runtimes();
         }
+        self.report_remote_agent_states(space, snapshot);
+    }
+
+    /// Pushes each remote pane's reported status onto its mirror.
+    ///
+    /// The mirror's own screen detection only ever sees the attached copy and
+    /// reports idle forever, so the remote — which has hook-level authority
+    /// over its agents — is the trustworthy source of state here.
+    fn report_remote_agent_states(
+        &mut self,
+        space: &RemoteSpaceConfig,
+        snapshot: &RemoteSpaceSnapshot,
+    ) {
+        for pane in &snapshot.panes {
+            let key = pane.mirror_key(&space.target);
+            let Some(pane_id) =
+                self.state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| {
+                        workspace.remote_mirror.as_ref().is_some_and(|mirror| {
+                            mirror.target == space.target && mirror.key == key
+                        })
+                    })
+                    .and_then(|workspace| workspace.tabs.first())
+                    .map(|tab| tab.root_pane)
+            else {
+                continue;
+            };
+            let Some(agent_label) = pane.agent.clone() else {
+                continue;
+            };
+            let (state, seen) = remote_state_and_seen(pane.status);
+            self.handle_internal_event(crate::events::AppEvent::HookStateReported {
+                pane_id,
+                source: REMOTE_MIRROR_STATE_SOURCE.to_string(),
+                agent_label,
+                state,
+                message: None,
+                seq: None,
+                session_ref: None,
+            });
+            if let Some(workspace) = self.state.workspaces.iter_mut().find(|workspace| {
+                workspace
+                    .tabs
+                    .first()
+                    .is_some_and(|tab| tab.root_pane == pane_id)
+            }) {
+                // "done" on the remote means idle with unseen output; mirror
+                // that so the attention dot matches what the remote shows.
+                if let Some(tab) = workspace.tabs.first_mut() {
+                    if let Some(pane_state) = tab.panes.get_mut(&pane_id) {
+                        pane_state.seen = seen;
+                    }
+                }
+            }
+        }
     }
 
     fn close_mirror_at(&mut self, ws_idx: usize) {
@@ -404,6 +482,7 @@ mod tests {
             workspace_id: workspace_id.into(),
             workspace_label: label.into(),
             agent: Some("claude".into()),
+            status: crate::api::schema::AgentStatus::Idle,
         }
     }
 

@@ -27,6 +27,10 @@ pub(crate) struct RemoteAgentPane {
     pub(crate) workspace_label: String,
     /// Detected or reported agent name, when the remote knows one.
     pub(crate) agent: Option<String>,
+    /// Status the remote reports. The remote has hook-level authority over its
+    /// own agents, so this is more accurate than screen-detecting the attached
+    /// copy, which never sees anything but idle.
+    pub(crate) status: crate::api::schema::AgentStatus,
 }
 
 impl RemoteAgentPane {
@@ -292,6 +296,7 @@ fn parse_agent_panes(
                 .cloned()
                 .unwrap_or_else(|| pane.workspace_id.clone());
             RemoteAgentPane {
+                status: pane.agent_status,
                 terminal_id: pane.terminal_id,
                 workspace_id: pane.workspace_id,
                 workspace_label,
@@ -410,6 +415,7 @@ mod tests {
                 workspace_id: "w1".into(),
                 workspace_label: "api-server".into(),
                 agent: Some("claude".into()),
+                status: crate::api::schema::AgentStatus::Working,
             }]
         );
     }
@@ -438,12 +444,14 @@ mod tests {
                     workspace_id: "w1".into(),
                     workspace_label: "lifestream".into(),
                     agent: Some("claude".into()),
+                    status: crate::api::schema::AgentStatus::Idle,
                 },
                 RemoteAgentPane {
                     terminal_id: "term_656e5c429826d3".into(),
                     workspace_id: "w3".into(),
                     workspace_label: "emf".into(),
                     agent: Some("claude".into()),
+                    status: crate::api::schema::AgentStatus::Done,
                 },
             ]
         );
@@ -488,6 +496,7 @@ mod tests {
             workspace_id: workspace_id.into(),
             workspace_label: workspace_label.into(),
             agent: Some("claude".into()),
+            status: crate::api::schema::AgentStatus::Idle,
         }
     }
 
@@ -532,6 +541,7 @@ mod tests {
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: Some("claude".into()),
+            status: crate::api::schema::AgentStatus::Idle,
         };
 
         assert_eq!(pane.mirror_key("workbox"), pane.mirror_key("workbox"));
@@ -546,6 +556,7 @@ mod tests {
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: None,
+            status: crate::api::schema::AgentStatus::Idle,
         };
 
         let argv = attach_argv(&space("workbox"), &pane, "/home/you/.local/bin/herdr");
@@ -607,6 +618,7 @@ mod tests {
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: None,
+            status: crate::api::schema::AgentStatus::Idle,
         };
 
         let argv = attach_argv(&space, &pane, "herdr");

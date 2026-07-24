@@ -99,13 +99,10 @@ fn agent_panel_content_rows(app: &AppState) -> u16 {
 /// needs and the overflowing one takes the rest, which is the case that
 /// motivates this: a short Space list should not hold back a long Agent list.
 pub(crate) fn content_split_ratio(app: &AppState, area: Rect) -> Option<f32> {
-    let (ws_area, _) = expanded_sidebar_sections(area, app.sidebar_section_split);
-    let total = ws_area.height.saturating_add(
-        expanded_sidebar_sections(area, app.sidebar_section_split)
-            .1
-            .height,
-    );
-    if total < 6 {
+    // The two sections always tile the full content height, so the total is
+    // independent of wherever the divider currently sits.
+    let total = area.height;
+    if total < 6 || area.width == 0 {
         return None;
     }
 
@@ -404,7 +401,7 @@ pub(crate) fn next_entry_is_indented_workspace(entries: &[WorkspaceListEntry], i
 }
 
 pub(crate) fn normalized_workspace_scroll(app: &AppState, area: Rect, requested: usize) -> usize {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area, app.sidebar_split_ratio());
     let body = workspace_list_body_rect(ws_area, false);
     if body.height == 0 {
         return requested;
@@ -791,7 +788,7 @@ pub(crate) fn compute_workspace_list_areas(
     app: &AppState,
     area: Rect,
 ) -> (Vec<crate::app::state::WorkspaceCardArea>, Vec<()>) {
-    let ws_area = workspace_list_rect(area, app.sidebar_section_split);
+    let ws_area = workspace_list_rect(area, app.sidebar_split_ratio());
     if ws_area == Rect::default() {
         return (Vec::new(), Vec::new());
     }
@@ -1028,11 +1025,23 @@ pub(super) fn render_sidebar(
         buf[(sep_x, y)].set_style(sep_style);
     }
 
-    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_section_split);
+    let (ws_area, detail_area) = expanded_sidebar_sections(area, app.sidebar_split_ratio());
 
     render_workspace_list(app, terminal_runtimes, frame, ws_area, is_navigating);
     render_agent_detail(app, terminal_runtimes, frame, detail_area);
     render_sidebar_toggle(app, frame, area, false, p);
+}
+
+/// A stable hue per host label, so two machines never read as the same one.
+///
+/// Derived from the label rather than configured order, so adding or removing a
+/// host does not recolour the others.
+fn remote_host_color(host: &str, p: &Palette) -> ratatui::style::Color {
+    let choices = [p.teal, p.peach, p.mauve, p.blue, p.green, p.yellow];
+    let hash = host.bytes().fold(0u32, |acc, byte| {
+        acc.wrapping_mul(31).wrapping_add(byte.into())
+    });
+    choices[(hash as usize) % choices.len()]
 }
 
 fn resolved_token_spans(
@@ -1143,10 +1152,11 @@ fn resolved_token_spans(
             break;
         }
     }
-    // Mirrored spaces and agents carry a host prefix. It is deliberately quiet:
-    // it labels where a row came from rather than competing with the name
-    // beside it. A per-token `fg` in config overrides this.
-    let remote_host_style = Style::default().fg(p.overlay1).add_modifier(Modifier::DIM);
+    // Mirrored rows carry a host prefix. It stays dim so it labels where a row
+    // came from rather than competing with the name beside it, but each host
+    // gets its own hue so several machines stay apart at a glance. A per-token
+    // `fg` in config overrides this.
+    let remote_host_style = Style::default().add_modifier(Modifier::DIM);
     let mut spans = Vec::new();
     for (position, index) in visible_indices.iter().copied().enumerate() {
         let token = &resolved[index];
@@ -1206,9 +1216,10 @@ fn resolved_token_spans(
                 }
             }
             ResolvedTokenKind::RemoteHost(text) => {
+                let hue = remote_host_style.fg(remote_host_color(text, p));
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
-                    apply_token_style(remote_host_style, token.style),
+                    apply_token_style(hue, token.style),
                 ));
             }
             ResolvedTokenKind::TerminalTitle(text) | ResolvedTokenKind::Custom(text) => {
@@ -2435,6 +2446,17 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .into_iter()
             .map(|WorkspaceListEntry::Workspace { ws_idx, indented }| (ws_idx, indented))
             .collect()
+    }
+
+    #[test]
+    fn remote_host_colors_are_stable_per_host_and_differ_between_hosts() {
+        let app = AppState::test_new();
+        let p = &app.palette;
+
+        assert_eq!(remote_host_color("sera", p), remote_host_color("sera", p));
+        // Adding a host must not recolour the others, so the hue comes from the
+        // label rather than from configured order.
+        assert_ne!(remote_host_color("sera", p), remote_host_color("val", p));
     }
 
     #[test]
