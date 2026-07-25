@@ -206,6 +206,8 @@ fn agent_panel_entries_with_runtimes(
 ) -> Vec<AgentPanelEntry> {
     let mut entries = collect_agent_panel_entries_with_runtimes(app, terminal_runtimes);
     crate::app::agent_view::apply_agent_view(app, &mut entries);
+    // Agents on an unreachable host sink to the bottom, like offline spaces.
+    entries.sort_by_key(|entry| workspace_host_offline(app, entry.ws_idx));
     entries
 }
 
@@ -539,7 +541,21 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     if app.sidebar_spaces.hide_when_in_agents {
         entries = hide_entries_listed_in_agent_panel(app, entries);
     }
+    // Mirrors of an unreachable host sink to the bottom — you can't work with
+    // them, so they should not push live spaces down. Stable, so their relative
+    // order and any worktree grouping is preserved.
+    entries.sort_by_key(|WorkspaceListEntry::Workspace { ws_idx, .. }| {
+        workspace_host_offline(app, *ws_idx)
+    });
     entries
+}
+
+/// Whether this workspace mirrors a host whose last poll/feed failed.
+pub(crate) fn workspace_host_offline(app: &AppState, ws_idx: usize) -> bool {
+    app.workspaces
+        .get(ws_idx)
+        .and_then(|ws| ws.remote_mirror.as_ref())
+        .is_some_and(|mirror| app.remote_offline_hosts.contains(&mirror.target))
 }
 
 /// Hides spaces the Agent panel already lists. The active workspace is kept so
@@ -1072,6 +1088,17 @@ fn remote_host_color(host: &str, p: &Palette) -> ratatui::style::Color {
     choices[(hash as usize) % choices.len()]
 }
 
+/// Dims every span in a row, for a mirror whose host is unreachable.
+fn dim_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    spans
+        .into_iter()
+        .map(|span| {
+            let style = span.style.add_modifier(Modifier::DIM);
+            Span::styled(span.content, style)
+        })
+        .collect()
+}
+
 fn resolved_token_spans(
     resolved: &[ResolvedToken],
     state_icon: (&str, Style),
@@ -1330,6 +1357,7 @@ fn render_workspace_list(
 
     for card in cards {
         let i = card.ws_idx;
+        let host_offline = workspace_host_offline(app, i);
         let ws = &app.workspaces[i];
         let row_y = card.rect.y;
         let row_height = card.rect.height;
@@ -1456,6 +1484,11 @@ fn render_workspace_list(
                 p,
                 card.rect.width.saturating_sub(prefix_width) as usize,
             ));
+            let spans = if host_offline {
+                dim_spans(spans)
+            } else {
+                spans
+            };
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect::new(card.rect.x, row_y + row_index as u16, card.rect.width, 1),
@@ -1569,6 +1602,7 @@ fn render_agent_detail(
     let body_bottom = body.y + body.height;
     for (index, detail) in details.iter().enumerate().skip(scroll) {
         let label_color = state_label_color(detail.state, detail.seen, p);
+        let host_offline = workspace_host_offline(app, detail.ws_idx);
         let rows = resolved_agent_rows_numbered(app, detail, switch_number_for(index));
         let height = (rows.len().max(1) as u16).min(body.height);
         if row_y.saturating_add(height) > body_bottom {
@@ -1607,6 +1641,11 @@ fn render_agent_detail(
                 body.width
                     .saturating_sub(if row_index == 0 { 1 } else { 3 }) as usize,
             ));
+            let spans = if host_offline {
+                dim_spans(spans)
+            } else {
+                spans
+            };
             frame.render_widget(
                 Paragraph::new(Line::from(spans)).style(row_style),
                 Rect::new(body.x, row_y + row_index as u16, body.width, 1),
@@ -2485,6 +2524,51 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             .get_mut(&terminal_id)
             .expect("test terminal")
             .detected_agent = Some(agent);
+    }
+
+    fn mark_mirror(app: &mut AppState, ws_idx: usize, target: &str) {
+        app.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
+            target: target.into(),
+            host_label: target.into(),
+            host_color: None,
+            key: format!("k{ws_idx}"),
+        });
+    }
+
+    #[test]
+    fn offline_host_mirrors_sink_to_the_bottom_of_the_space_list() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![
+            Workspace::test_new("local-a"),
+            Workspace::test_new("box-1"),
+            Workspace::test_new("local-b"),
+            Workspace::test_new("box-2"),
+        ];
+        app.ensure_test_terminals();
+        app.active = None;
+        mark_mirror(&mut app, 1, "box");
+        mark_mirror(&mut app, 3, "box");
+
+        // Online: mirrors keep their place.
+        assert_eq!(
+            listed_workspaces(&app)
+                .iter()
+                .map(|(i, _)| *i)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+
+        // Offline: box mirrors sink below the two local spaces, order preserved.
+        app.remote_offline_hosts.insert("box".into());
+        assert_eq!(
+            listed_workspaces(&app)
+                .iter()
+                .map(|(i, _)| *i)
+                .collect::<Vec<_>>(),
+            [0, 2, 1, 3]
+        );
+        assert!(workspace_host_offline(&app, 1));
+        assert!(!workspace_host_offline(&app, 0));
     }
 
     fn listed_workspaces(app: &AppState) -> Vec<(usize, bool)> {

@@ -186,12 +186,8 @@ fn run_remote_space_worker(
     };
 
     while !stopped() {
-        let outcome = crate::remote::spaces::run_feed(
-            &space,
-            manage_ssh_config,
-            |snapshot| emit(snapshot),
-            &keep_streaming,
-        );
+        let outcome =
+            crate::remote::spaces::run_feed(&space, manage_ssh_config, emit, &keep_streaming);
 
         if stopped() {
             break;
@@ -320,12 +316,19 @@ impl App {
         else {
             // The host was removed from config while an update was in flight.
             self.remote_space_workers.remove(&target);
+            self.state.remote_offline_hosts.remove(&target);
             return;
         };
 
         match result {
-            Ok(snapshot) => self.reconcile_remote_mirrors(&space, &snapshot),
+            Ok(snapshot) => {
+                self.state.remote_offline_hosts.remove(&target);
+                self.reconcile_remote_mirrors(&space, &snapshot);
+            }
             Err(err) => {
+                // The host is unreachable; its mirrors stay put but are marked
+                // offline so the sidebar can dim them and sort them down.
+                self.state.remote_offline_hosts.insert(target.clone());
                 tracing::warn!(target = %target, %err, "remote space update failed");
             }
         }

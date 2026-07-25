@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Remote-space mirrors whose host is unreachable now render dimmed and sort to the bottom of the Space and Agent lists.
 - Added `ui.sidebar.spaces.hide_when_in_agents` to hide spaces the Agent panel already lists, keeping the active space visible.
 - Added `ui.sidebar_section_split_auto` to size the Space and Agent sidebar sections from their content instead of the fixed divider position.
 - Added a `number` sidebar token showing each space's/agent's 1-9 switch position, matching the `switch_workspace` and `focus_agent` indexed keybinds.

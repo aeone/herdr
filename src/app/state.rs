@@ -1443,6 +1443,9 @@ pub struct AppState {
     pub worktree_remove: Option<WorktreeRemoveState>,
     pub worktree_directory: std::path::PathBuf,
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Remote-space hosts whose last poll/feed failed. Their mirrors render
+    /// dimmed and sort to the bottom, since you cannot work with them.
+    pub remote_offline_hosts: std::collections::HashSet<String>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1828,6 +1831,7 @@ impl AppState {
             worktree_remove: None,
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
+            remote_offline_hosts: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,

@@ -567,6 +567,7 @@ impl App {
             worktree_remove: None,
             worktree_directory,
             collapsed_space_keys,
+            remote_offline_hosts: std::collections::HashSet::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
