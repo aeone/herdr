@@ -15,6 +15,7 @@
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
 ### Fixed
+- A `[[remote.spaces]]` entry with `target = "local"` now picks a herdr binary that can talk to the mirrored session instead of always using the running one, so mirroring a session owned by a different herdr build no longer fails every update with a protocol mismatch and leaves the host marked offline.
 - OMP integration install, status, and uninstall now respect `PI_CONFIG_DIR` when `PI_CODING_AGENT_DIR` is not set, and installation refuses extension-directory collisions with Pi. (#1696)
 - Physical Escape key records on native Windows now bypass raw VT report framing, so pane applications receive Escape immediately and reliably. (#1736)
 

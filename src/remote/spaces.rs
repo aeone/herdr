@@ -273,7 +273,18 @@ fn spawn_local_streaming_script(script: &str) -> io::Result<std::process::Child>
 /// Like [`discovery_script`] but execs the streaming `agent feed` instead of
 /// the one-shot list commands.
 fn feed_script(session: Option<&str>, local: bool) -> String {
-    let mut script = herdr_bin_script(local);
+    let mut script = script_prologue(session, local);
+    script.push_str("exec \"$herdr_bin\" agent feed\n");
+    script
+}
+
+/// `set -e`, then the target session, then a herdr binary in `$herdr_bin`.
+///
+/// The session export has to come before the binary search: locally that search
+/// probes the session being mirrored, and without the export it would probe
+/// this machine's default session instead.
+fn script_prologue(session: Option<&str>, local: bool) -> String {
+    let mut script = String::from("set -e\n");
     if let Some(session) = session {
         script.push_str(&format!(
             "{}={}\nexport {}\n",
@@ -282,15 +293,19 @@ fn feed_script(session: Option<&str>, local: bool) -> String {
             crate::session::SESSION_ENV_VAR
         ));
     }
-    script.push_str("exec \"$herdr_bin\" agent feed\n");
+    script.push_str(&herdr_bin_script(local));
     script
 }
 
-/// Shell prologue that puts a herdr binary in `$herdr_bin`.
+/// Shell fragment that puts a herdr binary in `$herdr_bin`.
 ///
-/// Locally it must be the running binary, since a mirror of a fork session
-/// polled through an older `herdr` on PATH would hit a protocol mismatch. Over
-/// ssh the remote resolves its own from PATH and common install paths.
+/// A local mirror talks to another session's server on this same machine, and
+/// that server can be a different herdr build than this one. The CLI refuses to
+/// talk across a protocol version gap, so try each candidate against the target
+/// session and keep the first that answers: the running binary when mirroring a
+/// session owned by a build like this one, an installed binary when mirroring a
+/// session owned by that install. Over ssh the remote resolves its own from
+/// PATH and common install paths, where binary and server always agree.
 fn herdr_bin_script(local: bool) -> String {
     if local {
         let current = std::env::current_exe()
@@ -298,15 +313,24 @@ fn herdr_bin_script(local: bool) -> String {
             .and_then(|path| path.to_str().map(str::to_string))
             .unwrap_or_else(|| "herdr".to_string());
         return format!(
-            "set -e
-herdr_bin={}
-",
+            r#"herdr_bin=
+for candidate in {} $(command -v herdr 2>/dev/null || true) "${{HOME:-}}/.local/bin/herdr" "${{HOME:-}}/.cargo/bin/herdr" /usr/local/bin/herdr /opt/homebrew/bin/herdr; do
+  [ -x "$candidate" ] || continue
+  if "$candidate" workspace list >/dev/null 2>&1; then
+    herdr_bin=$candidate
+    break
+  fi
+done
+if [ -z "$herdr_bin" ]; then
+  echo "no herdr binary on this machine speaks the mirrored session's protocol" >&2
+  exit 1
+fi
+"#,
             shell_quote(&current)
         );
     }
     String::from(
-        r#"set -e
-herdr_bin=$(command -v herdr 2>/dev/null || true)
+        r#"herdr_bin=$(command -v herdr 2>/dev/null || true)
 if [ -z "$herdr_bin" ]; then
   for candidate in "${HOME:-}/.local/bin/herdr" "${HOME:-}/.cargo/bin/herdr" /usr/local/bin/herdr /opt/homebrew/bin/herdr; do
     if [ -x "$candidate" ]; then
@@ -327,15 +351,7 @@ fi
 /// non-login `ssh host herdr ...` would fail to, then prints the binary path
 /// followed by the two JSON list responses, one per line.
 fn discovery_script(session: Option<&str>, local: bool) -> String {
-    let mut script = herdr_bin_script(local);
-    if let Some(session) = session {
-        script.push_str(&format!(
-            "{}={}\nexport {}\n",
-            crate::session::SESSION_ENV_VAR,
-            shell_quote(session),
-            crate::session::SESSION_ENV_VAR
-        ));
-    }
+    let mut script = script_prologue(session, local);
     script.push_str(
         r#"printf '%s\n' "$herdr_bin"
 "$herdr_bin" workspace list
@@ -812,6 +828,39 @@ mod tests {
     fn discovery_script_exports_only_an_explicit_session() {
         assert!(!discovery_script(None, false).contains("HERDR_SESSION"));
         assert!(discovery_script(Some("agents"), false).contains("HERDR_SESSION='agents'"));
+    }
+
+    /// A local mirror can point at a session owned by a different herdr build,
+    /// which the CLI refuses to talk to across a protocol version gap. Pinning
+    /// one binary makes every update of such a session fail, so the script has
+    /// to try candidates and keep one that answers.
+    #[test]
+    fn local_scripts_probe_candidate_binaries_instead_of_pinning_one() {
+        let script = discovery_script(Some("default"), true);
+        assert!(
+            script.contains("workspace list >/dev/null 2>&1"),
+            "{script}"
+        );
+        assert!(script.contains("herdr_bin=$candidate"), "{script}");
+        // The installed locations matter: mirroring the release-owned session
+        // only works through the release binary.
+        assert!(script.contains("/.local/bin/herdr"), "{script}");
+    }
+
+    /// The local probe runs `workspace list` against the mirrored session, so an
+    /// export placed after it would silently probe the default session instead.
+    #[test]
+    fn local_scripts_export_the_session_before_probing() {
+        for script in [
+            discovery_script(Some("agents"), true),
+            feed_script(Some("agents"), true),
+        ] {
+            let export = script
+                .find("HERDR_SESSION='agents'")
+                .expect("session export");
+            let probe = script.find("workspace list").expect("probe");
+            assert!(export < probe, "{script}");
+        }
     }
 
     #[test]
