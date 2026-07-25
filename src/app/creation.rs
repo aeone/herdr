@@ -96,7 +96,82 @@ impl App {
         })
     }
 
+    /// Entries for the "new space on which host" menu.
+    ///
+    /// Every configured mirror host is listed, unreachable ones included but
+    /// disabled, so the menu and the sidebar always agree on what is configured.
+    #[cfg(unix)]
+    pub(super) fn new_space_host_entries(&self) -> Vec<crate::app::state::MenuEntry> {
+        use crate::app::state::MenuEntry;
+
+        let mut entries = vec![MenuEntry {
+            label: "this machine".to_string(),
+            enabled: true,
+            target: None,
+        }];
+        for space in &self.remote_spaces {
+            // Our own session is not mirrored, so it cannot take a space either.
+            // Same guard as the poller: only a local entry can name us.
+            if space.is_local() && super::remote_mirrors::mirrors_own_session(space) {
+                continue;
+            }
+            entries.push(MenuEntry {
+                label: space.display_label().to_string(),
+                enabled: !self.state.remote_offline_hosts.contains(&space.target),
+                target: Some(space.target.clone()),
+            });
+        }
+        entries
+    }
+
+    /// Opens the host menu, or reports that there is nothing to choose between.
+    ///
+    /// With no mirror hosts configured the only possible answer is this machine,
+    /// so "new" keeps working exactly as it always did.
+    fn open_new_space_host_menu(&mut self, anchor: Option<(u16, u16)>) -> bool {
+        #[cfg(not(unix))]
+        {
+            let _ = anchor;
+            false
+        }
+        #[cfg(unix)]
+        {
+            let entries = self.new_space_host_entries();
+            if entries.len() < 2 {
+                return false;
+            }
+            let (x, y) = anchor.unwrap_or((2, 2));
+            self.state.context_menu = Some(crate::app::state::ContextMenuState {
+                kind: crate::app::state::ContextMenuKind::NewSpaceHost,
+                x,
+                y,
+                list: crate::app::state::MenuListState::new(0),
+                dynamic_items: entries,
+            });
+            self.state.mode = Mode::ContextMenu;
+            true
+        }
+    }
+
     pub(super) fn begin_tui_workspace_create(&mut self, request_id: &'static str) {
+        self.begin_tui_workspace_create_at(request_id, None)
+    }
+
+    /// `anchor` is where the menu should appear, when the request came from a
+    /// click that knows its own position.
+    pub(super) fn begin_tui_workspace_create_at(
+        &mut self,
+        request_id: &'static str,
+        anchor: Option<(u16, u16)>,
+    ) {
+        if self.open_new_space_host_menu(anchor) {
+            return;
+        }
+        self.begin_local_workspace_create(request_id);
+    }
+
+    /// The original "new space here" path, with the host already decided.
+    pub(super) fn begin_local_workspace_create(&mut self, request_id: &'static str) {
         if self.state.prompt_new_workspace_name {
             let follow_cwd = self.workspace_creation_source().and_then(|ws_idx| {
                 self.focused_pane_cwd_in_workspace(ws_idx)

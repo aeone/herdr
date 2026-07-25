@@ -696,7 +696,8 @@ pub(super) fn apply_context_menu_action(
     menu: ContextMenuState,
     idx: usize,
 ) {
-    let item = menu.items().get(idx).copied();
+    let items = menu.items();
+    let item = items.get(idx).map(String::as_str);
     match (menu.kind, item) {
         (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
             state.request_new_linked_worktree = Some(ws_idx);
@@ -1125,7 +1126,27 @@ impl App {
     }
 
     pub(crate) fn apply_context_menu_action_via_api(&mut self, menu: ContextMenuState, idx: usize) {
-        let item = menu.items().get(idx).copied();
+        let items = menu.items();
+        let item = items.get(idx).map(String::as_str);
+
+        // The host menu keys off the chosen entry, not its label, since labels
+        // are configuration and a host could be called anything.
+        if menu.kind == ContextMenuKind::NewSpaceHost {
+            let choice = menu.entry(idx).filter(|entry| entry.enabled).cloned();
+            leave_modal(&mut self.state);
+            match choice {
+                #[cfg(unix)]
+                Some(entry) if entry.target.is_some() => {
+                    let Some(target) = entry.target else { return };
+                    self.request_remote_space(target, None);
+                }
+                // This machine, or an offline host the user could not pick.
+                Some(_) => self.begin_local_workspace_create("tui.menu.workspace.create"),
+                None => {}
+            }
+            return;
+        }
+
         match (menu.kind, item) {
             (ContextMenuKind::GitWorkspace { ws_idx, .. }, Some("New worktree")) => {
                 self.state.request_new_linked_worktree = Some(ws_idx);
@@ -1965,6 +1986,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            dynamic_items: Vec::new(),
         };
         let mut terminal_runtimes = crate::terminal::TerminalRuntimeRegistry::new();
 
@@ -2010,6 +2032,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            dynamic_items: Vec::new(),
         };
         let idx = menu
             .items()
@@ -2041,6 +2064,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            dynamic_items: Vec::new(),
         };
         let idx = menu
             .items()
@@ -2075,6 +2099,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            dynamic_items: Vec::new(),
         };
         let close_idx = menu
             .items()

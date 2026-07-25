@@ -568,6 +568,7 @@ impl App {
             worktree_directory,
             collapsed_space_keys,
             remote_offline_hosts: std::collections::HashSet::new(),
+            created_remote_workspaces: std::collections::HashMap::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -5572,6 +5573,7 @@ last_pane = "prefix+tab"
             x: 2,
             y: 2,
             list: state::MenuListState::new(1),
+            dynamic_items: Vec::new(),
         });
         app.state.mode = Mode::ContextMenu;
 
@@ -5879,5 +5881,54 @@ last_pane = "prefix+tab"
             &input[events[1].start..events[1].start + events[1].len],
             b"a"
         );
+    }
+
+    /// The host menu lists every configured mirror host, and marks an
+    /// unreachable one unselectable rather than hiding it, so the menu and the
+    /// sidebar never disagree about what is configured.
+    #[cfg(unix)]
+    #[test]
+    fn new_space_host_menu_lists_configured_hosts_and_disables_offline_ones() {
+        let mut app = test_app();
+        app.remote_spaces = vec![
+            crate::config::RemoteSpaceConfig {
+                target: "sera".into(),
+                session: None,
+                label: Some("ser".into()),
+                poll_seconds: 30,
+                mirror_all: false,
+                color: None,
+            },
+            crate::config::RemoteSpaceConfig {
+                target: "valkyrie".into(),
+                session: None,
+                label: Some("val".into()),
+                poll_seconds: 30,
+                mirror_all: false,
+                color: None,
+            },
+        ];
+        app.state.remote_offline_hosts.insert("valkyrie".into());
+
+        let entries = app.new_space_host_entries();
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.label.as_str(), entry.enabled))
+                .collect::<Vec<_>>(),
+            [("this machine", true), ("ser", true), ("val", false)]
+        );
+        assert_eq!(entries[1].target.as_deref(), Some("sera"));
+    }
+
+    /// With no hosts configured there is nothing to choose, so `new` must stay
+    /// the single keystroke it has always been.
+    #[cfg(unix)]
+    #[test]
+    fn new_space_host_menu_is_skipped_when_no_hosts_are_configured() {
+        let app = test_app();
+
+        assert_eq!(app.new_space_host_entries().len(), 1);
     }
 }

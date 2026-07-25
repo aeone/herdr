@@ -2843,6 +2843,12 @@ impl AppState {
                 let _ = result;
                 Vec::new()
             }
+            #[cfg(unix)]
+            AppEvent::RemoteSpaceCreated { target, result } => {
+                let _ = target;
+                let _ = result;
+                Vec::new()
+            }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),

@@ -47,10 +47,22 @@ pub(crate) fn plan_remote_mirrors(
     workspaces: &[Workspace],
     space: &RemoteSpaceConfig,
     snapshot: &RemoteSpaceSnapshot,
+    pinned: &std::collections::HashSet<String>,
 ) -> Vec<MirrorAction> {
-    let labels = mirror_labels(&snapshot.panes);
-    let desired: Vec<(String, String)> = snapshot
-        .panes
+    // A space the user created on this host is mirrored even with no agent in it
+    // yet. Without this it would be planned as stale and closed on the very next
+    // snapshot, so "new space on sera" would flicker and vanish.
+    let mut panes = snapshot.panes.clone();
+    panes.extend(
+        snapshot
+            .shell_panes
+            .iter()
+            .filter(|pane| pinned.contains(&pane.workspace_id))
+            .cloned(),
+    );
+
+    let labels = mirror_labels(&panes);
+    let desired: Vec<(String, String)> = panes
         .iter()
         .zip(labels)
         .map(|(pane, label)| (pane.mirror_key(&space.target), label))
@@ -90,7 +102,7 @@ pub(crate) fn plan_remote_mirrors(
                 }
             }
             None => {
-                let Some(pane) = snapshot.panes.get(index) else {
+                let Some(pane) = panes.get(index) else {
                     continue;
                 };
                 plan.push(MirrorAction::Create {
@@ -221,7 +233,7 @@ fn sleep_unless_stopped(total: Duration, stop: &std::sync::atomic::AtomicBool) {
 ///
 /// Mirroring your own session is unbounded recursion: each mirror pane is an
 /// agent pane, so the next poll would mirror the mirrors.
-fn mirrors_own_session(space: &RemoteSpaceConfig) -> bool {
+pub(super) fn mirrors_own_session(space: &RemoteSpaceConfig) -> bool {
     let own = crate::session::active_name()
         .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
     let target = space
@@ -334,13 +346,97 @@ impl App {
         }
     }
 
+    /// Asks a mirrored host to open a new space, off the event loop.
+    ///
+    /// Nothing appears in the sidebar until the host answers; an ssh round trip
+    /// is too slow to hold the UI for, and a host that has gone away must not
+    /// wedge it at all.
+    pub(crate) fn request_remote_space(&mut self, target: String, label: Option<String>) {
+        let Some(space) = self
+            .config_remote_spaces()
+            .into_iter()
+            .find(|space| space.target == target)
+        else {
+            return;
+        };
+        let manage_ssh_config = self.manage_ssh_config;
+        let event_tx = self.event_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::remote::spaces::create_remote_workspace(
+                &space,
+                manage_ssh_config,
+                label.as_deref(),
+            );
+            let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteSpaceCreated {
+                target: space.target.clone(),
+                result: result.map_err(|err| err.to_string()),
+            });
+        });
+    }
+
+    /// Applies the result of [`Self::request_remote_space`].
+    pub(crate) fn handle_remote_space_created(
+        &mut self,
+        target: String,
+        result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
+    ) {
+        let Some(space) = self
+            .config_remote_spaces()
+            .into_iter()
+            .find(|space| space.target == target)
+        else {
+            return;
+        };
+        let created = match result {
+            Ok(created) => created,
+            Err(err) => {
+                tracing::warn!(target = %target, %err, "creating a remote space failed");
+                self.state.remote_offline_hosts.insert(target);
+                return;
+            }
+        };
+
+        // Pin it first: the space has no agent yet, so without the pin the very
+        // next snapshot would plan it as stale and close it again.
+        self.state
+            .created_remote_workspaces
+            .entry(target.clone())
+            .or_default()
+            .insert(created.pane.workspace_id.clone());
+        self.state.remote_offline_hosts.remove(&target);
+
+        // Mirror it from the create response instead of waiting for a snapshot,
+        // so the space appears as soon as the host confirms it. Reconcile will
+        // find this mirror already matching and leave it alone.
+        let key = created.pane.mirror_key(&target);
+        let label = created.pane.mirror_label();
+        let argv = attach_argv(&space, &created.pane, &created.remote_herdr);
+        let mirror = remote_mirror_record(&space, &key);
+        if let Err(err) = self.create_remote_mirror(mirror, &label, &argv, None) {
+            tracing::warn!(target = %target, %err, "mirroring a new remote space failed");
+            return;
+        }
+        // Focus it, since the user just asked for it. Creating a local space
+        // focuses it too, so this keeps the two paths feeling the same.
+        if let Some(ws_idx) = self.state.workspaces.len().checked_sub(1) {
+            self.state.switch_workspace(ws_idx);
+            self.state.mode = crate::app::state::Mode::Terminal;
+        }
+    }
+
     /// Brings mirrors for one configured host in line with `snapshot`.
     pub(crate) fn reconcile_remote_mirrors(
         &mut self,
         space: &RemoteSpaceConfig,
         snapshot: &RemoteSpaceSnapshot,
     ) {
-        let plan = plan_remote_mirrors(&self.state.workspaces, space, snapshot);
+        let pinned = self
+            .state
+            .created_remote_workspaces
+            .get(&space.target)
+            .cloned()
+            .unwrap_or_default();
+        let plan = plan_remote_mirrors(&self.state.workspaces, space, snapshot, &pinned);
 
         let mut closed = 0usize;
         for action in plan {
@@ -529,10 +625,35 @@ mod tests {
     use super::*;
     use crate::remote::spaces::RemoteAgentPane;
 
+    /// Planning with nothing pinned, which is the case for every test that is
+    /// not specifically about user-created remote spaces. Shadows the real
+    /// function so those tests read without a trailing empty set.
+    fn plan_remote_mirrors(
+        workspaces: &[Workspace],
+        space: &RemoteSpaceConfig,
+        snapshot: &RemoteSpaceSnapshot,
+    ) -> Vec<MirrorAction> {
+        super::plan_remote_mirrors(workspaces, space, snapshot, &Default::default())
+    }
+
     fn snapshot(panes: Vec<RemoteAgentPane>) -> RemoteSpaceSnapshot {
         RemoteSpaceSnapshot {
             remote_herdr: "/usr/bin/herdr".into(),
             panes,
+            shell_panes: Vec::new(),
+        }
+    }
+
+    /// A snapshot where the host is not mirroring agent-less spaces, so they
+    /// arrive as candidates instead.
+    fn snapshot_with_shells(
+        panes: Vec<RemoteAgentPane>,
+        shell_panes: Vec<RemoteAgentPane>,
+    ) -> RemoteSpaceSnapshot {
+        RemoteSpaceSnapshot {
+            remote_herdr: "/usr/bin/herdr".into(),
+            panes,
+            shell_panes,
         }
     }
 
@@ -637,6 +758,58 @@ mod tests {
 
     fn key_for(target: &str, workspace_id: &str, terminal_id: &str) -> String {
         agent_pane(workspace_id, "ignored", terminal_id).mirror_key(target)
+    }
+
+    /// A space the user asked for on a host is mirrored even with no agent in
+    /// it, which is the whole point of creating one from the sidebar.
+    #[test]
+    fn plan_mirrors_a_pinned_agent_less_space() {
+        let snapshot = snapshot_with_shells(vec![], vec![agent_pane("w7", "notes", "term-7")]);
+        let pinned = std::collections::HashSet::from(["w7".to_string()]);
+
+        let plan = super::plan_remote_mirrors(&[], &space("workbox"), &snapshot, &pinned);
+
+        assert_eq!(
+            plan,
+            vec![MirrorAction::Create {
+                key: key_for("workbox", "w7", "term-7"),
+                label: "notes".into(),
+                argv: attach_argv(
+                    &space("workbox"),
+                    &agent_pane("w7", "notes", "term-7"),
+                    "/usr/bin/herdr"
+                ),
+                agent: Some("claude".into()),
+            }]
+        );
+    }
+
+    /// Without the pin the sidebar stays limited to agents, which is what a host
+    /// without `mirror_all` is asking for.
+    #[test]
+    fn plan_ignores_agent_less_spaces_that_were_not_asked_for() {
+        let snapshot = snapshot_with_shells(vec![], vec![agent_pane("w7", "notes", "term-7")]);
+
+        let plan = plan_remote_mirrors(&[], &space("workbox"), &snapshot);
+
+        assert_eq!(plan, Vec::new());
+    }
+
+    /// The regression that makes the feature usable at all: a created space must
+    /// not be closed by the next snapshot that reports no agent in it.
+    #[test]
+    fn a_pinned_space_survives_the_snapshot_after_it_is_mirrored() {
+        let snapshot = snapshot_with_shells(vec![], vec![agent_pane("w7", "notes", "term-7")]);
+        let pinned = std::collections::HashSet::from(["w7".to_string()]);
+        let workspaces = vec![mirror(
+            "workbox",
+            &key_for("workbox", "w7", "term-7"),
+            "notes",
+        )];
+
+        let plan = super::plan_remote_mirrors(&workspaces, &space("workbox"), &snapshot, &pinned);
+
+        assert_eq!(plan, Vec::new());
     }
 
     #[test]

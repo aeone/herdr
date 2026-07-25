@@ -1215,6 +1215,25 @@ pub enum ContextMenuKind {
         source_pane_id: Option<PaneId>,
         has_manual_label: bool,
     },
+    /// Which host a new space should be created on. Entries are built at runtime
+    /// from the configured mirror hosts, so they live in
+    /// [`ContextMenuState::dynamic_items`] rather than in this kind.
+    NewSpaceHost,
+}
+
+/// One runtime-built context menu entry.
+///
+/// Static menus keep their `&'static str` items; this exists for menus whose
+/// entries depend on configuration, where the label alone is not enough to act
+/// on the choice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuEntry {
+    pub label: String,
+    /// Offline hosts stay listed so the sidebar and this menu agree on what is
+    /// configured, but they cannot be chosen.
+    pub enabled: bool,
+    /// Remote host target, or `None` for the local entry.
+    pub target: Option<String>,
 }
 
 /// Right-click context menu state.
@@ -1223,11 +1242,42 @@ pub struct ContextMenuState {
     pub x: u16,
     pub y: u16,
     pub list: MenuListState,
+    /// Entries for kinds whose items are built at runtime; empty otherwise.
+    pub dynamic_items: Vec<MenuEntry>,
 }
 
 impl ContextMenuState {
-    pub fn items(&self) -> &'static [&'static str] {
+    /// The entry at `idx`, for menus built at runtime.
+    pub fn entry(&self, idx: usize) -> Option<&MenuEntry> {
+        self.dynamic_items.get(idx)
+    }
+
+    /// Whether the item at `idx` can be chosen. Static menu items always can.
+    pub fn is_enabled(&self, idx: usize) -> bool {
+        self.dynamic_items
+            .get(idx)
+            .map(|entry| entry.enabled)
+            .unwrap_or(true)
+    }
+
+    pub fn items(&self) -> Vec<String> {
+        if !self.dynamic_items.is_empty() {
+            return self
+                .dynamic_items
+                .iter()
+                .map(|entry| entry.label.clone())
+                .collect();
+        }
+        self.static_items()
+            .iter()
+            .map(|item| (*item).to_string())
+            .collect()
+    }
+
+    fn static_items(&self) -> &'static [&'static str] {
         match self.kind {
+            // Built at runtime; see `dynamic_items`.
+            ContextMenuKind::NewSpaceHost => &[],
             ContextMenuKind::Workspace { .. } => &["Rename", "Close"],
             ContextMenuKind::GitWorkspace {
                 is_linked_worktree: false,
@@ -1446,6 +1496,11 @@ pub struct AppState {
     /// Remote-space hosts whose last poll/feed failed. Their mirrors render
     /// dimmed and sort to the bottom, since you cannot work with them.
     pub remote_offline_hosts: std::collections::HashSet<String>,
+    /// Remote workspace ids, per host target, that the user created from here.
+    /// They are mirrored even before an agent runs in them, so a space made from
+    /// the sidebar shows up on a host that is not mirroring everything.
+    pub created_remote_workspaces:
+        std::collections::HashMap<String, std::collections::HashSet<String>>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -1832,6 +1887,7 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             remote_offline_hosts: std::collections::HashSet::new(),
+            created_remote_workspaces: std::collections::HashMap::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -2273,6 +2329,8 @@ impl AppState {
                 ContextMenuKind::Tab { ws_idx, tab_idx } => {
                     assert_tab_index(ws_idx, tab_idx, "context menu tab")
                 }
+                // Host entries carry no workspace, tab, or pane indices.
+                ContextMenuKind::NewSpaceHost => {}
                 ContextMenuKind::Pane {
                     ws_idx,
                     tab_idx,
@@ -2489,6 +2547,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            dynamic_items: Vec::new(),
         };
 
         assert_eq!(
@@ -2509,6 +2568,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            dynamic_items: Vec::new(),
         };
 
         assert_eq!(
@@ -2529,6 +2589,7 @@ mod tests {
             x: 0,
             y: 0,
             list: MenuListState::new(0),
+            dynamic_items: Vec::new(),
         };
 
         assert_eq!(

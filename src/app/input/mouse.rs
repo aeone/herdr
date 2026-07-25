@@ -1035,6 +1035,7 @@ impl AppState {
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        dynamic_items: Vec::new(),
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1051,6 +1052,7 @@ impl AppState {
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        dynamic_items: Vec::new(),
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -1087,6 +1089,7 @@ impl AppState {
                         x: mouse.column,
                         y: mouse.row,
                         list: MenuListState::new(0),
+                        dynamic_items: Vec::new(),
                     });
                     self.mode = Mode::ContextMenu;
                 }
@@ -2411,7 +2414,10 @@ mod tests {
                 ..
             } if pane_id == target && source_pane_id == source
         ));
-        assert!(menu.items().contains(&"Swap with focused pane"));
+        assert!(menu
+            .items()
+            .iter()
+            .any(|item| item == "Swap with focused pane"));
     }
 
     #[tokio::test]
@@ -2544,6 +2550,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(0),
+            dynamic_items: Vec::new(),
         });
         app.state.mode = Mode::ContextMenu;
 
@@ -2838,6 +2845,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            dynamic_items: Vec::new(),
         });
         app.state.mode = Mode::ContextMenu;
         handle_context_menu_key(
@@ -2878,6 +2886,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            dynamic_items: Vec::new(),
         });
         app.state.mode = Mode::ContextMenu;
 
@@ -2930,6 +2939,7 @@ mod tests {
             x: 2,
             y: 2,
             list: MenuListState::new(1),
+            dynamic_items: Vec::new(),
         });
         app.state.mode = Mode::ContextMenu;
 

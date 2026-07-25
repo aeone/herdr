@@ -298,9 +298,11 @@ impl App {
         if !handled_pane_double_click {
             if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
                 match action {
-                    MouseAction::NewWorkspace => {
-                        self.begin_tui_workspace_create("tui.mouse.workspace.create")
-                    }
+                    MouseAction::NewWorkspace => self.begin_tui_workspace_create_at(
+                        "tui.mouse.workspace.create",
+                        // Anchor the host menu to the button that opened it.
+                        Some((mouse.column, mouse.row)),
+                    ),
                     MouseAction::Settings(action) => match action {
                         SettingsAction::SaveTheme(name) => self.save_theme(&name),
                         SettingsAction::SaveSound(enabled) => self.save_sound(enabled),

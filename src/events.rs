@@ -151,6 +151,13 @@ pub enum AppEvent {
         target: String,
         result: Result<crate::remote::spaces::RemoteSpaceSnapshot, String>,
     },
+    /// A space the user asked for on a mirrored host was created, or failed to
+    /// be. Creation runs off the event loop because it is an ssh round trip.
+    #[cfg(unix)]
+    RemoteSpaceCreated {
+        target: String,
+        result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
+    },
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,
