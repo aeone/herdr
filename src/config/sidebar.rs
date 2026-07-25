@@ -104,6 +104,8 @@ pub struct SidebarTokenStyle {
 pub enum AgentSidebarToken {
     StateIcon,
     StateText,
+    /// 1-9 switch position of this agent, blank past 9. Matches focus_agent.
+    Number,
     Workspace,
     Tab,
     Pane,
@@ -123,6 +125,8 @@ pub enum AgentSidebarToken {
 pub enum SpaceSidebarToken {
     StateIcon,
     StateText,
+    /// 1-9 switch position of this space, blank past 9. Matches switch_workspace.
+    Number,
     Workspace,
     /// Host prefix for a space mirrored from a remote Herdr; empty otherwise.
     RemoteHost,
@@ -238,6 +242,7 @@ fn agent_token_name(token: &AgentSidebarToken) -> String {
     match token {
         AgentSidebarToken::StateIcon => "state_icon".into(),
         AgentSidebarToken::StateText => "state_text".into(),
+        AgentSidebarToken::Number => "number".into(),
         AgentSidebarToken::Workspace => "workspace".into(),
         AgentSidebarToken::Tab => "tab".into(),
         AgentSidebarToken::Pane => "pane".into(),
@@ -254,6 +259,7 @@ fn space_token_name(token: &SpaceSidebarToken) -> String {
     match token {
         SpaceSidebarToken::StateIcon => "state_icon".into(),
         SpaceSidebarToken::StateText => "state_text".into(),
+        SpaceSidebarToken::Number => "number".into(),
         SpaceSidebarToken::Workspace => "workspace".into(),
         SpaceSidebarToken::RemoteHost => "remote_host".into(),
         SpaceSidebarToken::Branch => "branch".into(),
@@ -294,6 +300,7 @@ impl<'de> Deserialize<'de> for AgentSidebarToken {
             &[
                 ("state_icon", Self::StateIcon),
                 ("state_text", Self::StateText),
+                ("number", Self::Number),
                 ("workspace", Self::Workspace),
                 ("tab", Self::Tab),
                 ("pane", Self::Pane),
@@ -342,6 +349,7 @@ impl<'de> Deserialize<'de> for SpaceSidebarToken {
             &[
                 ("state_icon", Self::StateIcon),
                 ("state_text", Self::StateText),
+                ("number", Self::Number),
                 ("workspace", Self::Workspace),
                 ("remote_host", Self::RemoteHost),
                 ("branch", Self::Branch),

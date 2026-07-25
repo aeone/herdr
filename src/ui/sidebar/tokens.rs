@@ -14,6 +14,7 @@ pub(super) struct ResolvedToken {
 pub(super) enum ResolvedTokenKind {
     StateIcon,
     StateText(String),
+    Number(String),
     Workspace(String),
     Tab(String),
     Pane(String),
@@ -47,6 +48,7 @@ pub(super) fn agent_rows(
     config: &AgentsSidebarConfig,
     entry: &AgentPanelEntry,
     state_text: &str,
+    switch_number: Option<usize>,
 ) -> Vec<Vec<ResolvedToken>> {
     config
         .rows_for_agent(entry.agent)
@@ -60,6 +62,9 @@ pub(super) fn agent_rows(
                             AgentSidebarToken::StateIcon => Some(ResolvedTokenKind::StateIcon),
                             AgentSidebarToken::StateText => {
                                 Some(ResolvedTokenKind::StateText(state_text.to_string()))
+                            }
+                            AgentSidebarToken::Number => {
+                                switch_number.map(|n| ResolvedTokenKind::Number(n.to_string()))
                             }
                             AgentSidebarToken::Workspace => {
                                 Some(ResolvedTokenKind::Workspace(entry.primary_label.clone()))
@@ -106,6 +111,8 @@ pub(super) fn agent_rows(
 
 pub(super) struct SpaceTokenContext<'a> {
     pub workspace: &'a str,
+    /// 1-9 switch position of this space, when it has one.
+    pub switch_number: Option<usize>,
     /// Host prefix when this space mirrors a remote Herdr.
     pub remote_host: Option<&'a str>,
     /// Resolved colour for that prefix, if the host configured one.
@@ -134,6 +141,9 @@ pub(super) fn space_rows(
                         SpaceSidebarToken::StateText => {
                             Some(ResolvedTokenKind::StateText(context.state_text.to_string()))
                         }
+                        SpaceSidebarToken::Number => context
+                            .switch_number
+                            .map(|n| ResolvedTokenKind::Number(n.to_string())),
                         SpaceSidebarToken::Workspace => {
                             Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
                         }
@@ -227,7 +237,7 @@ mod tests {
             ..Default::default()
         };
 
-        let rows = agent_rows(&config, &entry, "working");
+        let rows = agent_rows(&config, &entry, "working", None);
 
         assert_eq!(rows.len(), 2);
         assert_eq!(
@@ -257,7 +267,7 @@ mod tests {
         };
 
         assert_eq!(
-            agent_rows(&config, &entry, "deep in the mines"),
+            agent_rows(&config, &entry, "deep in the mines", None),
             vec![vec![
                 ResolvedToken::unstyled(ResolvedTokenKind::StateText("deep in the mines".into())),
                 ResolvedToken::unstyled(ResolvedTokenKind::Custom("reviewing auth".into())),
@@ -283,7 +293,7 @@ mod tests {
         };
 
         assert_eq!(
-            agent_rows(&config, &entry, "working"),
+            agent_rows(&config, &entry, "working", None),
             vec![vec![
                 ResolvedToken::unstyled(ResolvedTokenKind::TerminalTitle("⠋ raw title".into())),
                 ResolvedToken::unstyled(ResolvedTokenKind::TerminalTitle("raw title".into())),
@@ -305,7 +315,7 @@ mod tests {
         pi.agent_label = Some("renamed pi".into());
 
         assert_eq!(
-            agent_rows(&config, &pi, "working"),
+            agent_rows(&config, &pi, "working", None),
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
                 "renamed pi".into()
             ))]]
@@ -313,7 +323,7 @@ mod tests {
 
         pi.agent = None;
         assert_eq!(
-            agent_rows(&config, &pi, "working"),
+            agent_rows(&config, &pi, "working", None),
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Workspace(
                 "repo".into()
             ))]]
@@ -328,6 +338,7 @@ mod tests {
             space_rows(
                 &config,
                 SpaceTokenContext {
+                    switch_number: None,
                     remote_host: None,
                     remote_host_color: None,
                     workspace: "feature",
@@ -357,6 +368,7 @@ mod tests {
             space_rows(
                 &config,
                 SpaceTokenContext {
+                    switch_number: None,
                     remote_host: None,
                     remote_host_color: None,
                     workspace: "repo",
@@ -372,6 +384,39 @@ mod tests {
             ))]]
         );
     }
+    #[test]
+    fn number_token_shows_the_switch_position_or_nothing() {
+        let config = SpacesSidebarConfig {
+            rows: vec![vec![
+                SpaceSidebarToken::Number,
+                SpaceSidebarToken::Workspace,
+            ]],
+            ..SpacesSidebarConfig::default()
+        };
+        let tokens = std::collections::HashMap::new();
+        let ctx = |n: Option<usize>| SpaceTokenContext {
+            switch_number: n,
+            workspace: "repo",
+            remote_host: None,
+            remote_host_color: None,
+            branch: None,
+            state_text: "idle",
+            ahead_behind: None,
+            tokens: &tokens,
+            suppress_git_details: false,
+        };
+
+        let numbered = space_rows(&config, ctx(Some(3)));
+        assert_eq!(numbered[0][0].kind, ResolvedTokenKind::Number("3".into()));
+
+        // No position (past 9) -> the number token drops, workspace remains.
+        let unnumbered = space_rows(&config, ctx(None));
+        assert_eq!(
+            unnumbered[0][0].kind,
+            ResolvedTokenKind::Workspace("repo".into())
+        );
+    }
+
     #[test]
     fn host_prefix_hugs_the_name_with_a_tight_dot() {
         let host = ResolvedToken::unstyled(ResolvedTokenKind::RemoteHost {
@@ -404,6 +449,7 @@ mod tests {
         let rows = space_rows(
             &config,
             SpaceTokenContext {
+                switch_number: None,
                 workspace: "lifestream",
                 remote_host: Some("sera"),
                 remote_host_color: Some(ratatui::style::Color::Blue),

@@ -296,6 +296,7 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
         &app.sidebar_spaces,
         SpaceTokenContext {
             workspace: &label,
+            switch_number: None,
             remote_host: ws
                 .remote_mirror
                 .as_ref()
@@ -685,12 +686,26 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
 }
 
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
+    resolved_agent_rows_numbered(app, entry, None)
+}
+
+/// 1-9 switch position for the given position, blank past 9 to match the
+/// `focus_agent` / `switch_workspace` indexed keybinds.
+fn switch_number_for(position: usize) -> Option<usize> {
+    (position < 9).then_some(position + 1)
+}
+
+fn resolved_agent_rows_numbered(
+    app: &AppState,
+    entry: &AgentPanelEntry,
+    switch_number: Option<usize>,
+) -> Vec<Vec<ResolvedToken>> {
     let label = entry
         .state_labels
         .get(agent_panel_status_key(entry.state, entry.seen))
         .map(String::as_str)
         .unwrap_or_else(|| state_label(entry.state, entry.seen));
-    tokens::agent_rows(&app.sidebar_agents, entry, label)
+    tokens::agent_rows(&app.sidebar_agents, entry, label, switch_number)
 }
 
 pub(crate) fn agent_entry_height_in_body(
@@ -1089,6 +1104,7 @@ fn resolved_token_spans(
             | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::TerminalTitle(text)
             | ResolvedTokenKind::Branch(text)
+            | ResolvedTokenKind::Number(text)
             | ResolvedTokenKind::Custom(text) => display_width(text),
             ResolvedTokenKind::RemoteHost { text, .. } => display_width(text),
             _ => 0,
@@ -1191,6 +1207,12 @@ fn resolved_token_spans(
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     apply_token_style(state_text_style, token.style),
+                ));
+            }
+            ResolvedTokenKind::Number(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(Style::default().fg(p.overlay0), token.style),
                 ));
             }
             ResolvedTokenKind::Workspace(text) => {
@@ -1303,6 +1325,8 @@ fn render_workspace_list(
     let metrics = workspace_list_scroll_metrics(app, area);
     let scrollbar_rect = workspace_list_scrollbar_rect(app, area);
     let cards = &app.view.workspace_card_areas;
+    // Positions for the number token, matching switch_workspace's indexed order.
+    let visible_order = app.visible_workspace_order();
 
     for card in cards {
         let i = card.ws_idx;
@@ -1368,6 +1392,10 @@ fn render_workspace_list(
             &app.sidebar_spaces,
             SpaceTokenContext {
                 workspace: &display_label,
+                switch_number: visible_order
+                    .iter()
+                    .position(|idx| *idx == i)
+                    .and_then(switch_number_for),
                 remote_host: ws
                     .remote_mirror
                     .as_ref()
@@ -1541,7 +1569,7 @@ fn render_agent_detail(
     let body_bottom = body.y + body.height;
     for (index, detail) in details.iter().enumerate().skip(scroll) {
         let label_color = state_label_color(detail.state, detail.seen, p);
-        let rows = resolved_agent_rows(app, detail);
+        let rows = resolved_agent_rows_numbered(app, detail, switch_number_for(index));
         let height = (rows.len().max(1) as u16).min(body.height);
         if row_y.saturating_add(height) > body_bottom {
             break;

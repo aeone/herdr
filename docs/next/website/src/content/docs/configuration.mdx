@@ -280,6 +280,7 @@ Agent rows accept these built-in tokens:
 
 - `state_icon` — colored icon for the agent's semantic state.
 - `state_text` — `idle`, `working`, `blocked`, `done`, or `unknown`, including a reported display label when present.
+- `number` — 1-9 switch position of this agent, blank past 9; matches the `focus_agent` indexed keybind.
 - `workspace` — workspace name.
 - `remote_host` — host prefix for an agent mirrored from a remote Herdr; empty for local agents.
 - `tab` — tab name when available.
@@ -293,6 +294,7 @@ Space rows accept these built-in tokens:
 
 - `state_icon` — colored icon for the space's rolled-up agent state.
 - `state_text` — text for the rolled-up agent state.
+- `number` — 1-9 switch position of this space, blank past 9; matches the `switch_workspace` indexed keybind.
 - `workspace` — workspace name.
 - `remote_host` — host prefix for a space mirrored from a remote Herdr; empty for local spaces.
 - `branch` — Git branch when available.
