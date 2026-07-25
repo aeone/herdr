@@ -180,9 +180,13 @@ pub(super) fn space_rows(
 }
 
 pub(super) fn separator(previous: &ResolvedToken, current: &ResolvedToken) -> &'static str {
-    if matches!(previous.kind, ResolvedTokenKind::StateIcon)
-        || matches!(current.kind, ResolvedTokenKind::GitStatus { .. })
+    if matches!(
+        previous.kind,
+        ResolvedTokenKind::StateIcon | ResolvedTokenKind::Number(_)
+    ) || matches!(current.kind, ResolvedTokenKind::GitStatus { .. })
     {
+        // The number reads as a label on the row, like the state icon, so it
+        // gets a plain space rather than the " · " separator.
         " "
     } else if matches!(previous.kind, ResolvedTokenKind::RemoteHost { .. }) {
         // The host reads as a tight prefix on the name that follows it, so the
@@ -426,6 +430,13 @@ mod tests {
         let name = ResolvedToken::unstyled(ResolvedTokenKind::Workspace("lifestream".into()));
 
         assert_eq!(separator(&host, &name), "\u{b7}");
+    }
+
+    #[test]
+    fn number_gets_a_plain_space_not_a_dot() {
+        let number = ResolvedToken::unstyled(ResolvedTokenKind::Number("3".into()));
+        let icon = ResolvedToken::unstyled(ResolvedTokenKind::StateIcon);
+        assert_eq!(separator(&number, &icon), " ");
     }
 
     #[test]
