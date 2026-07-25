@@ -224,20 +224,22 @@ pub(crate) fn run_feed(
         let reader = std::io::BufReader::new(stdout);
         let mut block = Vec::new();
         for line in reader.lines() {
+            let Ok(line) = line else { break };
+            if !line.trim().is_empty() {
+                block.push(line);
+                // A block is the same three lines a poll returns: binary path,
+                // workspace list, pane list.
+                if block.len() == 3 {
+                    streamed = true;
+                    on_snapshot(parse_discovery_output(&block.join("\n"), space.mirror_all));
+                    block.clear();
+                }
+            }
+            // Checked after the line is consumed, not before: the read has
+            // already blocked, so discarding what it returned only loses a
+            // snapshot without stopping any sooner.
             if !should_continue() {
                 break;
-            }
-            let Ok(line) = line else { break };
-            if line.trim().is_empty() {
-                continue;
-            }
-            block.push(line);
-            // A block is the same three lines a poll returns: binary path,
-            // workspace list, pane list.
-            if block.len() == 3 {
-                streamed = true;
-                on_snapshot(parse_discovery_output(&block.join("\n"), space.mirror_all));
-                block.clear();
             }
         }
     }

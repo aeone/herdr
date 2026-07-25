@@ -174,6 +174,10 @@ fn run_remote_space_worker(
     use crate::remote::spaces::FeedOutcome;
 
     let stopped = || stop.load(std::sync::atomic::Ordering::Relaxed);
+    // `run_feed` asks whether to keep reading, which is the negation of the
+    // stop flag. Handing it `stopped` directly ends the feed after its first
+    // line, so every host silently falls back to interval polling.
+    let keep_streaming = || !stopped();
     let emit = |result: std::io::Result<crate::remote::spaces::RemoteSpaceSnapshot>| {
         let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteSpacesPolled {
             target: space.target.clone(),
@@ -186,7 +190,7 @@ fn run_remote_space_worker(
             &space,
             manage_ssh_config,
             |snapshot| emit(snapshot),
-            &stopped,
+            &keep_streaming,
         );
 
         if stopped() {
