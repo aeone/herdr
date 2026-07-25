@@ -270,9 +270,6 @@ impl App {
         snapshot: &RemoteSpaceSnapshot,
     ) {
         let plan = plan_remote_mirrors(&self.state.workspaces, space, snapshot);
-        if plan.is_empty() {
-            return;
-        }
 
         let mut closed = 0usize;
         for action in plan {
@@ -308,6 +305,9 @@ impl App {
         if closed > 0 {
             self.shutdown_detached_terminal_runtimes();
         }
+        // Always, even when the structure plan was empty: an agent changing
+        // status (idle->working) is not a structure change, and its mirror must
+        // still follow. Runs after the plan so brand-new mirrors already exist.
         self.report_remote_agent_states(space, snapshot);
     }
 
