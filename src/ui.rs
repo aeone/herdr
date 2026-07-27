@@ -74,14 +74,14 @@ pub(crate) use self::{
         SETTINGS_POPUP_WIDTH,
     },
     sidebar::{
-        agent_entry_gap, agent_entry_height_in_body, agent_panel_body_rect, agent_panel_entries,
+        agent_panel_body_rect, agent_panel_entries, agent_panel_layout,
         agent_panel_scroll_for_target, agent_panel_scroll_metrics, agent_panel_scrollbar_rect,
         agent_panel_toggle_rect, all_agent_panel_entries, collapsed_sidebar_sections,
         collapsed_sidebar_toggle_rect, compute_workspace_card_areas, expanded_sidebar_sections,
         expanded_sidebar_toggle_rect, normalized_workspace_scroll, sidebar_section_divider_rect,
         workspace_drop_indicator_row, workspace_list_entries, workspace_list_entries_expanded,
         workspace_list_rect, workspace_list_scroll_metrics, workspace_list_scrollbar_rect,
-        workspace_parent_group_state, AgentPanelEntry, WorkspaceListEntry,
+        workspace_parent_group_state, AgentPanelEntry, AgentPanelRow, WorkspaceListEntry,
     },
 };
 pub(crate) use self::{
@@ -650,6 +650,57 @@ mod tests {
 
         assert!(screen.contains("new workspace"), "{screen}");
         assert!(screen.contains("project"), "{screen}");
+    }
+
+
+    /// The headings must actually reach the screen, not just the layout.
+    #[test]
+    fn status_view_draws_group_headings_in_the_agent_panel() {
+        use crate::app::state::AgentPanelSort;
+        use crate::detect::{Agent, AgentState};
+
+        let mut app = crate::app::state::AppState::test_new();
+        let mut workspaces = Vec::new();
+        for name in ["alpha", "beta", "gamma"] {
+            workspaces.push(Workspace::test_new(name));
+        }
+        let panes: Vec<_> = workspaces.iter().map(|ws| ws.tabs[0].root_pane).collect();
+        app.workspaces = workspaces;
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        app.mode = Mode::Terminal;
+        app.agent_panel_sort = AgentPanelSort::Status;
+
+        let now_ms = crate::app::state::unix_millis_now();
+        let day_ms = 24 * 60 * 60 * 1000u64;
+        let cases = [
+            (AgentState::Working, 0u64),
+            (AgentState::Idle, 2 * day_ms),
+            (AgentState::Idle, 40 * day_ms),
+        ];
+        for (idx, (state, age)) in cases.iter().enumerate() {
+            let terminal_id = app.workspaces[idx].tabs[0].panes[&panes[idx]]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = *state;
+            terminal.agent_state_changed_at_ms = Some(now_ms.saturating_sub(*age));
+        }
+
+        let area = Rect::new(0, 0, 90, 30);
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let screen = (0..area.height)
+            .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("working"), "{screen}");
+        assert!(screen.contains("idle \u{b7} 3d"), "{screen}");
+        assert!(screen.contains("idle \u{b7} 2mo"), "{screen}");
     }
 
     #[tokio::test]

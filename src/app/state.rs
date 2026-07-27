@@ -997,6 +997,20 @@ pub enum IdleAge {
 }
 
 impl IdleAge {
+    /// Short label for the group heading.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Day => "today",
+            Self::ThreeDays => "3d",
+            Self::Week => "7d",
+            Self::TwoWeeks => "14d",
+            Self::FourWeeks => "28d",
+            Self::TwoMonths => "2mo",
+            Self::Older => "2mo+",
+            Self::Unknown => "unknown",
+        }
+    }
+
     /// Bucket from the age in milliseconds, or `Unknown` when nothing was
     /// recorded. A timestamp in the future (clock moved backwards, or a
     /// snapshot from another machine) is treated as just-now rather than

@@ -64,6 +64,15 @@ pub(crate) enum AgentGroup {
 }
 
 impl AgentGroup {
+    pub(crate) fn label(self) -> String {
+        match self {
+            Self::Blocked => "blocked".to_string(),
+            Self::Working => "working".to_string(),
+            Self::Idle(age) => format!("idle · {}", age.label()),
+            Self::Unknown => "unknown".to_string(),
+        }
+    }
+
     pub(crate) fn of(entry: &AgentPanelEntry, now_ms: u64) -> Self {
         use crate::detect::AgentState;
         match entry.state {

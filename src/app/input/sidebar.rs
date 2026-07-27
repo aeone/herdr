@@ -447,22 +447,21 @@ impl AppState {
             return None;
         }
 
-        let mut row_y = body.y;
-        let body_bottom = body.y + body.height;
         let entries = crate::ui::agent_panel_entries(self);
         let scroll = self.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-        for (index, detail) in entries.iter().enumerate().skip(scroll) {
-            let height = crate::ui::agent_entry_height_in_body(self, detail, body.height);
-            if row_y.saturating_add(height) > body_bottom {
-                break;
+        // Same layout the renderer draws from, so a click always resolves to
+        // whatever is actually under the cursor. Clicks on a group heading fall
+        // through to None rather than selecting a neighbouring agent.
+        for laid_out in crate::ui::agent_panel_layout(self, &entries, body, scroll) {
+            let top = body.y.saturating_add(laid_out.offset);
+            if row < top || row >= top.saturating_add(laid_out.height) {
+                continue;
             }
-            if row >= row_y && row < row_y.saturating_add(height) {
-                return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
-            }
-            row_y = row_y
-                .saturating_add(height)
-                .saturating_add(crate::ui::agent_entry_gap(self, index, entries.len()))
-                .min(body_bottom);
+            let crate::ui::AgentPanelRow::Entry(index) = laid_out.kind else {
+                return None;
+            };
+            let detail = entries.get(index)?;
+            return Some((detail.ws_idx, detail.tab_idx, detail.pane_id));
         }
         None
     }
@@ -1082,6 +1081,91 @@ mod tests {
             app.state.workspaces[1].tabs[0].layout.focused(),
             second_pane
         );
+    }
+
+    /// The renderer and the hit test must agree on every single row.
+    ///
+    /// They are separate walks over the same panel; group headings add rows that
+    /// only one of them might account for, and the failure is silent — a click
+    /// lands on a different agent than the one drawn under the cursor. So sweep
+    /// every row in the body and check the hit test against the layout the
+    /// renderer draws from.
+    #[test]
+    fn every_panel_row_hit_tests_to_what_is_drawn_there() {
+        let mut app = app_for_mouse_test();
+        let mut workspaces = Vec::new();
+        for name in ["one", "two", "three", "four"] {
+            workspaces.push(Workspace::test_new(name));
+        }
+        let panes: Vec<_> = workspaces.iter().map(|ws| ws.tabs[0].root_pane).collect();
+        app.state.workspaces = workspaces;
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.agent_panel_sort = AgentPanelSort::Status;
+        app.state.view.sidebar_rect = Rect::new(0, 0, 30, 24);
+        app.state.view.terminal_area = Rect::new(30, 0, 60, 24);
+
+        // A spread of states and idle ages, so several headings are drawn.
+        let now_ms = crate::app::state::unix_millis_now();
+        let day_ms = 24 * 60 * 60 * 1000;
+        let cases = [
+            (AgentState::Working, 0),
+            (AgentState::Idle, 2 * day_ms),
+            (AgentState::Blocked, 0),
+            (AgentState::Idle, 40 * day_ms),
+        ];
+        for (idx, (state, age)) in cases.iter().enumerate() {
+            let terminal_id = app.state.workspaces[idx].tabs[0].panes[&panes[idx]]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            terminal.state = *state;
+            terminal.agent_state_changed_at_ms = Some(now_ms.saturating_sub(*age));
+        }
+
+        let area = app.state.agent_panel_rect();
+        let metrics = crate::ui::agent_panel_scroll_metrics(&app.state, area);
+        let body =
+            crate::ui::agent_panel_body_rect(area, crate::ui::should_show_scrollbar(metrics));
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        let layout = crate::ui::agent_panel_layout(&app.state, &entries, body, 0);
+        assert!(
+            layout
+                .iter()
+                .any(|row| matches!(row.kind, crate::ui::AgentPanelRow::Header(_))),
+            "expected headings in the status view"
+        );
+
+        for row_y in body.y..body.y + body.height {
+            let drawn = layout.iter().find(|laid_out| {
+                let top = body.y + laid_out.offset;
+                row_y >= top && row_y < top + laid_out.height
+            });
+            let hit = app.state.agent_detail_target_at(row_y);
+            match drawn.map(|laid_out| &laid_out.kind) {
+                Some(crate::ui::AgentPanelRow::Entry(index)) => {
+                    let entry = &entries[*index];
+                    assert_eq!(
+                        hit,
+                        Some((entry.ws_idx, entry.tab_idx, entry.pane_id)),
+                        "row {row_y} draws entry {index} but hit tests elsewhere"
+                    );
+                }
+                // A heading is not clickable, and must not select its neighbour.
+                Some(crate::ui::AgentPanelRow::Header(_)) => {
+                    assert_eq!(
+                        hit, None,
+                        "row {row_y} is a heading but resolved to an agent"
+                    );
+                }
+                None => assert_eq!(
+                    hit, None,
+                    "row {row_y} draws nothing but resolved to an agent"
+                ),
+            }
+        }
     }
 
     #[test]

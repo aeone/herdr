@@ -748,33 +748,120 @@ pub(crate) fn agent_entry_gap(app: &AppState, entry_idx: usize, entry_count: usi
     }
 }
 
+/// One laid-out row block in the agent panel: either a group heading or an
+/// agent card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentPanelRow {
+    Header(crate::app::agent_view::AgentGroup),
+    Entry(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentPanelRowLayout {
+    pub kind: AgentPanelRow,
+    /// Row offset from the top of the body, before `body.y` is added.
+    pub offset: u16,
+    pub height: u16,
+}
+
+/// Whether a heading is drawn above the entry at `index`.
+///
+/// True at the start of every group. Also true for the first visible entry even
+/// mid-group, so a scrolled panel still says which group you are looking at.
+fn agent_group_header_above(groups: &[crate::app::agent_view::AgentGroup], index: usize) -> bool {
+    match index.checked_sub(1) {
+        None => true,
+        Some(previous) => groups.get(index) != groups.get(previous),
+    }
+}
+
+/// The single source of truth for agent panel geometry.
+///
+/// The renderer, the click hit test, the visible-row count and the
+/// scroll-to-bottom walk all derive from this. They used to each walk the entry
+/// list themselves, which was survivable while every entry was one block; group
+/// headings add rows that only some of them would have known about, and a click
+/// would then land on a different agent than the one drawn under the cursor.
+pub(crate) fn agent_panel_layout(
+    app: &AppState,
+    entries: &[AgentPanelEntry],
+    body: Rect,
+    scroll: usize,
+) -> Vec<AgentPanelRowLayout> {
+    let mut rows = Vec::new();
+    if body.width == 0 || body.height == 0 {
+        return rows;
+    }
+
+    // Headings only exist in the status view; every other mode lays out exactly
+    // as it did before this function existed.
+    let groups: Vec<crate::app::agent_view::AgentGroup> = if matches!(
+        app.agent_panel_sort,
+        crate::app::state::AgentPanelSort::Status
+    ) {
+        let now_ms = crate::app::state::unix_millis_now();
+        entries
+            .iter()
+            .map(|entry| crate::app::agent_view::AgentGroup::of(entry, now_ms))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut used = 0u16;
+    for (index, entry) in entries.iter().enumerate().skip(scroll) {
+        let wants_header =
+            !groups.is_empty() && (index == scroll || agent_group_header_above(&groups, index));
+        let header_rows = u16::from(wants_header);
+        let height = agent_entry_height_in_body(app, entry, body.height);
+        if used.saturating_add(header_rows).saturating_add(height) > body.height {
+            break;
+        }
+        if let (true, Some(group)) = (wants_header, groups.get(index)) {
+            rows.push(AgentPanelRowLayout {
+                kind: AgentPanelRow::Header(*group),
+                offset: used,
+                height: 1,
+            });
+            used = used.saturating_add(1);
+        }
+        rows.push(AgentPanelRowLayout {
+            kind: AgentPanelRow::Entry(index),
+            offset: used,
+            height,
+        });
+        used = used
+            .saturating_add(height)
+            .saturating_add(agent_entry_gap(app, index, entries.len()))
+            .min(body.height);
+    }
+    rows
+}
+
 fn agent_panel_visible_count_from(app: &AppState, area: Rect, scroll: usize) -> usize {
     let body = agent_panel_body_rect(area, false);
     if body.width == 0 || body.height == 0 {
         return 0;
     }
 
-    let mut used_rows = 0u16;
-    let mut visible = 0usize;
     let entries = agent_panel_entries(app);
-    for (index, entry) in entries.iter().enumerate().skip(scroll) {
-        let height = agent_entry_height_in_body(app, entry, body.height);
-        if used_rows.saturating_add(height) > body.height {
-            break;
-        }
-        used_rows = used_rows.saturating_add(height);
-        visible += 1;
-        used_rows = used_rows
-            .saturating_add(agent_entry_gap(app, index, entries.len()))
-            .min(body.height);
-    }
-    visible
+    agent_panel_layout(app, &entries, body, scroll)
+        .iter()
+        .filter(|row| matches!(row.kind, AgentPanelRow::Entry(_)))
+        .count()
 }
 
 fn agent_panel_bottom_start(app: &AppState, area: Rect) -> usize {
     let body = agent_panel_body_rect(area, false);
     let entries = agent_panel_entries(app);
-    let mut used_rows = 0u16;
+    // Walking backwards, an entry may also need its heading row, and the
+    // topmost included entry always gets one. Budget a row for both so the
+    // bottom-most scroll position still fits what the layout will draw.
+    let headed = matches!(
+        app.agent_panel_sort,
+        crate::app::state::AgentPanelSort::Status
+    );
+    let mut used_rows = u16::from(headed);
     let mut start = entries.len();
     for (index, entry) in entries.iter().enumerate().rev() {
         let gap = agent_entry_gap(app, index, entries.len());
@@ -1602,16 +1689,29 @@ fn render_agent_detail(
     }
 
     let scroll = app.agent_panel_scroll.min(metrics.max_offset_from_bottom);
-    let mut row_y = body.y;
-    let body_bottom = body.y + body.height;
-    for (index, detail) in details.iter().enumerate().skip(scroll) {
+    let layout = agent_panel_layout(app, &details, body, scroll);
+    for row in &layout {
+        let AgentPanelRow::Entry(index) = row.kind else {
+            let AgentPanelRow::Header(group) = row.kind else {
+                continue;
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {}", group.label()),
+                    Style::default().fg(p.overlay0).add_modifier(Modifier::DIM),
+                ))),
+                Rect::new(body.x, body.y + row.offset, body.width, 1),
+            );
+            continue;
+        };
+        let Some(detail) = details.get(index) else {
+            continue;
+        };
+        let row_y = body.y + row.offset;
+        let height = row.height;
         let label_color = state_label_color(detail.state, detail.seen, p);
         let host_offline = workspace_host_offline(app, detail.ws_idx);
         let rows = resolved_agent_rows_numbered(app, detail, switch_number_for(index));
-        let height = (rows.len().max(1) as u16).min(body.height);
-        if row_y.saturating_add(height) > body_bottom {
-            break;
-        }
 
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
         let row_style = if is_active {
@@ -1655,10 +1755,6 @@ fn render_agent_detail(
                 Rect::new(body.x, row_y + row_index as u16, body.width, 1),
             );
         }
-        row_y = row_y
-            .saturating_add(height)
-            .saturating_add(agent_entry_gap(app, index, details.len()))
-            .min(body_bottom);
     }
 
     if let Some(track) = scrollbar_rect {
