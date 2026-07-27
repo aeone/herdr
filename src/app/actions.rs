@@ -2891,9 +2891,14 @@ impl AppState {
         let change = mutation.effective_state_change.or(unchanged_change)?;
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
+            // Wall clock, not the `now` Instant above: the sidebar buckets idle
+            // agents by age in days and months, which outlives the process.
+            let changed_at_ms = crate::app::state::unix_millis_now();
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
                 terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
+                terminal.agent_state_changed_at_ms = Some(changed_at_ms);
             }
+            self.mark_session_dirty();
         }
         let seen = self.apply_pane_state_change(ws_idx, pane_id, &change)?;
         let update = PaneStateUpdate {

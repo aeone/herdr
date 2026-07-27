@@ -493,6 +493,7 @@ fn restore_tab(
             .and_then(|pane| pane.managed_agent_kind.as_deref())
             .and_then(crate::detect::parse_canonical_agent_label);
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
+        let saved_state_changed_at_ms = saved_pane.and_then(|p| p.agent_state_changed_at_ms);
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
@@ -631,6 +632,11 @@ fn restore_tab(
                 if let Some(label) = saved_label {
                     terminal.set_manual_label(label);
                 }
+                // Carry the idle clock across the restart. Restore re-detects
+                // state, which would otherwise stamp everything as "changed
+                // just now" and collapse every idle agent into the newest
+                // bucket.
+                terminal.agent_state_changed_at_ms = saved_state_changed_at_ms;
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
                 }
@@ -1192,6 +1198,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            agent_state_changed_at_ms: None,
                         },
                     )]),
                     zoomed: false,
@@ -1273,6 +1280,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                agent_state_changed_at_ms: None,
                             },
                         ),
                         (
@@ -1284,6 +1292,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                agent_state_changed_at_ms: None,
                             },
                         ),
                     ]),
@@ -1337,6 +1346,7 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     launch_argv: None,
+                    agent_state_changed_at_ms: None,
                 },
             )
         };
@@ -1352,6 +1362,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            agent_state_changed_at_ms: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1503,6 +1514,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            agent_state_changed_at_ms: None,
                         },
                     )]),
                     zoomed: false,
@@ -1664,6 +1676,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_state_changed_at_ms: None,
             },
         );
         let history = SessionHistorySnapshot {

@@ -119,6 +119,13 @@ pub struct TerminalState {
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
+    /// Wall-clock time the agent last changed state, as unix milliseconds.
+    ///
+    /// Deliberately not an `Instant`: the sidebar buckets idle agents by age up
+    /// to months, which is longer than a server process typically lives, so
+    /// this has to survive a restart. It is persisted with the pane and
+    /// restored on load.
+    pub agent_state_changed_at_ms: Option<u64>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -151,6 +158,7 @@ impl TerminalState {
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
+            agent_state_changed_at_ms: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,

@@ -590,7 +590,8 @@ impl AppState {
                     if self.on_agent_panel_sort_toggle(mouse.column, mouse.row) {
                         self.agent_panel_sort = match self.agent_panel_sort {
                             AgentPanelSort::Spaces => AgentPanelSort::Priority,
-                            AgentPanelSort::Priority => AgentPanelSort::Spaces,
+                            AgentPanelSort::Priority => AgentPanelSort::Status,
+                            AgentPanelSort::Status => AgentPanelSort::Spaces,
                         };
                         self.agent_panel_scroll = 0;
                         self.mark_session_dirty();

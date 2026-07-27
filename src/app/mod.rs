@@ -256,6 +256,7 @@ fn agent_panel_sort_from_config(
     match sort {
         crate::config::AgentPanelSortConfig::Spaces => state::AgentPanelSort::Spaces,
         crate::config::AgentPanelSortConfig::Priority => state::AgentPanelSort::Priority,
+        crate::config::AgentPanelSortConfig::Status => state::AgentPanelSort::Status,
     }
 }
 

@@ -95,6 +95,8 @@ pub enum AgentPanelSortConfig {
     #[serde(alias = "workspaces")]
     Spaces,
     Priority,
+    /// Group by agent state, idle subgrouped by how long it has been idle.
+    Status,
 }
 
 impl AgentPanelSortConfig {
@@ -102,6 +104,7 @@ impl AgentPanelSortConfig {
         match self {
             Self::Spaces => "spaces",
             Self::Priority => "priority",
+            Self::Status => "status",
         }
     }
 }

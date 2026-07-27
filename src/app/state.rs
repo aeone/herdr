@@ -969,11 +969,65 @@ pub(crate) struct CopyModeSearchState {
     pub geometry: Option<(u16, u16)>,
 }
 
+/// Wall-clock now, as unix milliseconds. Zero if the clock is before the epoch.
+pub fn unix_millis_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// How an idle agent is bucketed by how long it has been idle.
+///
+/// Ordered youngest first, which is also the order they render in: an agent
+/// that went idle an hour ago is far more likely to be picked up again than one
+/// that stopped two months ago.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum IdleAge {
+    Day,
+    ThreeDays,
+    Week,
+    TwoWeeks,
+    FourWeeks,
+    TwoMonths,
+    Older,
+    /// No recorded state change, so the age is genuinely unknown. Sorts last
+    /// rather than pretending to be either fresh or ancient.
+    Unknown,
+}
+
+impl IdleAge {
+    /// Bucket from the age in milliseconds, or `Unknown` when nothing was
+    /// recorded. A timestamp in the future (clock moved backwards, or a
+    /// snapshot from another machine) is treated as just-now rather than
+    /// wrapping into a huge age.
+    pub fn from_changed_at(now_ms: u64, changed_at_ms: Option<u64>) -> Self {
+        let Some(changed_at_ms) = changed_at_ms else {
+            return Self::Unknown;
+        };
+        let age_ms = now_ms.saturating_sub(changed_at_ms);
+        const HOUR: u64 = 60 * 60 * 1000;
+        const DAY: u64 = 24 * HOUR;
+        match age_ms {
+            age if age < DAY => Self::Day,
+            age if age < 3 * DAY => Self::ThreeDays,
+            age if age < 7 * DAY => Self::Week,
+            age if age < 14 * DAY => Self::TwoWeeks,
+            age if age < 28 * DAY => Self::FourWeeks,
+            age if age < 56 * DAY => Self::TwoMonths,
+            _ => Self::Older,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum AgentPanelSort {
     #[default]
     Spaces,
     Priority,
+    /// Group by agent state, with idle agents subgrouped by how long they have
+    /// been idle.
+    Status,
 }
 
 // ---------------------------------------------------------------------------

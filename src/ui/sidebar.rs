@@ -39,6 +39,8 @@ pub(crate) struct AgentPanelEntry {
     pub state: AgentState,
     pub seen: bool,
     pub last_agent_state_change_seq: Option<u64>,
+    /// Unix ms of the last agent state change, for idle-age grouping.
+    pub agent_state_changed_at_ms: Option<u64>,
     pub state_labels: std::collections::HashMap<String, String>,
     pub tokens: std::collections::HashMap<String, String>,
 }
@@ -158,6 +160,7 @@ fn agent_panel_sort_label(sort: AgentPanelSort) -> &'static str {
     match sort {
         AgentPanelSort::Spaces => "grouped",
         AgentPanelSort::Priority => "priority",
+        AgentPanelSort::Status => "status",
     }
 }
 
@@ -264,6 +267,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         state: detail.state,
                         seen: detail.seen,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
+                        agent_state_changed_at_ms: detail.agent_state_changed_at_ms,
                         state_labels: detail.state_labels,
                         tokens: detail.tokens,
                     }

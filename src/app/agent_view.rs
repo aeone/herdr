@@ -50,6 +50,58 @@ pub(crate) fn validate_agent_view_source(source: &str) -> Result<String, String>
     normalize_source(source)
 }
 
+/// A heading in the status-grouped agent panel.
+///
+/// Idle is subdivided by age because "idle" spans an agent that paused a minute
+/// ago and one abandoned two months back, and those want very different
+/// attention. The other states are not subdivided: a blocked agent is blocked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum AgentGroup {
+    Blocked,
+    Working,
+    Idle(crate::app::state::IdleAge),
+    Unknown,
+}
+
+impl AgentGroup {
+    pub(crate) fn of(entry: &AgentPanelEntry, now_ms: u64) -> Self {
+        use crate::detect::AgentState;
+        match entry.state {
+            AgentState::Blocked => Self::Blocked,
+            AgentState::Working => Self::Working,
+            AgentState::Idle => Self::Idle(crate::app::state::IdleAge::from_changed_at(
+                now_ms,
+                entry.agent_state_changed_at_ms,
+            )),
+            AgentState::Unknown => Self::Unknown,
+        }
+    }
+}
+
+/// Sorts entries into status groups, and reports which group each one landed
+/// in so the renderer can head each run.
+///
+/// Returned groups are parallel to `entries` after sorting: `groups[i]` is the
+/// group of `entries[i]`. Keeping entries a flat list matters — the indexed
+/// switch keys and click handling address agents by position, and they must not
+/// have to know about headings.
+pub(crate) fn group_by_status(entries: &mut [AgentPanelEntry], now_ms: u64) -> Vec<AgentGroup> {
+    entries.sort_by_key(|entry| {
+        let group = AgentGroup::of(entry, now_ms);
+        (
+            group,
+            // Unread output first inside a group: there is something to look at.
+            entry.seen,
+            // Then most recently changed first, so a group reads newest-down.
+            std::cmp::Reverse(entry.agent_state_changed_at_ms),
+        )
+    });
+    entries
+        .iter()
+        .map(|entry| AgentGroup::of(entry, now_ms))
+        .collect()
+}
+
 pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry>) {
     if let Some(spec) = app.agent_view_override.as_ref() {
         if let Some(filter) = &spec.filter {
@@ -59,6 +111,14 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
             entries.sort_by(|left, right| compare_entries(app, left, right, &spec.sort));
             return;
         }
+    }
+
+    if matches!(
+        app.agent_panel_sort,
+        crate::app::state::AgentPanelSort::Status
+    ) {
+        group_by_status(entries, crate::app::state::unix_millis_now());
+        return;
     }
 
     if matches!(
@@ -428,6 +488,7 @@ fn public_pane_id(app: &AppState, entry: &AgentPanelEntry) -> Option<String> {
 mod tests {
     use super::*;
     use crate::api::schema::{AgentViewBuiltinSortField, AgentViewSortField};
+    use crate::app::state::IdleAge;
     use crate::detect::{Agent, AgentState};
     use crate::workspace::Workspace;
 
@@ -569,5 +630,155 @@ mod tests {
         assert!(validate_agent_view(&mut spec)
             .unwrap_err()
             .contains("context type"));
+    }
+
+    const HOUR_MS: u64 = 60 * 60 * 1000;
+    const DAY_MS: u64 = 24 * HOUR_MS;
+
+    fn idle_entry(label: &str, age_ms: u64, now_ms: u64) -> AgentPanelEntry {
+        entry_at(label, AgentState::Idle, true, Some(now_ms - age_ms))
+    }
+
+    fn entry_at(
+        label: &str,
+        state: AgentState,
+        seen: bool,
+        changed_at_ms: Option<u64>,
+    ) -> AgentPanelEntry {
+        AgentPanelEntry {
+            remote_host: None,
+            remote_host_color: None,
+            ws_idx: 0,
+            tab_idx: 0,
+            pane_id: crate::layout::PaneId::from_raw(1),
+            primary_label: label.to_string(),
+            primary_tab_label: None,
+            pane_label: None,
+            terminal_title: None,
+            terminal_title_stripped: None,
+            agent_label: None,
+            agent_kind_label: None,
+            agent: None,
+            state,
+            seen,
+            last_agent_state_change_seq: None,
+            agent_state_changed_at_ms: changed_at_ms,
+            state_labels: std::collections::HashMap::new(),
+            tokens: std::collections::HashMap::new(),
+        }
+    }
+
+    /// The buckets are half-open: an agent idle for exactly 24h belongs to the
+    /// next group up, not "today".
+    #[test]
+    fn idle_age_buckets_split_on_their_boundaries() {
+        let now = 100 * DAY_MS;
+        let cases = [
+            (0, IdleAge::Day),
+            (DAY_MS - 1, IdleAge::Day),
+            (DAY_MS, IdleAge::ThreeDays),
+            (3 * DAY_MS - 1, IdleAge::ThreeDays),
+            (3 * DAY_MS, IdleAge::Week),
+            (7 * DAY_MS, IdleAge::TwoWeeks),
+            (14 * DAY_MS, IdleAge::FourWeeks),
+            (28 * DAY_MS, IdleAge::TwoMonths),
+            (56 * DAY_MS, IdleAge::Older),
+            (99 * DAY_MS, IdleAge::Older),
+        ];
+        for (age, expected) in cases {
+            assert_eq!(
+                IdleAge::from_changed_at(now, Some(now - age)),
+                expected,
+                "age {age}ms"
+            );
+        }
+    }
+
+    /// An agent restored from a snapshot written before this field existed has
+    /// no age. It must not masquerade as freshly idle.
+    #[test]
+    fn missing_timestamp_is_unknown_not_fresh() {
+        assert_eq!(IdleAge::from_changed_at(DAY_MS, None), IdleAge::Unknown);
+        assert!(IdleAge::Unknown > IdleAge::Older);
+    }
+
+    /// Clocks move backwards (NTP, a snapshot copied between machines). A
+    /// future timestamp must read as just-now, not wrap to an enormous age.
+    #[test]
+    fn a_future_timestamp_does_not_wrap_to_ancient() {
+        let now = 10 * DAY_MS;
+        assert_eq!(
+            IdleAge::from_changed_at(now, Some(now + DAY_MS)),
+            IdleAge::Day
+        );
+    }
+
+    #[test]
+    fn status_grouping_orders_blocked_then_working_then_idle_by_age() {
+        let now = 100 * DAY_MS;
+        let mut entries = vec![
+            idle_entry("idle-old", 40 * DAY_MS, now),
+            entry_at("working", AgentState::Working, true, Some(now)),
+            idle_entry("idle-today", HOUR_MS, now),
+            entry_at("blocked", AgentState::Blocked, true, Some(now)),
+            entry_at("unknown-state", AgentState::Unknown, true, Some(now)),
+        ];
+
+        let groups = group_by_status(&mut entries, now);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "blocked",
+                "working",
+                "idle-today",
+                "idle-old",
+                "unknown-state"
+            ]
+        );
+        assert_eq!(groups[0], AgentGroup::Blocked);
+        assert_eq!(groups[2], AgentGroup::Idle(IdleAge::Day));
+        assert_eq!(groups[3], AgentGroup::Idle(IdleAge::TwoMonths));
+        assert_eq!(groups[4], AgentGroup::Unknown);
+    }
+
+    /// Unread output is the reason to look at an idle agent, so it leads its
+    /// bucket rather than being buried by recency.
+    #[test]
+    fn unseen_agents_lead_their_bucket() {
+        let now = 100 * DAY_MS;
+        let mut entries = vec![
+            entry_at("seen-newer", AgentState::Idle, true, Some(now - HOUR_MS)),
+            entry_at(
+                "unseen-older",
+                AgentState::Idle,
+                false,
+                Some(now - 5 * HOUR_MS),
+            ),
+        ];
+
+        group_by_status(&mut entries, now);
+
+        assert_eq!(entries[0].primary_label, "unseen-older");
+    }
+
+    /// `groups[i]` must describe `entries[i]` after sorting, or headers render
+    /// against the wrong agents.
+    #[test]
+    fn groups_stay_aligned_with_entries() {
+        let now = 100 * DAY_MS;
+        let mut entries = vec![
+            idle_entry("a", 40 * DAY_MS, now),
+            entry_at("b", AgentState::Blocked, true, Some(now)),
+            idle_entry("c", HOUR_MS, now),
+        ];
+
+        let groups = group_by_status(&mut entries, now);
+
+        assert_eq!(groups.len(), entries.len());
+        for (entry, group) in entries.iter().zip(&groups) {
+            assert_eq!(AgentGroup::of(entry, now), *group);
+        }
     }
 }

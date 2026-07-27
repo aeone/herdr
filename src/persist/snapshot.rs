@@ -107,6 +107,11 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// Unix ms of the agent's last state change, so the sidebar can bucket idle
+    /// agents by age across restarts. Optional: older snapshots simply have no
+    /// recorded age, which renders as the `unknown` group rather than a wrong one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state_changed_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -365,6 +370,8 @@ fn capture_tab(
             })
             .unwrap_or_default();
         let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
+        let agent_state_changed_at_ms =
+            terminal.and_then(|terminal| terminal.agent_state_changed_at_ms);
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
@@ -395,6 +402,7 @@ fn capture_tab(
                 managed_agent_kind,
                 agent_session,
                 launch_argv,
+                agent_state_changed_at_ms,
             },
         );
     }
@@ -678,6 +686,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_state_changed_at_ms: None,
             },
         );
         panes.insert(
@@ -689,6 +698,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_state_changed_at_ms: None,
             },
         );
 
@@ -1302,6 +1312,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_state_changed_at_ms: None,
             },
         );
         panes.insert(
@@ -1315,6 +1326,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                agent_state_changed_at_ms: None,
             },
         );
 
