@@ -1069,6 +1069,16 @@ impl HeadlessServer {
 
         let mut pane_by_terminal = HashMap::new();
         for ws in &self.app.state.workspaces {
+            // Remote-space mirrors are derived state and are deliberately absent
+            // from the snapshot below, so the new server has nothing to attach
+            // their runtimes to; handing them over fails the whole update with
+            // "handoff import did not consume N pane runtime(s)". Leave them
+            // behind — their ssh clients exit with the old server, and the
+            // host workers rebuild the mirrors on the next update.
+            #[cfg(unix)]
+            if ws.remote_mirror.is_some() {
+                continue;
+            }
             for tab in &ws.tabs {
                 for (pane_id, pane) in &tab.panes {
                     pane_by_terminal.insert(pane.attached_terminal_id.clone(), pane_id.raw());
@@ -4250,7 +4260,13 @@ pub fn run_server() -> io::Result<()> {
         let token = args
             .get(4)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing handoff token"))?;
-        return run_handoff_import_server(&socket_path, token);
+        // The import server's stderr belongs to whoever spawned the old server,
+        // which for a detached session is nowhere. Without this, a failed
+        // handoff leaves only "reaped during rollback" in the log and no reason,
+        // so log the cause on the way out.
+        return run_handoff_import_server(&socket_path, token).inspect_err(|err| {
+            tracing::error!(err = %err, "handoff import server failed");
+        });
     }
 
     let loaded_config = config::Config::load();

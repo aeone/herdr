@@ -652,7 +652,6 @@ mod tests {
         assert!(screen.contains("project"), "{screen}");
     }
 
-
     /// The headings must actually reach the screen, not just the layout.
     #[test]
     fn status_view_draws_group_headings_in_the_agent_panel() {
