@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added `herdr focus <agent|space|pane> [--observe] [--takeover]`, which opens a client showing just that one thing, independent of what any other client is focused on. Resolves an agent name, a space id or label, or a pane id; `--observe` is read-only. A space shows its focused pane.
 - Added `agent_panel_sort = "status"`, grouping the Agent panel under headings by agent state, with idle agents grouped by how long they have been idle (today, 3d, 7d, 14d, 28d, 2mo, 2mo+). Agents with unread output lead their group. The idle clock is persisted with the pane, so it survives a server restart.
 - Creating a space now asks which configured host it should live on when `[[remote.spaces]]` hosts exist, creating it there over the existing mirror channel and mirroring it straight away. Unreachable hosts stay listed but cannot be chosen. Needs nothing new on the remote: `workspace create` has been in the CLI for releases.
 - Remote-space mirrors whose host is unreachable now render dimmed and sort to the bottom of the Space and Agent lists.

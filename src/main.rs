@@ -575,12 +575,17 @@ fn main() -> io::Result<()> {
         println!("       herdr notification <subcommand> ...");
         println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
+        println!("       herdr focus <agent|space|pane> [--observe]");
         println!("       herdr session <subcommand> ...");
         println!("       herdr integration <subcommand> ...");
         println!();
         println!("Common commands:");
         for (command, description) in [
             ("herdr", "Launch or attach to the persistent session"),
+            (
+                "herdr focus <agent|space|pane>",
+                "Open a client showing just that one thing, independent of other clients",
+            ),
             (
                 "herdr status [server|client]",
                 "Show local client and running server status",
