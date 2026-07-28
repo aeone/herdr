@@ -800,9 +800,17 @@ pub(crate) fn agent_panel_layout(
         crate::app::state::AgentPanelSort::Status
     ) {
         let now_ms = crate::app::state::unix_millis_now();
+        // Same offline rule the sort used, or a heading would describe a run
+        // the entries are not actually in.
         entries
             .iter()
-            .map(|entry| crate::app::agent_view::AgentGroup::of(entry, now_ms))
+            .map(|entry| {
+                crate::app::agent_view::AgentGroup::of_with_offline(
+                    entry,
+                    now_ms,
+                    workspace_host_offline(app, entry.ws_idx),
+                )
+            })
             .collect()
     } else {
         Vec::new()

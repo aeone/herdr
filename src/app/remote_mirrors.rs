@@ -848,8 +848,13 @@ mod tests {
             panic!("expected a create action, got {plan:?}");
         };
         assert_eq!(argv[0], "ssh");
-        assert_eq!(argv[2], "workbox");
-        assert!(argv[3].contains("terminal attach 'term-1'"), "{}", argv[3]);
+        // Positions after argv[0] shift as ssh options are added, so assert the
+        // ends: the host and the remote command are always last.
+        assert_eq!(argv[argv.len() - 2], "workbox");
+        assert!(
+            argv[argv.len() - 1].contains("terminal attach 'term-1'"),
+            "{argv:?}"
+        );
     }
 
     #[test]

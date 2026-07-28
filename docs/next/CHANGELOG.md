@@ -3,7 +3,7 @@
 ## Unreleased
 
 ### Added
-- Added `herdr focus <agent|space|pane> [--observe] [--takeover]`, which opens a client showing just that one thing, independent of what any other client is focused on. Resolves an agent name, a space id or label, or a pane id; `--observe` is read-only. A space shows its focused pane.
+- Added `herdr focus <agent|space|pane> [--observe] [--takeover]`, which opens a client showing just that one thing, independent of what any other client is focused on. Resolves an agent name, a space id or label, or a pane id; `--observe` is read-only. A space shows its focused pane. Run it bare to list what can be focused.
 - Added `agent_panel_sort = "status"`, grouping the Agent panel under headings by agent state, with idle agents grouped by how long they have been idle (today, 3d, 7d, 14d, 28d, 2mo, 2mo+). Agents with unread output lead their group. The idle clock is persisted with the pane, so it survives a server restart.
 - Creating a space now asks which configured host it should live on when `[[remote.spaces]]` hosts exist, creating it there over the existing mirror channel and mirroring it straight away. Unreachable hosts stay listed but cannot be chosen. Needs nothing new on the remote: `workspace create` has been in the CLI for releases.
 - Remote-space mirrors whose host is unreachable now render dimmed and sort to the bottom of the Space and Agent lists.
@@ -18,6 +18,8 @@
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
 ### Fixed
+- Remote-space mirrors and discovery now set `ServerAliveInterval`, `ServerAliveCountMax` and `ConnectTimeout` on their ssh commands whether or not `manage_ssh_config` is enabled. A host that vanishes without closing, such as a sleeping laptop, previously left the connection open indefinitely, so a mirror kept showing stale output and never reconnected when the host returned.
+- Agents on an unreachable host are now their own `offline` group in the status view. They kept their last-seen state group while being sorted to the bottom, which split a group into two runs and drew a second heading for it, so the panel could read "idle · today" twice.
 - Live handoff no longer fails outright when remote-space mirrors are open. Mirrors are derived state and are deliberately absent from the session snapshot, but their pane runtimes were still handed to the incoming server, which rejected the update with "handoff import did not consume N pane runtime(s)". They are now left behind and rebuilt by the host workers after the handoff.
 - A failed handoff import now logs why. The import server's stderr belongs to whoever started the old server, so a detached session previously recorded only that the import was reaped during rollback, with no reason.
 - A `[[remote.spaces]]` entry with `target = "local"` now picks a herdr binary that can talk to the mirrored session instead of always using the running one, so mirroring a session owned by a different herdr build no longer fails every update with a protocol mismatch and leaves the host marked offline.

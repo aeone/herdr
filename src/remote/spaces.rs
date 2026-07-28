@@ -84,7 +84,20 @@ pub(crate) fn attach_argv(
         argv.push(pane.terminal_id.clone());
         return argv;
     }
-    let mut argv = vec!["ssh".to_string(), "-t".to_string(), space.target.clone()];
+    // Same liveness options the discovery ssh uses. Without them a mirror whose
+    // host vanishes holds a dead connection open and shows stale output forever;
+    // with them the attach fails within about a minute and can be rebuilt.
+    let mut argv = vec![
+        "ssh".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=4".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=15".to_string(),
+        "-t".to_string(),
+        space.target.clone(),
+    ];
     let mut remote = String::new();
     if let Some(session) = space.session.as_deref() {
         remote.push_str(&format!(
@@ -857,10 +870,18 @@ mod tests {
         let argv = attach_argv(&space("workbox"), &pane, "/home/you/.local/bin/herdr");
 
         assert_eq!(argv[0], "ssh");
-        assert_eq!(argv[1], "-t");
-        assert_eq!(argv[2], "workbox");
+        // -t forces a pty; the keepalives stop a vanished host freezing the
+        // mirror on stale output. Asserted by presence, not position, so adding
+        // an option does not break the test.
+        assert!(argv.contains(&"-t".to_string()), "{argv:?}");
+        assert!(
+            argv.contains(&"ServerAliveInterval=15".to_string()),
+            "{argv:?}"
+        );
+        assert!(argv.contains(&"ConnectTimeout=15".to_string()), "{argv:?}");
+        assert_eq!(argv[argv.len() - 2], "workbox");
         assert_eq!(
-            argv[3],
+            argv[argv.len() - 1],
             "'/home/you/.local/bin/herdr' terminal attach 'term-1'"
         );
     }
@@ -919,9 +940,8 @@ mod tests {
         let argv = attach_argv(&space, &pane, "herdr");
 
         assert!(
-            argv[3].starts_with("HERDR_SESSION='agents' "),
-            "{}",
-            argv[3]
+            argv[argv.len() - 1].starts_with("HERDR_SESSION='agents' "),
+            "{argv:?}"
         );
     }
 

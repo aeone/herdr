@@ -61,6 +61,10 @@ pub(crate) enum AgentGroup {
     Working,
     Idle(crate::app::state::IdleAge),
     Unknown,
+    /// Agents on a host we cannot currently reach. Their reported state is
+    /// whatever we last saw and may be arbitrarily stale, so grouping them by
+    /// it would be a lie; they get their own group at the bottom instead.
+    Offline,
 }
 
 impl AgentGroup {
@@ -70,11 +74,15 @@ impl AgentGroup {
             Self::Working => "working".to_string(),
             Self::Idle(age) => format!("idle · {}", age.label()),
             Self::Unknown => "unknown".to_string(),
+            Self::Offline => "offline".to_string(),
         }
     }
 
-    pub(crate) fn of(entry: &AgentPanelEntry, now_ms: u64) -> Self {
+    pub(crate) fn of_with_offline(entry: &AgentPanelEntry, now_ms: u64, offline: bool) -> Self {
         use crate::detect::AgentState;
+        if offline {
+            return Self::Offline;
+        }
         match entry.state {
             AgentState::Blocked => Self::Blocked,
             AgentState::Working => Self::Working,
@@ -94,9 +102,13 @@ impl AgentGroup {
 /// group of `entries[i]`. Keeping entries a flat list matters — the indexed
 /// switch keys and click handling address agents by position, and they must not
 /// have to know about headings.
-pub(crate) fn group_by_status(entries: &mut [AgentPanelEntry], now_ms: u64) -> Vec<AgentGroup> {
+pub(crate) fn group_by_status(
+    entries: &mut [AgentPanelEntry],
+    now_ms: u64,
+    offline: &dyn Fn(&AgentPanelEntry) -> bool,
+) -> Vec<AgentGroup> {
     entries.sort_by_key(|entry| {
-        let group = AgentGroup::of(entry, now_ms);
+        let group = AgentGroup::of_with_offline(entry, now_ms, offline(entry));
         (
             group,
             // Unread output first inside a group: there is something to look at.
@@ -107,7 +119,7 @@ pub(crate) fn group_by_status(entries: &mut [AgentPanelEntry], now_ms: u64) -> V
     });
     entries
         .iter()
-        .map(|entry| AgentGroup::of(entry, now_ms))
+        .map(|entry| AgentGroup::of_with_offline(entry, now_ms, offline(entry)))
         .collect()
 }
 
@@ -126,7 +138,13 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
         app.agent_panel_sort,
         crate::app::state::AgentPanelSort::Status
     ) {
-        group_by_status(entries, crate::app::state::unix_millis_now());
+        let offline = |entry: &AgentPanelEntry| {
+            app.workspaces
+                .get(entry.ws_idx)
+                .and_then(|ws| ws.remote_mirror.as_ref())
+                .is_some_and(|mirror| app.remote_offline_hosts.contains(&mirror.target))
+        };
+        group_by_status(entries, crate::app::state::unix_millis_now(), &offline);
         return;
     }
 
@@ -733,7 +751,7 @@ mod tests {
             entry_at("unknown-state", AgentState::Unknown, true, Some(now)),
         ];
 
-        let groups = group_by_status(&mut entries, now);
+        let groups = group_by_status(&mut entries, now, &|_| false);
 
         let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
         assert_eq!(
@@ -767,9 +785,58 @@ mod tests {
             ),
         ];
 
-        group_by_status(&mut entries, now);
+        group_by_status(&mut entries, now, &|_| false);
 
         assert_eq!(entries[0].primary_label, "unseen-older");
+    }
+
+    /// Offline agents used to keep their state group, so after they were sunk
+    /// to the bottom the panel showed "idle · today", then other groups, then
+    /// "idle · today" again for the unreachable host. Groups have to be one
+    /// contiguous run each or every repeat draws a second heading.
+    #[test]
+    fn offline_agents_form_one_group_at_the_end() {
+        let now = 100 * DAY_MS;
+        let mut entries = vec![
+            entry_at("remote-idle", AgentState::Idle, true, Some(now - HOUR_MS)),
+            entry_at("local-idle", AgentState::Idle, true, Some(now - HOUR_MS)),
+            entry_at("local-working", AgentState::Working, true, Some(now)),
+            entry_at("remote-working", AgentState::Working, true, Some(now)),
+        ];
+        let offline = |entry: &AgentPanelEntry| entry.primary_label.starts_with("remote-");
+
+        let groups = group_by_status(&mut entries, now, &offline);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
+        assert_eq!(
+            order,
+            // Within the offline group, newest change first, as everywhere else.
+            [
+                "local-working",
+                "local-idle",
+                "remote-working",
+                "remote-idle"
+            ]
+        );
+        assert_eq!(groups[2], AgentGroup::Offline);
+        assert_eq!(groups[3], AgentGroup::Offline);
+
+        // No group may appear in two separate runs.
+        let mut runs = Vec::new();
+        for group in &groups {
+            if runs.last() != Some(&group) {
+                runs.push(group);
+            }
+        }
+        let mut seen = runs.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(runs.len(), seen.len(), "a group was split into two runs");
+    }
+
+    #[test]
+    fn offline_group_is_labelled_offline_not_by_stale_state() {
+        assert_eq!(AgentGroup::Offline.label(), "offline");
     }
 
     /// `groups[i]` must describe `entries[i]` after sorting, or headers render
@@ -783,11 +850,11 @@ mod tests {
             idle_entry("c", HOUR_MS, now),
         ];
 
-        let groups = group_by_status(&mut entries, now);
+        let groups = group_by_status(&mut entries, now, &|_| false);
 
         assert_eq!(groups.len(), entries.len());
         for (entry, group) in entries.iter().zip(&groups) {
-            assert_eq!(AgentGroup::of(entry, now), *group);
+            assert_eq!(AgentGroup::of_with_offline(entry, now, false), *group);
         }
     }
 }

@@ -60,13 +60,12 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
         }
     }
     let Some(target) = target else {
-        eprintln!(
-            "usage: herdr focus <agent|space|pane> [--observe] [--takeover]\n\
-             \n\
-             Opens a client showing just that one thing, independent of what any\n\
-             other herdr client is focused on. Detach with ctrl+b q."
-        );
-        return Ok(2);
+        eprintln!("usage: herdr focus <agent|space|pane> [--observe] [--takeover]");
+        eprintln!();
+        eprintln!("Opens a client showing just that one thing, independent of what any");
+        eprintln!("other herdr client is focused on. Detach with ctrl+b q.");
+        eprintln!();
+        return print_targets();
     };
     if observe && takeover {
         eprintln!("--observe is read-only, so it cannot take over");
@@ -89,6 +88,70 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
         crate::client::run_terminal_attach(resolved.terminal_id().to_owned(), takeover)?;
     }
     Ok(0)
+}
+
+/// Lists what can be focused, so the bare command is a menu rather than a
+/// scolding. Agents first: they are what people usually mean, and a space is
+/// often reachable by the agent inside it anyway.
+fn print_targets() -> std::io::Result<i32> {
+    let agents = crate::cli::send_request(&Request {
+        id: "cli:focus:list-agents".into(),
+        method: Method::AgentList(Default::default()),
+    })?;
+    let agents = agents["result"]["agents"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if agents.is_empty() {
+        eprintln!("agents: none running");
+    } else {
+        eprintln!("agents:");
+        for agent in &agents {
+            // Show what can actually be typed. Only named agents have a
+            // unique name; the rest share their kind ("claude"), so their
+            // usable target is the pane id.
+            let target = agent["name"]
+                .as_str()
+                .or_else(|| agent["pane_id"].as_str())
+                .unwrap_or("?");
+            let kind = agent["agent"].as_str().unwrap_or("");
+            let status = agent["agent_status"].as_str().unwrap_or("unknown");
+            let title = agent["terminal_title_stripped"].as_str().unwrap_or("");
+            eprintln!(
+                "  {target:<10} {kind:<8} {status:<8} {}",
+                truncate(title, 42)
+            );
+        }
+    }
+
+    let workspaces = crate::cli::send_request(&Request {
+        id: "cli:focus:list-spaces".into(),
+        method: Method::WorkspaceList(Default::default()),
+    })?;
+    let workspaces = workspaces["result"]["workspaces"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if !workspaces.is_empty() {
+        eprintln!();
+        eprintln!("spaces:");
+        for workspace in &workspaces {
+            let id = workspace["workspace_id"].as_str().unwrap_or("?");
+            let label = workspace["label"].as_str().unwrap_or("");
+            let status = workspace["agent_status"].as_str().unwrap_or("unknown");
+            eprintln!("  {id:<6} {:<28} {status}", truncate(label, 28));
+        }
+    }
+    // Not an error: the user asked what they could focus and got an answer.
+    Ok(0)
+}
+
+fn truncate(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let kept: String = value.chars().take(max.saturating_sub(1)).collect();
+    format!("{kept}…")
 }
 
 /// Resolves a human-typed target, most specific interpretation first.

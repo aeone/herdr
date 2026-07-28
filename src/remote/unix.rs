@@ -651,6 +651,21 @@ impl Drop for RemoteSsh {
 }
 
 fn apply_managed_ssh_options(command: &mut Command, options: Option<&ManagedSshOptions>) {
+    // Liveness options apply whether or not herdr manages the ssh config, which
+    // is why they are set here rather than only written into that config. A host
+    // that vanishes rather than closing — a laptop that sleeps, a link that
+    // drops — never sends a FIN, so without keepalives ssh waits indefinitely.
+    // Anything reading it then freezes on stale output instead of failing and
+    // being retried: a mirror pane keeps showing what the agent said hours ago,
+    // and a discovery poll blocks its worker.
+    command
+        .arg("-o")
+        .arg("ServerAliveInterval=15")
+        .arg("-o")
+        .arg("ServerAliveCountMax=4")
+        .arg("-o")
+        .arg("ConnectTimeout=15");
+
     let Some(options) = options else {
         return;
     };
@@ -2159,21 +2174,25 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            args,
-            vec![
-                "-F".to_string(),
-                config_path.to_string_lossy().into_owned(),
-                "-S".to_string(),
-                control_path.to_string_lossy().into_owned(),
-                "-o".to_string(),
-                "ControlMaster=auto".to_string(),
-                "-o".to_string(),
-                "ControlPersist=yes".to_string(),
-                "-T".to_string(),
-                "example".to_string(),
-            ]
+        // Managed config adds its own options on top of the liveness ones.
+        assert!(
+            args.iter().any(|arg| arg == "ServerAliveInterval=15"),
+            "{args:?}"
         );
+        let position = |needle: &str| args.iter().position(|arg| arg == needle);
+        assert_eq!(
+            position("-F").map(|idx| args[idx + 1].clone()),
+            Some(config_path.to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            position("-S").map(|idx| args[idx + 1].clone()),
+            Some(control_path.to_string_lossy().into_owned())
+        );
+        assert!(
+            args.iter().any(|arg| arg == "ControlMaster=auto"),
+            "{args:?}"
+        );
+        assert_eq!(&args[args.len() - 2..], ["-T", "example"]);
     }
 
     #[test]
@@ -2189,7 +2208,21 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(args, vec!["-T".to_string(), "example".to_string()]);
+        // No managed config means no -F/-S/ControlMaster, but the liveness
+        // options still apply: they are what stops a vanished host holding a
+        // connection open indefinitely, and that is not a managed-config
+        // concern.
+        assert!(!args.iter().any(|arg| arg == "-F"), "{args:?}");
+        assert!(!args.iter().any(|arg| arg == "-S"), "{args:?}");
+        assert!(
+            args.iter().any(|arg| arg == "ServerAliveInterval=15"),
+            "{args:?}"
+        );
+        assert!(
+            args.iter().any(|arg| arg == "ConnectTimeout=15"),
+            "{args:?}"
+        );
+        assert_eq!(&args[args.len() - 2..], ["-T", "example"]);
     }
 
     #[test]
