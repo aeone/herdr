@@ -318,6 +318,9 @@ pub struct Keybinds {
     pub open_worktree: ActionKeybinds,
     pub remove_worktree: ActionKeybinds,
     pub rename_workspace: ActionKeybinds,
+    pub toggle_space_highlight: ActionKeybinds,
+    pub toggle_agent_highlight: ActionKeybinds,
+    pub toggle_offline_mirrors: ActionKeybinds,
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
     pub goto: ActionKeybinds,
@@ -480,6 +483,9 @@ impl Config {
             open_worktree: empty_action!(),
             remove_worktree: empty_action!(),
             rename_workspace: empty_action!(),
+            toggle_space_highlight: empty_action!(),
+            toggle_agent_highlight: empty_action!(),
+            toggle_offline_mirrors: empty_action!(),
             close_workspace: empty_action!(),
             workspace_picker: empty_action!(),
             goto: empty_action!(),
@@ -602,6 +608,21 @@ impl Config {
             apply_action!(keybinds.open_worktree, open_worktree, source);
             apply_action!(keybinds.remove_worktree, remove_worktree, source);
             apply_action!(keybinds.rename_workspace, rename_workspace, source);
+            apply_action!(
+                keybinds.toggle_space_highlight,
+                toggle_space_highlight,
+                source
+            );
+            apply_action!(
+                keybinds.toggle_agent_highlight,
+                toggle_agent_highlight,
+                source
+            );
+            apply_action!(
+                keybinds.toggle_offline_mirrors,
+                toggle_offline_mirrors,
+                source
+            );
             apply_action!(keybinds.close_workspace, close_workspace, source);
             apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.goto, goto, source);

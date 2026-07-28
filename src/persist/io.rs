@@ -207,6 +207,9 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         }
     }
 

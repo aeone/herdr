@@ -328,6 +328,15 @@ pub struct KeysConfig {
     pub remove_worktree: BindingConfig,
     /// Rename the selected workspace. Default: "prefix+shift+w"
     pub rename_workspace: BindingConfig,
+    /// Mark or unmark the selected space so it stands out in the sidebar.
+    /// Unset by default.
+    pub toggle_space_highlight: BindingConfig,
+    /// Mark or unmark the focused agent so it stands out in the Agent panel.
+    /// Unset by default.
+    pub toggle_agent_highlight: BindingConfig,
+    /// Cycle how mirrors of an unreachable host are shown: kept in place and
+    /// greyed, or hidden until the host is back. Unset by default.
+    pub toggle_offline_mirrors: BindingConfig,
     /// Close the selected workspace. Default: "prefix+shift+d"
     pub close_workspace: BindingConfig,
     /// Open the workspace navigation surface. Default: "prefix+w"
@@ -447,6 +456,9 @@ pub(crate) struct KeysConfigOverlay {
     remove_worktree: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rename_workspace: Option<BindingConfig>,
+    toggle_space_highlight: Option<BindingConfig>,
+    toggle_agent_highlight: Option<BindingConfig>,
+    toggle_offline_mirrors: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     close_workspace: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -568,6 +580,9 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(open_worktree);
         apply_field!(remove_worktree);
         apply_field!(rename_workspace);
+        apply_field!(toggle_space_highlight);
+        apply_field!(toggle_agent_highlight);
+        apply_field!(toggle_offline_mirrors);
         apply_field!(close_workspace);
         apply_field!(workspace_picker);
         apply_field!(goto);
@@ -666,6 +681,9 @@ impl KeysConfig {
         copy_effective_action_field!(open_worktree, keybinds.open_worktree);
         copy_effective_action_field!(remove_worktree, keybinds.remove_worktree);
         copy_effective_action_field!(rename_workspace, keybinds.rename_workspace);
+        copy_effective_action_field!(toggle_space_highlight, keybinds.toggle_space_highlight);
+        copy_effective_action_field!(toggle_agent_highlight, keybinds.toggle_agent_highlight);
+        copy_effective_action_field!(toggle_offline_mirrors, keybinds.toggle_offline_mirrors);
         copy_effective_action_field!(close_workspace, keybinds.close_workspace);
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
         copy_effective_action_field!(goto, keybinds.goto);
@@ -788,6 +806,8 @@ pub struct UiConfig {
     /// Size the Space and Agent sections from how much content each has,
     /// instead of the fixed divider position. Default: false.
     pub sidebar_section_split_auto: bool,
+    /// Colour for spaces and agents the user has marked. Defaults to pink.
+    pub sidebar_highlight_color: String,
     /// Collapsed sidebar presentation. Default: compact.
     pub sidebar_collapsed_mode: SidebarCollapsedModeConfig,
     /// Terminal width at or below which Herdr uses the mobile single-column layout. Default: 64.
@@ -989,6 +1009,9 @@ impl Default for KeysConfig {
             open_worktree: BindingConfig::empty(),
             remove_worktree: BindingConfig::empty(),
             rename_workspace: BindingConfig::one("prefix+shift+w"),
+            toggle_space_highlight: BindingConfig::default(),
+            toggle_agent_highlight: BindingConfig::default(),
+            toggle_offline_mirrors: BindingConfig::default(),
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
@@ -1057,6 +1080,7 @@ impl Default for UiConfig {
             sidebar_max_width: 36,
             sidebar_start_collapsed: false,
             sidebar_section_split_auto: false,
+            sidebar_highlight_color: "#f5c2e7".to_string(),
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,

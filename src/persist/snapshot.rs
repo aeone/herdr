@@ -26,6 +26,27 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Spaces marked to stand out, by workspace id.
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub highlighted_workspaces: std::collections::HashSet<String>,
+    /// Agents marked to stand out, by pane id.
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub highlighted_panes: std::collections::HashSet<u32>,
+    /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
+    #[serde(default)]
+    pub keep_offline_mirrors: bool,
+}
+
+/// Sidebar marks carried with a session: which spaces and agents the user
+/// singled out, and how unreachable hosts are shown.
+///
+/// Grouped rather than passed as three more positional arguments to `capture`,
+/// which already takes plenty.
+#[derive(Debug, Clone, Default)]
+pub struct SessionMarks {
+    pub highlighted_workspaces: std::collections::HashSet<String>,
+    pub highlighted_panes: std::collections::HashSet<u32>,
+    pub keep_offline_mirrors: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -189,6 +210,12 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    highlighted_workspaces: std::collections::HashSet<String>,
+    #[serde(default)]
+    highlighted_panes: std::collections::HashSet<u32>,
+    #[serde(default)]
+    keep_offline_mirrors: bool,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -204,6 +231,9 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        highlighted_workspaces: raw.highlighted_workspaces,
+        highlighted_panes: raw.highlighted_panes,
+        keep_offline_mirrors: raw.keep_offline_mirrors,
     })
 }
 
@@ -266,6 +296,7 @@ pub fn capture(
     sidebar_width: u16,
     sidebar_section_split: f32,
     collapsed_space_keys: std::collections::HashSet<String>,
+    marks: SessionMarks,
 ) -> SessionSnapshot {
     // Remote mirrors are derived from a live host and are rebuilt by polling,
     // so they are dropped here. `active` and `selected` are positions in this
@@ -289,6 +320,9 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
+        highlighted_workspaces: marks.highlighted_workspaces,
+        highlighted_panes: marks.highlighted_panes,
+        keep_offline_mirrors: marks.keep_offline_mirrors,
     }
 }
 
@@ -579,6 +613,11 @@ mod tests {
             state.sidebar_width,
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
+            SessionMarks {
+                highlighted_workspaces: state.highlighted_workspaces.clone(),
+                highlighted_panes: state.highlighted_panes.clone(),
+                keep_offline_mirrors: state.keep_offline_mirrors,
+            },
         )
     }
 
@@ -643,6 +682,9 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -733,6 +775,9 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         };
 
         let json = serde_json::to_string_pretty(&snap).unwrap();
@@ -957,6 +1002,7 @@ mod tests {
 
     fn mark_remote_mirror(state: &mut AppState, ws_idx: usize, key: &str) {
         state.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
+            disconnected: false,
             target: "workbox".into(),
             host_label: "workbox".into(),
             host_color: None,
@@ -1361,6 +1407,9 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         };
 
         let json = serde_json::to_string(&snap).unwrap();

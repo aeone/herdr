@@ -176,6 +176,9 @@ pub struct Workspace {
 /// Identity of the remote pane a mirrored workspace stands in for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMirror {
+    /// Set when the mirror's ssh has died and the workspace was kept anyway, so
+    /// the sidebar can grey it and reconcile knows to rebuild the pane.
+    pub disconnected: bool,
     /// Configured SSH target this mirror came from.
     pub target: String,
     /// Display prefix for the host, from `label` or the target.

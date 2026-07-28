@@ -1120,6 +1120,11 @@ impl HeadlessServer {
             self.app.state.sidebar_width,
             self.app.state.sidebar_section_split,
             self.app.state.collapsed_space_keys.clone(),
+            crate::persist::SessionMarks {
+                highlighted_workspaces: self.app.state.highlighted_workspaces.clone(),
+                highlighted_panes: self.app.state.highlighted_panes.clone(),
+                keep_offline_mirrors: self.app.state.keep_offline_mirrors,
+            },
         );
 
         let mut handoff_entries = Vec::new();

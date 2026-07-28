@@ -1212,6 +1212,9 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1307,6 +1310,9 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1416,6 +1422,9 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1528,6 +1537,9 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1723,6 +1735,9 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            highlighted_workspaces: Default::default(),
+            highlighted_panes: Default::default(),
+            keep_offline_mirrors: false,
         };
         (snapshot, history)
     }

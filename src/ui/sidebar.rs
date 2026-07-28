@@ -554,12 +554,34 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     entries
 }
 
+/// Whether the user has marked this space or the agent in this pane.
+///
+/// A marked agent also reads as marked in the Space list, and vice versa: the
+/// mark means "this is the thing I care about", and splitting that by surface
+/// would just make it easy to lose.
+pub(crate) fn entry_highlighted(
+    app: &AppState,
+    ws_idx: usize,
+    pane_id: Option<crate::layout::PaneId>,
+) -> bool {
+    let space_marked = app
+        .workspaces
+        .get(ws_idx)
+        .is_some_and(|ws| app.highlighted_workspaces.contains(&ws.id));
+    space_marked || pane_id.is_some_and(|pane_id| app.highlighted_panes.contains(&pane_id.raw()))
+}
+
 /// Whether this workspace mirrors a host whose last poll/feed failed.
 pub(crate) fn workspace_host_offline(app: &AppState, ws_idx: usize) -> bool {
     app.workspaces
         .get(ws_idx)
         .and_then(|ws| ws.remote_mirror.as_ref())
-        .is_some_and(|mirror| app.remote_offline_hosts.contains(&mirror.target))
+        .is_some_and(|mirror| {
+            // A mirror kept after its connection died is unusable whether or not
+            // the host has been marked offline yet, so it greys immediately
+            // rather than waiting for the next failed update.
+            mirror.disconnected || app.remote_offline_hosts.contains(&mirror.target)
+        })
 }
 
 /// Hides spaces the Agent panel already lists. The active workspace is kept so
@@ -1485,7 +1507,11 @@ fn render_workspace_list(
             }
         }
 
-        let name_style = if selected || is_active || is_dragged {
+        let name_style = if entry_highlighted(app, card.ws_idx, None) {
+            Style::default()
+                .fg(app.sidebar_highlight_color)
+                .add_modifier(Modifier::BOLD)
+        } else if selected || is_active || is_dragged {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0)
@@ -1727,7 +1753,12 @@ fn render_agent_detail(
         } else {
             Style::default()
         };
-        let name_style = if is_active {
+        let highlighted = entry_highlighted(app, detail.ws_idx, Some(detail.pane_id));
+        let name_style = if highlighted {
+            Style::default()
+                .fg(app.sidebar_highlight_color)
+                .add_modifier(Modifier::BOLD)
+        } else if is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
@@ -2636,11 +2667,58 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
 
     fn mark_mirror(app: &mut AppState, ws_idx: usize, target: &str) {
         app.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
+            disconnected: false,
             target: target.into(),
             host_label: target.into(),
             host_color: None,
             key: format!("k{ws_idx}"),
         });
+    }
+
+    /// A mark on a space and a mark on an agent both read as marked, whichever
+    /// surface you look at, so a marked thing cannot be lost by switching lists.
+    #[test]
+    fn a_mark_on_either_surface_reads_as_marked() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.ensure_test_terminals();
+        let pane = app.workspaces[1].tabs[0].root_pane;
+        let first_id = app.workspaces[0].id.clone();
+
+        assert!(!entry_highlighted(&app, 0, None));
+
+        app.highlighted_workspaces.insert(first_id);
+        assert!(entry_highlighted(&app, 0, None));
+        assert!(!entry_highlighted(&app, 1, Some(pane)));
+
+        app.highlighted_panes.insert(pane.raw());
+        assert!(entry_highlighted(&app, 1, Some(pane)));
+    }
+
+    /// A mirror kept after its connection died greys straight away, without
+    /// waiting for the host to be marked offline by a failed update.
+    #[test]
+    fn a_disconnected_mirror_greys_before_its_host_is_marked_offline() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("mirror")];
+        app.ensure_test_terminals();
+        app.workspaces[0].remote_mirror = Some(crate::workspace::RemoteMirror {
+            disconnected: false,
+            target: "box".into(),
+            host_label: "box".into(),
+            host_color: None,
+            key: "box\u{1f}w1\u{1f}term-1".into(),
+        });
+
+        assert!(!workspace_host_offline(&app, 0));
+
+        app.workspaces[0]
+            .remote_mirror
+            .as_mut()
+            .expect("mirror")
+            .disconnected = true;
+
+        assert!(workspace_host_offline(&app, 0));
     }
 
     #[test]

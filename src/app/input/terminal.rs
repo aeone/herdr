@@ -1361,6 +1361,11 @@ mod tests {
             app.state.sidebar_width,
             app.state.sidebar_section_split,
             app.state.collapsed_space_keys.clone(),
+            crate::persist::SessionMarks {
+                highlighted_workspaces: app.state.highlighted_workspaces.clone(),
+                highlighted_panes: app.state.highlighted_panes.clone(),
+                keep_offline_mirrors: app.state.keep_offline_mirrors,
+            },
         );
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 1);
         assert!(matches!(

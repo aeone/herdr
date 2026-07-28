@@ -3228,6 +3228,22 @@ impl AppState {
         self.pane_id_aliases.retain(|_, alias| *alias != pane_id);
         self.public_pane_id_aliases
             .retain(|_, alias| *alias != pane_id);
+        // A mirror whose ssh dies would otherwise take its workspace with it,
+        // since a mirror is a single pane. In keep mode the workspace stays as a
+        // greyed placeholder for an unreachable host, and reconcile rebuilds its
+        // pane when the host answers again.
+        let keep_dead_mirror = self.keep_offline_mirrors
+            && self.workspaces[ws_idx].remote_mirror.is_some()
+            && self.workspaces[ws_idx].tabs.len() == 1
+            && self.workspaces[ws_idx].tabs[0].layout.pane_count() <= 1;
+        if keep_dead_mirror {
+            if let Some(mirror) = self.workspaces[ws_idx].remote_mirror.as_mut() {
+                mirror.disconnected = true;
+            }
+            self.mark_session_dirty();
+            return;
+        }
+
         let should_close_workspace = {
             let ws = &mut self.workspaces[ws_idx];
             ws.remove_pane(pane_id)

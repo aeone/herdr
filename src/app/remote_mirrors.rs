@@ -141,6 +141,7 @@ fn remote_state_and_seen(
 /// drift from the identity `plan_remote_mirrors` looks it up by.
 pub(crate) fn remote_mirror_record(space: &RemoteSpaceConfig, key: &str) -> RemoteMirror {
     RemoteMirror {
+        disconnected: false,
         target: space.target.clone(),
         host_label: space.display_label().to_string(),
         host_color: space.color.clone(),
@@ -430,6 +431,26 @@ impl App {
         space: &RemoteSpaceConfig,
         snapshot: &RemoteSpaceSnapshot,
     ) {
+        // Mirrors kept as placeholders while the host was away have no live
+        // pane. The host is answering again, so drop them and let the plan below
+        // build them fresh — the key still matches, so nothing else would.
+        let disconnected: Vec<usize> = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, ws)| {
+                ws.remote_mirror
+                    .as_ref()
+                    .is_some_and(|mirror| mirror.target == space.target && mirror.disconnected)
+            })
+            .map(|(ws_idx, _)| ws_idx)
+            .rev()
+            .collect();
+        for ws_idx in disconnected {
+            self.close_mirror_at(ws_idx);
+        }
+
         let pinned = self
             .state
             .created_remote_workspaces

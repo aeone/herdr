@@ -186,6 +186,18 @@ impl App {
             NavigateAction::NewWorkspace => {
                 self.begin_tui_workspace_create("tui.key.workspace.create");
             }
+            NavigateAction::ToggleSpaceHighlight => {
+                if let Some(ws_idx) = workspace_action_target(&self.state, context) {
+                    self.toggle_space_highlight(ws_idx);
+                }
+            }
+            NavigateAction::ToggleAgentHighlight => {
+                self.toggle_focused_agent_highlight();
+            }
+            NavigateAction::ToggleOfflineMirrors => {
+                self.state.keep_offline_mirrors = !self.state.keep_offline_mirrors;
+                self.state.mark_session_dirty();
+            }
             NavigateAction::NewWorktree => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context).filter(|idx| {
                     workspace_can_start_worktree_action(&self.state, &self.terminal_runtimes, *idx)
@@ -1289,6 +1301,9 @@ pub(crate) enum NavigateAction {
     OpenWorktree,
     RemoveWorktree,
     RenameWorkspace,
+    ToggleSpaceHighlight,
+    ToggleAgentHighlight,
+    ToggleOfflineMirrors,
     CloseWorkspace,
     SwitchWorkspace(usize),
     SwitchTab(usize),
@@ -1426,6 +1441,18 @@ fn non_indexed_action_for_key(
         (&kb.open_worktree, NavigateAction::OpenWorktree),
         (&kb.remove_worktree, NavigateAction::RemoveWorktree),
         (&kb.rename_workspace, NavigateAction::RenameWorkspace),
+        (
+            &kb.toggle_space_highlight,
+            NavigateAction::ToggleSpaceHighlight,
+        ),
+        (
+            &kb.toggle_agent_highlight,
+            NavigateAction::ToggleAgentHighlight,
+        ),
+        (
+            &kb.toggle_offline_mirrors,
+            NavigateAction::ToggleOfflineMirrors,
+        ),
         (&kb.close_workspace, NavigateAction::CloseWorkspace),
         (&kb.previous_workspace, NavigateAction::PreviousWorkspace),
         (&kb.next_workspace, NavigateAction::NextWorkspace),
@@ -1533,6 +1560,30 @@ pub(super) fn execute_navigate_action_in_context(
         NavigateAction::NewWorkspace => {
             state.request_new_workspace = true;
             leave_navigate_mode(state);
+        }
+        // State-only variants of the highlight toggles, for the test harness
+        // that drives actions without an App.
+        NavigateAction::ToggleSpaceHighlight => {
+            if let Some(ws_idx) = workspace_action_target(state, context) {
+                let id = state.workspaces[ws_idx].id.clone();
+                if !state.highlighted_workspaces.remove(&id) {
+                    state.highlighted_workspaces.insert(id);
+                }
+            }
+        }
+        NavigateAction::ToggleAgentHighlight => {
+            if let Some(ws_idx) = state.active {
+                let pane_id = state.workspaces[ws_idx].tabs[state.workspaces[ws_idx].active_tab]
+                    .layout
+                    .focused()
+                    .raw();
+                if !state.highlighted_panes.remove(&pane_id) {
+                    state.highlighted_panes.insert(pane_id);
+                }
+            }
+        }
+        NavigateAction::ToggleOfflineMirrors => {
+            state.keep_offline_mirrors = !state.keep_offline_mirrors;
         }
         NavigateAction::NewWorktree => {
             if let Some(ws_idx) = workspace_action_target(state, context)

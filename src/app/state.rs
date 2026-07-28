@@ -1564,6 +1564,15 @@ pub struct AppState {
     /// Remote-space hosts whose last poll/feed failed. Their mirrors render
     /// dimmed and sort to the bottom, since you cannot work with them.
     pub remote_offline_hosts: std::collections::HashSet<String>,
+    /// Spaces the user marked to stand out, by workspace id. Workspace ids are
+    /// stable across a restart, which is why the mark is stored by id rather
+    /// than index.
+    pub highlighted_workspaces: std::collections::HashSet<String>,
+    /// Agents the user marked, by pane id. Pane ids are restored from the
+    /// snapshot rather than reallocated, so these survive a restart too.
+    pub highlighted_panes: std::collections::HashSet<u32>,
+    /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
+    pub keep_offline_mirrors: bool,
     /// Remote workspace ids, per host target, that the user created from here.
     /// They are mirrored even before an agent runs in them, so a space made from
     /// the sidebar shows up on a host that is not mirroring everything.
@@ -1618,6 +1627,7 @@ pub struct AppState {
     pub sidebar_section_split: f32,
     /// Size sections from content instead of the stored divider position.
     pub sidebar_section_split_auto: bool,
+    pub sidebar_highlight_color: ratatui::style::Color,
     /// Content-derived ratio for this frame, recomputed by `compute_view`.
     pub sidebar_auto_split_ratio: Option<f32>,
     pub agent_panel_sort: AgentPanelSort,
@@ -1955,6 +1965,9 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             remote_offline_hosts: std::collections::HashSet::new(),
+            highlighted_workspaces: std::collections::HashSet::new(),
+            highlighted_panes: std::collections::HashSet::new(),
+            keep_offline_mirrors: false,
             created_remote_workspaces: std::collections::HashMap::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
@@ -2013,6 +2026,7 @@ impl AppState {
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
             sidebar_section_split_auto: false,
+            sidebar_highlight_color: ratatui::style::Color::Rgb(245, 194, 231),
             sidebar_auto_split_ratio: None,
             agent_panel_sort: AgentPanelSort::Spaces,
             agent_view_override: None,

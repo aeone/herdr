@@ -379,6 +379,39 @@ fn resolve_effective_theme(
 }
 
 impl App {
+    /// Marks or unmarks a space so it stands out in the sidebar.
+    ///
+    /// Keyed by workspace id rather than index: indices shift as spaces are
+    /// created and closed, and the mark is meant to outlive that.
+    pub(crate) fn toggle_space_highlight(&mut self, ws_idx: usize) {
+        let Some(id) = self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone()) else {
+            return;
+        };
+        if !self.state.highlighted_workspaces.remove(&id) {
+            self.state.highlighted_workspaces.insert(id);
+        }
+        self.state.mark_session_dirty();
+    }
+
+    /// Marks or unmarks the agent in the focused pane.
+    pub(crate) fn toggle_focused_agent_highlight(&mut self) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|ws| ws.tabs[ws.active_tab].layout.focused())
+        else {
+            return;
+        };
+        if !self.state.highlighted_panes.remove(&pane_id.raw()) {
+            self.state.highlighted_panes.insert(pane_id.raw());
+        }
+        self.state.mark_session_dirty();
+    }
+
     pub fn new(
         config: &Config,
         no_session: bool,
@@ -569,6 +602,9 @@ impl App {
             worktree_directory,
             collapsed_space_keys,
             remote_offline_hosts: std::collections::HashSet::new(),
+            highlighted_workspaces: std::collections::HashSet::new(),
+            highlighted_panes: std::collections::HashSet::new(),
+            keep_offline_mirrors: false,
             created_remote_workspaces: std::collections::HashMap::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
@@ -636,6 +672,7 @@ impl App {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             sidebar_section_split_auto: config.ui.sidebar_section_split_auto,
+            sidebar_highlight_color: crate::config::parse_color(&config.ui.sidebar_highlight_color),
             sidebar_auto_split_ratio: None,
             agent_panel_sort,
             agent_view_override: None,
@@ -858,6 +895,9 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
+        app.state.highlighted_workspaces = snapshot.highlighted_workspaces.clone();
+        app.state.highlighted_panes = snapshot.highlighted_panes.clone();
+        app.state.keep_offline_mirrors = snapshot.keep_offline_mirrors;
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
@@ -1472,6 +1512,8 @@ impl App {
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.sidebar_section_split_auto = config.ui.sidebar_section_split_auto;
+                self.state.sidebar_highlight_color =
+                    crate::config::parse_color(&config.ui.sidebar_highlight_color);
                 #[cfg(unix)]
                 {
                     self.remote_spaces = config.remote.spaces.clone();
