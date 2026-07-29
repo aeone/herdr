@@ -20,6 +20,7 @@
 - Relicensed Herdr from AGPL-3.0-or-later to Apache-2.0.
 
 ### Fixed
+- A direct terminal attach now holds the terminal's size only while it is the client being used, instead of for the whole connection. A mirror attaches once and never leaves, so its size used to be imposed on the host permanently: working on that host directly left mirrored panes sized for the mirroring machine, too wide and cut off. The same applied to attaching from a phone. Typing in or resizing an attach claims the size; using the host's own client takes it back.
 - Remote-space mirrors and discovery now set `ServerAliveInterval`, `ServerAliveCountMax` and `ConnectTimeout` on their ssh commands whether or not `manage_ssh_config` is enabled. A host that vanishes without closing, such as a sleeping laptop, previously left the connection open indefinitely, so a mirror kept showing stale output and never reconnected when the host returned.
 - Agents on an unreachable host are now their own `offline` group in the status view. They kept their last-seen state group while being sorted to the bottom, which split a group into two runs and drew a second heading for it, so the panel could read "idle · today" twice.
 - Live handoff no longer fails outright when remote-space mirrors are open. Mirrors are derived state and are deliberately absent from the session snapshot, but their pane runtimes were still handed to the incoming server, which rejected the update with "handoff import did not consume N pane runtime(s)". They are now left behind and rebuilt by the host workers after the handoff.

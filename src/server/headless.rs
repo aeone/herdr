@@ -2577,6 +2577,62 @@ impl HeadlessServer {
         true
     }
 
+    /// Hands terminal-size ownership to whoever is actually being used.
+    ///
+    /// A direct attach takes a resize lock so the host's own TUI cannot stamp
+    /// its layout size over the attacher's window. That is right for the
+    /// moment of attaching and wrong for the rest of the connection: a mirror
+    /// attaches once and never leaves, so the lock used to be permanent, and
+    /// working on the host directly left every mirrored pane sized for the
+    /// mirroring machine — too wide, and cut off. The same trap catches a
+    /// phone: attach once from a small screen and the desktop is stuck with it.
+    ///
+    /// So the lock now follows use. Typing in a direct attach claims the size;
+    /// touching the host's own client releases it, and the next render sizes
+    /// panes to that client's layout. Panes do oscillate as you move between
+    /// machines, which is the point.
+    fn claim_terminal_size_for_attach(&mut self, terminal_id: &str) {
+        let Some(real_terminal_id) = self.terminal_id_by_string(terminal_id) else {
+            return;
+        };
+        if !self
+            .app
+            .state
+            .direct_attach_resize_locks
+            .insert(real_terminal_id.clone())
+        {
+            return;
+        }
+        // Newly reclaimed, so put the terminal back to this client's size.
+        let size = self
+            .clients
+            .values()
+            .find(|client| {
+                matches!(&client.mode, ClientConnectionMode::TerminalAttach { terminal_id: id } if id == terminal_id)
+            })
+            .map(|client| (client.terminal_size, client.cell_size));
+        if let Some(((cols, rows), cell_size)) = size {
+            if let Some(runtime) = self.app.terminal_runtimes.get(&real_terminal_id) {
+                runtime.resize(rows, cols, cell_size.width_px, cell_size.height_px);
+            }
+        }
+    }
+
+    /// Releases every direct-attach size lock because the host's own client is
+    /// being used again.
+    ///
+    /// All of them, not just the focused pane's: this client renders a whole
+    /// layout and is about to size every pane in it. An attach client that is
+    /// still in use takes its lock straight back on its next keystroke or
+    /// resize, so the cost of being broad here is one frame at the wrong size.
+    fn release_terminal_size_locks_for_app_use(&mut self) {
+        if self.app.state.direct_attach_resize_locks.is_empty() {
+            return;
+        }
+        self.app.state.direct_attach_resize_locks.clear();
+        self.app.full_redraw_pending = true;
+    }
+
     fn client_is_pending_terminal_mode(&self, client_id: u64) -> bool {
         self.clients.get(&client_id).is_some_and(|client| {
             client.pending_terminal_attach && matches!(client.mode, ClientConnectionMode::App)
@@ -2621,6 +2677,11 @@ impl HeadlessServer {
         }
         let events = events_for_app_routing(events, source_was_foreground, source_is_full_app);
         let interaction = events_include_interaction(&events);
+        if interaction && source_is_full_app {
+            // The host's own client is in use again, so it takes back the right
+            // to size its panes from any direct attach holding them.
+            self.release_terminal_size_locks_for_app_use();
+        }
         let foreground_changed = if interaction {
             self.promote_client_to_foreground(client_id)
         } else {
@@ -2772,11 +2833,13 @@ impl HeadlessServer {
                     ..
                 }) = self.clients.get(&client_id)
                 {
-                    if let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) {
+                    let terminal_id = terminal_id.clone();
+                    if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
                         if let Err(err) = apply_terminal_attach_input(runtime, data) {
                             warn!(client_id, terminal_id = %terminal_id, err = %err);
                         }
                     }
+                    self.claim_terminal_size_for_attach(&terminal_id);
                     return true;
                 }
                 if matches!(
@@ -2898,6 +2961,9 @@ impl HeadlessServer {
                     if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
                         runtime.resize(rows, cols, cell_width_px, cell_height_px);
                     }
+                    // Resizing the window is using it, so this attach takes the
+                    // size back without waiting for a keystroke.
+                    self.claim_terminal_size_for_attach(&terminal_id);
                     return true;
                 }
                 if let Some(ClientConnection {
@@ -6980,6 +7046,53 @@ next_tab = ""
         assert_eq!(
             input_rx.try_recv().expect("focus lost after promotion"),
             Bytes::from_static(b"\x1b[O")
+        );
+    }
+
+    /// Terminal-size ownership follows whoever is being used, not whoever
+    /// connected first.
+    ///
+    /// A mirror attaches once and stays forever, so a lock held for the life of
+    /// the connection left the host's own panes permanently sized for the
+    /// mirroring machine — too wide, and cut off when working on the host
+    /// directly. Same trap for a phone: attach once from a small screen and the
+    /// desktop inherits it until you disconnect.
+    #[tokio::test]
+    async fn using_the_host_client_reclaims_terminal_size_from_an_attach() {
+        let mut server = test_headless_server();
+        install_focused_test_runtime(&mut server, b"");
+        server.app.state.ensure_test_terminals();
+        let terminal_id = server
+            .app
+            .state
+            .terminals
+            .keys()
+            .next()
+            .cloned()
+            .expect("a terminal");
+
+        // A direct attach owns the size while it is the thing being used.
+        server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .insert(terminal_id.clone());
+
+        // Using the host's own client takes it back, so its next render sizes
+        // the pane to its own layout instead of the attacher's.
+        server.release_terminal_size_locks_for_app_use();
+
+        assert!(
+            !server
+                .app
+                .state
+                .direct_attach_resize_locks
+                .contains(&terminal_id),
+            "host client should reclaim the size when it is used"
+        );
+        assert!(
+            server.app.full_redraw_pending,
+            "reclaiming the size needs a redraw to take effect"
         );
     }
 
