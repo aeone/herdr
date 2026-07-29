@@ -43,8 +43,19 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
     let mut target = None;
     let mut takeover = false;
     let mut observe = false;
+    let mut host: Option<String> = None;
+    let mut expect_host = false;
     for arg in args {
+        if expect_host {
+            host = Some(arg.clone());
+            expect_host = false;
+            continue;
+        }
         match arg.as_str() {
+            "--host" => expect_host = true,
+            other if other.starts_with("--host=") => {
+                host = Some(other.trim_start_matches("--host=").to_string())
+            }
             "--takeover" => takeover = true,
             "--observe" => observe = true,
             other if other.starts_with('-') => {
@@ -59,8 +70,20 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
             }
         }
     }
+    if expect_host {
+        eprintln!("--host needs an ssh target");
+        return Ok(2);
+    }
+
+    // Everything from here is answered by the herdr on `host`, so hand the whole
+    // command over rather than resolving anything locally: our session knows
+    // nothing about theirs.
+    if let Some(host) = host {
+        return run_via_host(&host, target.as_deref(), observe, takeover);
+    }
+
     let Some(target) = target else {
-        eprintln!("usage: herdr focus <agent|space|pane> [--observe] [--takeover]");
+        eprintln!("usage: herdr focus <agent|space|pane> [--observe] [--takeover] [--host TARGET]");
         eprintln!();
         eprintln!("Opens a client showing just that one thing, independent of what any");
         eprintln!("other herdr client is focused on. Detach with ctrl+b q.");
@@ -78,16 +101,108 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
     };
 
     eprintln!("focusing {} — detach with ctrl+b q", resolved.describe());
-    if observe {
-        // Observe is the read-only mode, so the focused view cannot type into
-        // whatever it is watching.
-        // 0 means "size from this terminal", the same default the
-        // `terminal session observe` command uses.
-        crate::client::run_terminal_session_observe(resolved.terminal_id().to_owned(), 0, 0)?;
-    } else {
-        crate::client::run_terminal_attach(resolved.terminal_id().to_owned(), takeover)?;
+    if !observe {
+        if let Err(err) =
+            crate::client::run_terminal_attach(resolved.terminal_id().to_owned(), takeover)
+        {
+            return attach_failed(&err, &target);
+        }
+        return Ok(0);
     }
+    // Observe is the read-only mode, so the focused view cannot type into
+    // whatever it is watching. 0 means "size from this terminal", the same
+    // default `terminal session observe` uses.
+    crate::client::run_terminal_session_observe(resolved.terminal_id().to_owned(), 0, 0)?;
     Ok(0)
+}
+
+/// Explains an attach that was refused because something already holds the
+/// terminal, which on a mirrored host is the normal state rather than a fault.
+///
+/// herdr's own message says "retry with --takeover". On a host whose terminals
+/// are mirrored elsewhere that is the worst of the options: it steals the
+/// terminal from the mirror, the mirror dies, and the mirroring host rebuilds it
+/// and takes it back. Read-only observing costs nothing and works alongside.
+fn attach_failed(err: &std::io::Error, target: &str) -> std::io::Result<i32> {
+    let message = err.to_string();
+    if !message.contains("already has an attached client") {
+        eprintln!("{message}");
+        return Ok(1);
+    }
+    eprintln!("{message}");
+    eprintln!();
+    eprintln!("Something already has that terminal open. If this host is mirrored");
+    eprintln!("by another herdr, that will be the mirror holding it.");
+    eprintln!();
+    eprintln!("  herdr focus {target} --observe         watch it read-only, alongside the mirror");
+    eprintln!("  herdr focus {target} --host <machine>  drive it from the machine mirroring it");
+    eprintln!("  herdr focus {target} --takeover        take it, and let the mirror rebuild");
+    Ok(1)
+}
+
+/// Runs the same focus command on another machine over ssh.
+///
+/// The far side answers from its own session, which is the point: your server
+/// knows nothing about its agents unless it mirrors them. Two details this
+/// exists to stop you retyping — `-t`, without which ssh allocates no pty and
+/// the client has nothing to draw into, and resolving herdr by absolute path,
+/// since a non-interactive ssh shell frequently has neither `~/.local/bin` nor
+/// `/opt/homebrew/bin` on PATH.
+fn run_via_host(
+    host: &str,
+    target: Option<&str>,
+    observe: bool,
+    takeover: bool,
+) -> std::io::Result<i32> {
+    let mut remote = String::from(
+        "herdr_bin=$(command -v herdr 2>/dev/null || true); \
+         if [ -z \"$herdr_bin\" ]; then \
+           for candidate in \"${HOME:-}/.local/bin/herdr\" /opt/homebrew/bin/herdr /usr/local/bin/herdr \"${HOME:-}/.cargo/bin/herdr\"; do \
+             if [ -x \"$candidate\" ]; then herdr_bin=$candidate; break; fi; \
+           done; \
+         fi; \
+         if [ -z \"$herdr_bin\" ]; then echo 'no herdr found on this host' >&2; exit 127; fi; \
+         exec \"$herdr_bin\" focus",
+    );
+    if let Some(target) = target {
+        remote.push(' ');
+        remote.push_str(&shell_quote(target));
+    }
+    if observe {
+        remote.push_str(" --observe");
+    }
+    if takeover {
+        remote.push_str(" --takeover");
+    }
+
+    let status = std::process::Command::new("ssh")
+        // Same liveness options the mirrors use, so a dropped link fails in
+        // about a minute instead of hanging on a connection that is already gone.
+        .args([
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=4",
+            "-o",
+            "ConnectTimeout=15",
+            "-t",
+        ])
+        .arg(host)
+        .arg(&remote)
+        .status()?;
+
+    if !status.success() {
+        // A dropped link leaves the far side running: the client died, not the
+        // server that owns the panes.
+        eprintln!();
+        eprintln!("If that ended because the connection dropped, the session on {host} is");
+        eprintln!("still running. Reattach with the same command.");
+    }
+    Ok(status.code().unwrap_or(1))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Lists what can be focused, so the bare command is a menu rather than a

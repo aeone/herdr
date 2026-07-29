@@ -1246,6 +1246,21 @@ fn run_client_with_mode(
     drop(terminal_guard);
 
     if let Err(err) = result {
+        // A refused attach is the caller's to explain: `herdr focus` knows the
+        // terminal may be held by a mirror and can say what to do about it,
+        // which "retry with --takeover" alone gets wrong on a mirrored host.
+        // Everything else keeps exiting here as before.
+        let attach_refused = matches!(
+            &err,
+            ClientError::ServerShutdown { reason: Some(reason) }
+                if reason.contains("already has an attached client")
+        );
+        if attach_refused {
+            rt.shutdown_timeout(Duration::from_millis(100));
+            crate::logging::shutdown("client");
+            return Err(io::Error::other(err.to_string()));
+        }
+
         eprintln!("herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
         crate::logging::shutdown("client");
