@@ -1698,8 +1698,31 @@ impl AppState {
         true
     }
 
+    /// Tallies a wheel event against the terminal it resolved to.
+    ///
+    /// Recorded before routing so it counts arrivals, not successes: scrolling
+    /// that does nothing is indistinguishable from scrolling that never reached
+    /// herdr until you can see whether the count moved, and which pane it moved
+    /// on. A wheel landing on a pane you are not looking at reads as "frozen".
+    fn record_wheel_event(
+        &mut self,
+        terminal_id: Option<crate::terminal::TerminalId>,
+        routing: Option<crate::pane::WheelRouting>,
+    ) {
+        let Some(terminal_id) = terminal_id else {
+            return;
+        };
+        let tally = self.wheel_events.entry(terminal_id).or_default();
+        match routing {
+            Some(crate::pane::WheelRouting::MouseReport) => tally.forwarded_to_app += 1,
+            Some(crate::pane::WheelRouting::AlternateScroll) => tally.alternate_scroll += 1,
+            Some(crate::pane::WheelRouting::HostScroll) | None => tally.host_scroll += 1,
+        }
+        tally.last_ms = crate::app::state::unix_millis_now();
+    }
+
     pub(super) fn forward_pane_wheel(
-        &self,
+        &mut self,
         terminal_runtimes: &TerminalRuntimeRegistry,
         info: &PaneInfo,
         mouse: MouseEvent,
@@ -1711,7 +1734,15 @@ impl AppState {
         else {
             return false;
         };
-        match rt.wheel_routing() {
+        let routing = rt.wheel_routing();
+        // Tally before routing, and resolve the terminal id first so the
+        // runtime borrow ends before the state is mutated.
+        let tallied_terminal = self
+            .workspaces
+            .get(ws_idx)
+            .and_then(|ws| ws.terminal_id(info.id))
+            .cloned();
+        let handled = match routing {
             Some(crate::pane::WheelRouting::HostScroll) | None => false,
             Some(crate::pane::WheelRouting::MouseReport) => {
                 rt.scroll_reset();
@@ -1737,7 +1768,11 @@ impl AppState {
                 }
                 true
             }
-        }
+        };
+        // `rt` is a borrow of the registry, not of self, so the tally can run
+        // here without waiting for anything to be released.
+        self.record_wheel_event(tallied_terminal, routing);
+        handled
     }
 
     pub(super) fn set_pane_scroll_offset(

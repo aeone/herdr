@@ -516,11 +516,23 @@ impl App {
             .state
             .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
             .and_then(|runtime| runtime.wheel_routing_detail())
-            .map(|detail| crate::api::schema::PaneInputInfo {
-                wheel_routing: detail.routing.as_str().to_string(),
-                mouse_reporting: detail.mouse_reporting,
-                alternate_screen: detail.alternate_screen,
-                mouse_alternate_scroll: detail.mouse_alternate_scroll,
+            .map(|detail| {
+                let tally = self
+                    .state
+                    .wheel_events
+                    .get(&pane.attached_terminal_id)
+                    .copied()
+                    .unwrap_or_default();
+                crate::api::schema::PaneInputInfo {
+                    wheel_routing: detail.routing.as_str().to_string(),
+                    mouse_reporting: detail.mouse_reporting,
+                    alternate_screen: detail.alternate_screen,
+                    mouse_alternate_scroll: detail.mouse_alternate_scroll,
+                    wheel_forwarded_to_app: tally.forwarded_to_app,
+                    wheel_alternate_scroll: tally.alternate_scroll,
+                    wheel_host_scroll: tally.host_scroll,
+                    wheel_last_ms: (tally.last_ms > 0).then_some(tally.last_ms),
+                }
             });
         let focused = self.state.active == Some(ws_idx)
             && ws.active_tab == tab_idx

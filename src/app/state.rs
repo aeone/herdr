@@ -969,6 +969,16 @@ pub(crate) struct CopyModeSearchState {
     pub geometry: Option<(u16, u16)>,
 }
 
+/// How many wheel events a terminal has been sent, and how each was routed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WheelEventTally {
+    pub forwarded_to_app: u64,
+    pub alternate_scroll: u64,
+    pub host_scroll: u64,
+    /// Unix ms of the most recent wheel event routed to this terminal.
+    pub last_ms: u64,
+}
+
 /// Wall-clock now, as unix milliseconds. Zero if the clock is before the epoch.
 pub fn unix_millis_now() -> u64 {
     std::time::SystemTime::now()
@@ -1523,6 +1533,11 @@ pub struct AppState {
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
+    /// Wheel events herdr has routed to each terminal, and when the last one
+    /// arrived. Answers the question `wheel_routing` cannot: whether an event
+    /// reached herdr at all, and which pane it resolved to. Scrolling that does
+    /// nothing looks identical to correct routing until you can see this.
+    pub wheel_events: std::collections::HashMap<crate::terminal::TerminalId, WheelEventTally>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -1933,6 +1948,7 @@ impl AppState {
         Self {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
+            wheel_events: std::collections::HashMap::new(),
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),

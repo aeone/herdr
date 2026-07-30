@@ -447,6 +447,16 @@ pub struct PaneInputInfo {
     pub mouse_reporting: bool,
     pub alternate_screen: bool,
     pub mouse_alternate_scroll: bool,
+    /// Wheel events herdr has routed to this pane, split by where they went.
+    /// `wheel_routing` says what would happen to an event; these say whether
+    /// any arrived. Scrolling that does nothing and scrolling that never
+    /// reached herdr look identical without them.
+    pub wheel_forwarded_to_app: u64,
+    pub wheel_alternate_scroll: u64,
+    pub wheel_host_scroll: u64,
+    /// Unix ms of the most recent wheel event on this pane, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wheel_last_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

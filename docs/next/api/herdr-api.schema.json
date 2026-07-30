@@ -869,6 +869,31 @@
               "description": "Any of the mouse reporting modes: X10, press/release, button motion, any\nmotion. Set means the application asked to see the wheel itself.",
               "type": "boolean"
             },
+            "wheel_alternate_scroll": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "wheel_forwarded_to_app": {
+              "description": "Wheel events herdr has routed to this pane, split by where they went.\n`wheel_routing` says what would happen to an event; these say whether\nany arrived. Scrolling that does nothing and scrolling that never\nreached herdr look identical without them.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "wheel_host_scroll": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "wheel_last_ms": {
+              "description": "Unix ms of the most recent wheel event on this pane, if any.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "wheel_routing": {
               "description": "`mouse_report` forwards the wheel to the application, `alternate_scroll`\ntranslates it to arrow keys, `host_scroll` scrolls herdr's own scrollback.",
               "type": "string"
@@ -878,7 +903,10 @@
             "wheel_routing",
             "mouse_reporting",
             "alternate_screen",
-            "mouse_alternate_scroll"
+            "mouse_alternate_scroll",
+            "wheel_forwarded_to_app",
+            "wheel_alternate_scroll",
+            "wheel_host_scroll"
           ],
           "type": "object"
         },
@@ -7393,6 +7421,31 @@
               "description": "Any of the mouse reporting modes: X10, press/release, button motion, any\nmotion. Set means the application asked to see the wheel itself.",
               "type": "boolean"
             },
+            "wheel_alternate_scroll": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "wheel_forwarded_to_app": {
+              "description": "Wheel events herdr has routed to this pane, split by where they went.\n`wheel_routing` says what would happen to an event; these say whether\nany arrived. Scrolling that does nothing and scrolling that never\nreached herdr look identical without them.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "wheel_host_scroll": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "wheel_last_ms": {
+              "description": "Unix ms of the most recent wheel event on this pane, if any.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "wheel_routing": {
               "description": "`mouse_report` forwards the wheel to the application, `alternate_scroll`\ntranslates it to arrow keys, `host_scroll` scrolls herdr's own scrollback.",
               "type": "string"
@@ -7402,7 +7455,10 @@
             "wheel_routing",
             "mouse_reporting",
             "alternate_screen",
-            "mouse_alternate_scroll"
+            "mouse_alternate_scroll",
+            "wheel_forwarded_to_app",
+            "wheel_alternate_scroll",
+            "wheel_host_scroll"
           ],
           "type": "object"
         },
