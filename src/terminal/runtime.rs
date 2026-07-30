@@ -412,6 +412,10 @@ impl TerminalRuntime {
         self.0.wheel_routing()
     }
 
+    pub fn wheel_routing_detail(&self) -> Option<crate::pane::WheelRoutingDetail> {
+        self.0.wheel_routing_detail()
+    }
+
     pub fn encode_mouse_button(
         &self,
         kind: crossterm::event::MouseEventKind,

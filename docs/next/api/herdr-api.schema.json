@@ -766,6 +766,17 @@
                 "null"
               ]
             },
+            "input": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/PaneInputInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How this pane currently routes the scroll wheel, and the terminal modes\nthat decided it. Present only when the pane has a live runtime to ask."
+            },
             "label": {
               "type": [
                 "string",
@@ -842,6 +853,32 @@
             "focused",
             "agent_status",
             "revision"
+          ],
+          "type": "object"
+        },
+        "PaneInputInfo": {
+          "description": "Why a pane routes the wheel the way it does.\n\nThe verdict alone is not enough to debug with: \"host_scroll\" is the correct\nanswer for a shell and a symptom for a full-screen app, and telling those\napart needs the modes underneath. Recomputed per request from the terminal,\nso it reflects the app's state now rather than when it started.",
+          "properties": {
+            "alternate_screen": {
+              "type": "boolean"
+            },
+            "mouse_alternate_scroll": {
+              "type": "boolean"
+            },
+            "mouse_reporting": {
+              "description": "Any of the mouse reporting modes: X10, press/release, button motion, any\nmotion. Set means the application asked to see the wheel itself.",
+              "type": "boolean"
+            },
+            "wheel_routing": {
+              "description": "`mouse_report` forwards the wheel to the application, `alternate_scroll`\ntranslates it to arrow keys, `host_scroll` scrolls herdr's own scrollback.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "wheel_routing",
+            "mouse_reporting",
+            "alternate_screen",
+            "mouse_alternate_scroll"
           ],
           "type": "object"
         },
@@ -7253,6 +7290,17 @@
                 "null"
               ]
             },
+            "input": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PaneInputInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "How this pane currently routes the scroll wheel, and the terminal modes\nthat decided it. Present only when the pane has a live runtime to ask."
+            },
             "label": {
               "type": [
                 "string",
@@ -7329,6 +7377,32 @@
             "focused",
             "agent_status",
             "revision"
+          ],
+          "type": "object"
+        },
+        "PaneInputInfo": {
+          "description": "Why a pane routes the wheel the way it does.\n\nThe verdict alone is not enough to debug with: \"host_scroll\" is the correct\nanswer for a shell and a symptom for a full-screen app, and telling those\napart needs the modes underneath. Recomputed per request from the terminal,\nso it reflects the app's state now rather than when it started.",
+          "properties": {
+            "alternate_screen": {
+              "type": "boolean"
+            },
+            "mouse_alternate_scroll": {
+              "type": "boolean"
+            },
+            "mouse_reporting": {
+              "description": "Any of the mouse reporting modes: X10, press/release, button motion, any\nmotion. Set means the application asked to see the wheel itself.",
+              "type": "boolean"
+            },
+            "wheel_routing": {
+              "description": "`mouse_report` forwards the wheel to the application, `alternate_scroll`\ntranslates it to arrow keys, `host_scroll` scrolls herdr's own scrollback.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "wheel_routing",
+            "mouse_reporting",
+            "alternate_screen",
+            "mouse_alternate_scroll"
           ],
           "type": "object"
         },

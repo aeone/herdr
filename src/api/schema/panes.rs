@@ -424,7 +424,29 @@ pub struct PaneInfo {
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<PaneScrollInfo>,
+    /// How this pane currently routes the scroll wheel, and the terminal modes
+    /// that decided it. Present only when the pane has a live runtime to ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<PaneInputInfo>,
     pub revision: u64,
+}
+
+/// Why a pane routes the wheel the way it does.
+///
+/// The verdict alone is not enough to debug with: "host_scroll" is the correct
+/// answer for a shell and a symptom for a full-screen app, and telling those
+/// apart needs the modes underneath. Recomputed per request from the terminal,
+/// so it reflects the app's state now rather than when it started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneInputInfo {
+    /// `mouse_report` forwards the wheel to the application, `alternate_scroll`
+    /// translates it to arrow keys, `host_scroll` scrolls herdr's own scrollback.
+    pub wheel_routing: String,
+    /// Any of the mouse reporting modes: X10, press/release, button motion, any
+    /// motion. Set means the application asked to see the wheel itself.
+    pub mouse_reporting: bool,
+    pub alternate_screen: bool,
+    pub mouse_alternate_scroll: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

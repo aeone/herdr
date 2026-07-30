@@ -509,6 +509,19 @@ impl App {
                 max_offset_from_bottom: metrics.max_offset_from_bottom as u64,
                 viewport_rows: metrics.viewport_rows as u64,
             });
+        // Recomputed per request rather than cached: it reports what the
+        // application has enabled right now, which is the whole point when
+        // scrolling misbehaves intermittently.
+        let input = self
+            .state
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
+            .and_then(|runtime| runtime.wheel_routing_detail())
+            .map(|detail| crate::api::schema::PaneInputInfo {
+                wheel_routing: detail.routing.as_str().to_string(),
+                mouse_reporting: detail.mouse_reporting,
+                alternate_screen: detail.alternate_screen,
+                mouse_alternate_scroll: detail.mouse_alternate_scroll,
+            });
         let focused = self.state.active == Some(ws_idx)
             && ws.active_tab == tab_idx
             && ws
@@ -538,6 +551,7 @@ impl App {
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
             scroll,
+            input,
             revision: terminal.revision,
         })
     }

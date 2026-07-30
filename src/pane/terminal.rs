@@ -363,6 +363,10 @@ impl PaneTerminal {
         self.ghostty.wheel_routing()
     }
 
+    pub fn wheel_routing_detail(&self) -> Option<crate::pane::WheelRoutingDetail> {
+        self.ghostty.wheel_routing_detail()
+    }
+
     pub fn cursor_state(&self) -> Option<TerminalCursorState> {
         self.ghostty.cursor_state()
     }
@@ -1564,6 +1568,40 @@ impl GhosttyPaneTerminal {
             crate::pane::WheelRouting::AlternateScroll
         } else {
             crate::pane::WheelRouting::HostScroll
+        })
+    }
+
+    /// The wheel routing decision together with the modes that produced it.
+    ///
+    /// Same computation as `wheel_routing`, reported rather than reduced: when
+    /// scrolling misbehaves, the verdict alone cannot say whether the
+    /// application dropped mouse reporting or never asked for it.
+    pub fn wheel_routing_detail(&self) -> Option<crate::pane::WheelRoutingDetail> {
+        let Ok(core) = self.core.lock() else {
+            return None;
+        };
+        let alternate_screen =
+            core.terminal.active_screen().ok()? == crate::ghostty::ActiveScreen::Alternate;
+        let mouse_alternate_scroll = core
+            .terminal
+            .mode_get(crate::ghostty::MODE_MOUSE_ALTERNATE_SCROLL)
+            .ok()?;
+        let mouse_reporting = core.terminal.mode_get(MODE_MOUSE_ANY_MOTION).ok()?
+            || core.terminal.mode_get(MODE_MOUSE_BUTTON_MOTION).ok()?
+            || core.terminal.mode_get(MODE_MOUSE_PRESS_RELEASE).ok()?
+            || core.terminal.mode_get(MODE_MOUSE_X10).ok()?;
+        let routing = if mouse_reporting {
+            crate::pane::WheelRouting::MouseReport
+        } else if alternate_screen && mouse_alternate_scroll {
+            crate::pane::WheelRouting::AlternateScroll
+        } else {
+            crate::pane::WheelRouting::HostScroll
+        };
+        Some(crate::pane::WheelRoutingDetail {
+            routing,
+            mouse_reporting,
+            alternate_screen,
+            mouse_alternate_scroll,
         })
     }
 

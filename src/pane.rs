@@ -1080,6 +1080,25 @@ pub enum WheelRouting {
     AlternateScroll,
 }
 
+impl WheelRouting {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HostScroll => "host_scroll",
+            Self::MouseReport => "mouse_report",
+            Self::AlternateScroll => "alternate_scroll",
+        }
+    }
+}
+
+/// A wheel routing decision plus the terminal modes behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WheelRoutingDetail {
+    pub routing: WheelRouting,
+    pub mouse_reporting: bool,
+    pub alternate_screen: bool,
+    pub mouse_alternate_scroll: bool,
+}
+
 impl Drop for PaneRuntime {
     fn drop(&mut self) {
         // Abort detection task immediately and terminate the owned session.
@@ -2626,6 +2645,10 @@ impl PaneRuntime {
 
     pub fn wheel_routing(&self) -> Option<WheelRouting> {
         self.terminal.wheel_routing()
+    }
+
+    pub fn wheel_routing_detail(&self) -> Option<WheelRoutingDetail> {
+        self.terminal.wheel_routing_detail()
     }
 
     pub fn encode_mouse_button(
