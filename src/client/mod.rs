@@ -810,6 +810,14 @@ enum ClientLoopEvent {
     StdinEvents(Vec<crate::protocol::ClientInputEvent>),
     /// Terminal resize detected.
     Resize(u16, u16, u32, u32),
+    /// Rewrite the terminal's mouse-reporting mode even though nothing changed.
+    ///
+    /// A reconnecting mosh session repaints from its own screen model, which
+    /// does not carry DEC private modes, so the terminal silently stops sending
+    /// mouse reports. herdr sets the mode once and then only rewrites it when
+    /// the desired value changes, so nothing ever put it back and scrolling
+    /// stayed dead until something happened to toggle it.
+    ReassertMouseCapture,
     /// Server message received.
     ServerMessage(ServerMessage),
     /// Server reader thread exited (connection lost).
@@ -1511,6 +1519,14 @@ async fn run_client_loop(
                     return Err(ClientError::ConnectionLost(e));
                 }
             }
+            ClientLoopEvent::ReassertMouseCapture => {
+                if state.mouse_capture_active {
+                    // Unconditional: the point is to repair a mode the terminal
+                    // lost without telling us, so the cached value cannot be
+                    // trusted to decide whether a write is needed.
+                    set_mouse_capture(true).map_err(ClientError::ConnectionFailed)?;
+                }
+            }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
                 let msg = ClientMessage::Resize {
@@ -2103,6 +2119,11 @@ fn current_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u3
     )
 }
 
+/// How often the mouse-reporting mode is rewritten in case the terminal lost
+/// it. Long enough to be free, short enough that a reconnect does not leave
+/// scrolling broken for long.
+const MOUSE_CAPTURE_REASSERT_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Polls the terminal size and sends resize events when it changes.
 fn resize_poll_loop(
     resize_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
@@ -2119,8 +2140,23 @@ fn resize_poll_loop(
         initial_cell_width,
         initial_cell_height,
     );
+    // A reconnect is invisible to this process — the pty is unchanged and no
+    // resize need occur — so the mode is rewritten on a timer rather than in
+    // response to an event. It is a few bytes, and setting a mode that is
+    // already set is a no-op for the terminal.
+    let mut since_reassert = Duration::ZERO;
     while !should_quit.load(Ordering::Acquire) {
         std::thread::sleep(Duration::from_millis(100));
+        since_reassert += Duration::from_millis(100);
+        if since_reassert >= MOUSE_CAPTURE_REASSERT_INTERVAL {
+            since_reassert = Duration::ZERO;
+            if resize_tx
+                .blocking_send(ClientLoopEvent::ReassertMouseCapture)
+                .is_err()
+            {
+                break;
+            }
+        }
         let new_size = current_terminal_geometry(kitty_graphics_enabled);
         if new_size != last_size {
             last_size = new_size;
