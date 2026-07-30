@@ -529,6 +529,7 @@ impl App {
                 continue;
             };
             let (state, seen) = remote_state_and_seen(pane.status);
+            let remote_changed_at = pane.state_changed_at_ms;
             self.handle_internal_event(crate::events::AppEvent::HookStateReported {
                 pane_id,
                 source: crate::detect::REMOTE_MIRROR_HOOK_SOURCE.to_string(),
@@ -550,6 +551,31 @@ impl App {
                     if let Some(pane_state) = tab.panes.get_mut(&pane_id) {
                         pane_state.seen = seen;
                     }
+                }
+            }
+
+            // Age the mirror by the remote's clock, not ours. Applying the
+            // state above stamps it as changing now, and mirrors are rebuilt on
+            // every reconnect and handoff, so without this every mirrored agent
+            // reads as having just gone idle however long it has really sat.
+            if let Some(changed_at) = remote_changed_at {
+                let terminal_id = self
+                    .state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| {
+                        workspace
+                            .tabs
+                            .first()
+                            .is_some_and(|tab| tab.root_pane == pane_id)
+                    })
+                    .and_then(|workspace| workspace.tabs.first())
+                    .and_then(|tab| tab.terminal_id(pane_id))
+                    .cloned();
+                if let Some(terminal) =
+                    terminal_id.and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
+                {
+                    terminal.agent_state_changed_at_ms = Some(changed_at);
                 }
             }
         }
@@ -685,6 +711,7 @@ mod tests {
             workspace_label: label.into(),
             agent: Some("claude".into()),
             status: crate::api::schema::AgentStatus::Idle,
+            state_changed_at_ms: None,
         }
     }
 

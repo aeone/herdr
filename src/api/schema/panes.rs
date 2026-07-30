@@ -428,6 +428,11 @@ pub struct PaneInfo {
     /// that decided it. Present only when the pane has a live runtime to ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<PaneInputInfo>,
+    /// Unix ms of the agent's last state change. Mirrors carry this across so a
+    /// mirrored agent is aged by when it actually went idle on its own host,
+    /// not by when the mirror happened to be built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_state_changed_at_ms: Option<u64>,
     pub revision: u64,
 }
 

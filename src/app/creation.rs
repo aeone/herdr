@@ -564,6 +564,7 @@ impl App {
             agent_session: terminal_agent_session_info(terminal),
             scroll,
             input,
+            agent_state_changed_at_ms: terminal.agent_state_changed_at_ms,
             revision: terminal.revision,
         })
     }

@@ -876,6 +876,7 @@ mod tests {
             agent_session: None,
             scroll: None,
             input: None,
+            agent_state_changed_at_ms: None,
             revision: 0,
         }
     }

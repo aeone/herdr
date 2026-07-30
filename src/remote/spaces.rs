@@ -32,6 +32,13 @@ pub(crate) struct RemoteAgentPane {
     /// own agents, so this is more accurate than screen-detecting the attached
     /// copy, which never sees anything but idle.
     pub(crate) status: crate::api::schema::AgentStatus,
+    /// When the remote says this agent last changed state, in unix ms.
+    ///
+    /// Carried across so the sidebar ages a mirrored agent by what happened on
+    /// its own host. Applying the state locally would restamp it as changing
+    /// now, and since mirrors are rebuilt on every reconnect and handoff, every
+    /// mirrored agent would read as having just gone idle.
+    pub(crate) state_changed_at_ms: Option<u64>,
 }
 
 impl RemoteAgentPane {
@@ -465,6 +472,7 @@ fn parse_mirror_panes(
             workspace_id: pane.workspace_id,
             workspace_label,
             agent: pane.display_agent.or(pane.agent),
+            state_changed_at_ms: pane.agent_state_changed_at_ms,
         }
     };
 
@@ -571,6 +579,7 @@ fn parse_created_workspace(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             workspace_id: root_pane.workspace_id,
             workspace_label: workspace.label,
             agent: None,
+            state_changed_at_ms: root_pane.agent_state_changed_at_ms,
         },
     })
 }
@@ -687,6 +696,7 @@ mod tests {
                 workspace_label: "api-server".into(),
                 agent: Some("claude".into()),
                 status: crate::api::schema::AgentStatus::Working,
+                state_changed_at_ms: None,
             }]
         );
     }
@@ -716,6 +726,7 @@ mod tests {
                     workspace_label: "lifestream".into(),
                     agent: Some("claude".into()),
                     status: crate::api::schema::AgentStatus::Idle,
+                    state_changed_at_ms: None,
                 },
                 RemoteAgentPane {
                     terminal_id: "term_656e5c429826d3".into(),
@@ -723,6 +734,7 @@ mod tests {
                     workspace_label: "emf".into(),
                     agent: Some("claude".into()),
                     status: crate::api::schema::AgentStatus::Done,
+                    state_changed_at_ms: None,
                 },
             ]
         );
@@ -805,6 +817,7 @@ mod tests {
             workspace_label: workspace_label.into(),
             agent: Some("claude".into()),
             status: crate::api::schema::AgentStatus::Idle,
+            state_changed_at_ms: None,
         }
     }
 
@@ -850,6 +863,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: Some("claude".into()),
             status: crate::api::schema::AgentStatus::Idle,
+            state_changed_at_ms: None,
         };
 
         assert_eq!(pane.mirror_key("workbox"), pane.mirror_key("workbox"));
@@ -865,6 +879,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: None,
             status: crate::api::schema::AgentStatus::Idle,
+            state_changed_at_ms: None,
         };
 
         let argv = attach_argv(&space("workbox"), &pane, "/home/you/.local/bin/herdr");
@@ -935,6 +950,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: None,
             status: crate::api::schema::AgentStatus::Idle,
+            state_changed_at_ms: None,
         };
 
         let argv = attach_argv(&space, &pane, "herdr");
@@ -1053,6 +1069,43 @@ mod tests {
         let (mirrored, shells) = parse_mirror_panes(line, &labels, true).expect("parse");
         assert_eq!(mirrored.len(), 2);
         assert!(shells.is_empty());
+    }
+
+    /// A mirrored agent must be aged by the remote's clock. Mirrors are rebuilt
+    /// on every reconnect and handoff, so ageing them locally makes every
+    /// mirrored agent look like it went idle moments ago however long it has
+    /// really sat there.
+    #[test]
+    fn discovery_carries_the_remote_state_change_time() {
+        let labels = std::collections::HashMap::from([("w1".to_string(), "api".to_string())]);
+        let line = concat!(
+            r#"{"id":"x","result":{"type":"pane_list","panes":[{"#,
+            r#""agent":"claude","agent_status":"idle","cwd":"/w","focused":false,"#,
+            r#""pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","#,
+            r#""agent_state_changed_at_ms":1750000000000,"#,
+            r#""terminal_id":"term-1","workspace_id":"w1"}]}}"#,
+        );
+
+        let (mirrored, _) = parse_mirror_panes(line, &labels, false).expect("parse");
+
+        assert_eq!(mirrored[0].state_changed_at_ms, Some(1750000000000));
+    }
+
+    /// A remote that does not report one leaves the age unknown rather than
+    /// inventing "just now".
+    #[test]
+    fn discovery_tolerates_a_remote_without_a_state_change_time() {
+        let labels = std::collections::HashMap::from([("w1".to_string(), "api".to_string())]);
+        let line = concat!(
+            r#"{"id":"x","result":{"type":"pane_list","panes":[{"#,
+            r#""agent":"claude","agent_status":"idle","cwd":"/w","focused":false,"#,
+            r#""pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","#,
+            r#""terminal_id":"term-1","workspace_id":"w1"}]}}"#,
+        );
+
+        let (mirrored, _) = parse_mirror_panes(line, &labels, false).expect("parse");
+
+        assert_eq!(mirrored[0].state_changed_at_ms, None);
     }
 
     #[test]
