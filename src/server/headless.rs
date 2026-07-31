@@ -683,7 +683,13 @@ impl HeadlessServer {
                         None => LoopEvent::Timer,
                     },
                     _ = sleep_until_or_pending(next_deadline) => LoopEvent::Timer,
-                    _ = self.app.render_notify.notified() => LoopEvent::RenderRequested,
+                    // Only wait on render requests when nothing is already
+                    // pending. With needs_render set, a request carries no new
+                    // information, and PTY readers keep a `notify_one` permit
+                    // stored more often than not, so this arm would complete
+                    // instantly and starve the render-backpressure deadline
+                    // above, free-running the loop at 100% CPU.
+                    _ = self.app.render_notify.notified(), if !needs_render => LoopEvent::RenderRequested,
                 }
             };
 
