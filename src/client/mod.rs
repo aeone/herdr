@@ -1312,6 +1312,10 @@ async fn run_client_loop(
     #[cfg(unix)]
     let is_remote_client = is_remote_client_process();
 
+    // Whether the terminal has sent a mouse report since the last check. Local
+    // to the loop: both the reader of stdin bytes and the periodic repair live
+    // here, so no sharing is needed.
+    let mut saw_mouse_report = false;
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active: config.mouse_capture_active,
@@ -1400,6 +1404,13 @@ async fn run_client_loop(
         match event {
             #[cfg(unix)]
             ClientLoopEvent::StdinInput(data) => {
+                // A terminal told to report mice that sends none is the symptom
+                // repaired in ReassertMouseCapture. SGR reports start ESC [ <
+                // and the older encoding ESC [ M, which is enough to tell that
+                // the terminal is still reporting without parsing them.
+                if data.windows(3).any(|w| w == b"\x1b[<" || w == b"\x1b[M") {
+                    saw_mouse_report = true;
+                }
                 let data = if let Some(attach_escape) = &mut state.attach_escape {
                     match attach_escape.filter_input(
                         data,
@@ -1520,10 +1531,16 @@ async fn run_client_loop(
                 }
             }
             ClientLoopEvent::ReassertMouseCapture => {
-                if state.mouse_capture_active {
-                    // Unconditional: the point is to repair a mode the terminal
-                    // lost without telling us, so the cached value cannot be
-                    // trusted to decide whether a write is needed.
+                // Only when capture should be on and the terminal has sent
+                // nothing: an active session is left alone, and a silent one is
+                // repaired. Rewriting the mode is not enough on its own, since
+                // a session-resuming layer such as mosh models terminal state
+                // and transmits only differences — asking for a mode it already
+                // believes is set produces nothing on the wire. Turning it off
+                // and on again is a difference it has to carry.
+                let was_reporting = std::mem::replace(&mut saw_mouse_report, false);
+                if state.mouse_capture_active && !was_reporting {
+                    set_mouse_capture(false).map_err(ClientError::ConnectionFailed)?;
                     set_mouse_capture(true).map_err(ClientError::ConnectionFailed)?;
                 }
             }
