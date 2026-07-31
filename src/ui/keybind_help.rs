@@ -63,6 +63,26 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     let kb = &app.keybinds;
     let mut groups = Vec::new();
 
+    // Fork-only actions, listed first and under their own heading so they are
+    // not lost among the upstream bindings. Only bound ones appear, and the
+    // heading is omitted entirely when none are, since these are unbound by
+    // default and would otherwise show a section of "unset" to everyone else.
+    let custom: Vec<HelpEntry> = [
+        (&kb.toggle_space_highlight, "mark space"),
+        (&kb.toggle_agent_highlight, "mark agent"),
+        (&kb.toggle_offline_mirrors, "offline mirrors: keep or hide"),
+    ]
+    .into_iter()
+    .filter_map(|(bindings, label)| {
+        bindings
+            .label()
+            .map(|keys| (keys, std::borrow::Cow::Borrowed(label)))
+    })
+    .collect();
+    if !custom.is_empty() {
+        groups.push(("ryi", custom));
+    }
+
     groups.push((
         "global",
         vec![

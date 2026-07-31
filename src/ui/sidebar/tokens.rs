@@ -64,7 +64,7 @@ pub(super) fn agent_rows(
                                 Some(ResolvedTokenKind::StateText(state_text.to_string()))
                             }
                             AgentSidebarToken::Number => {
-                                switch_number.map(|n| ResolvedTokenKind::Number(n.to_string()))
+                                Some(ResolvedTokenKind::Number(switch_number_text(switch_number)))
                             }
                             AgentSidebarToken::Workspace => {
                                 Some(ResolvedTokenKind::Workspace(entry.primary_label.clone()))
@@ -141,9 +141,9 @@ pub(super) fn space_rows(
                         SpaceSidebarToken::StateText => {
                             Some(ResolvedTokenKind::StateText(context.state_text.to_string()))
                         }
-                        SpaceSidebarToken::Number => context
-                            .switch_number
-                            .map(|n| ResolvedTokenKind::Number(n.to_string())),
+                        SpaceSidebarToken::Number => Some(ResolvedTokenKind::Number(
+                            switch_number_text(context.switch_number),
+                        )),
                         SpaceSidebarToken::Workspace => {
                             Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
                         }
@@ -177,6 +177,18 @@ pub(super) fn space_rows(
             (!resolved.is_empty()).then_some(resolved)
         })
         .collect()
+}
+
+/// The switch number as it is drawn, or a space holding its column.
+///
+/// Only the first nine entries get a number, so omitting the token entirely
+/// would pull every row past the ninth two columns left and break the alignment
+/// the number is there to provide.
+fn switch_number_text(switch_number: Option<usize>) -> String {
+    match switch_number {
+        Some(number) => number.to_string(),
+        None => " ".to_string(),
+    }
 }
 
 pub(super) fn separator(previous: &ResolvedToken, current: &ResolvedToken) -> &'static str {
@@ -225,6 +237,31 @@ mod tests {
             state_labels: std::collections::HashMap::new(),
             tokens: std::collections::HashMap::new(),
         }
+    }
+
+    /// Entries past the ninth have no switch number, and the column has to stay
+    /// reserved or their text sits two columns left of everything above it.
+    #[test]
+    fn an_absent_switch_number_still_holds_its_column() {
+        let entry = entry();
+        let config = AgentsSidebarConfig {
+            rows: vec![vec![
+                AgentSidebarToken::StateIcon,
+                AgentSidebarToken::Number,
+                AgentSidebarToken::Workspace,
+            ]],
+            rows_by_agent: Default::default(),
+            row_gap: 0,
+        };
+
+        let numbered = agent_rows(&config, &entry, "idle", Some(3));
+        let unnumbered = agent_rows(&config, &entry, "idle", None);
+
+        assert_eq!(numbered[0][1].kind, ResolvedTokenKind::Number("3".into()));
+        assert_eq!(unnumbered[0][1].kind, ResolvedTokenKind::Number(" ".into()));
+        // Same token count either way, so the workspace name lands in the same
+        // column in both rows.
+        assert_eq!(numbered[0].len(), unnumbered[0].len());
     }
 
     #[test]
@@ -390,7 +427,7 @@ mod tests {
         );
     }
     #[test]
-    fn number_token_shows_the_switch_position_or_nothing() {
+    fn number_token_shows_the_switch_position_or_holds_its_column() {
         let config = SpacesSidebarConfig {
             rows: vec![vec![
                 SpaceSidebarToken::Number,
@@ -414,10 +451,12 @@ mod tests {
         let numbered = space_rows(&config, ctx(Some(3)));
         assert_eq!(numbered[0][0].kind, ResolvedTokenKind::Number("3".into()));
 
-        // No position (past 9) -> the number token drops, workspace remains.
+        // No position (past 9) -> the column is held by a blank rather than
+        // dropped, so the workspace name stays aligned with the rows above it.
         let unnumbered = space_rows(&config, ctx(None));
+        assert_eq!(unnumbered[0][0].kind, ResolvedTokenKind::Number(" ".into()));
         assert_eq!(
-            unnumbered[0][0].kind,
+            unnumbered[0][1].kind,
             ResolvedTokenKind::Workspace("repo".into())
         );
     }
