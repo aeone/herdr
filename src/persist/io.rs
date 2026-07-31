@@ -210,6 +210,7 @@ mod tests {
             highlighted_workspaces: Default::default(),
             highlighted_panes: Default::default(),
             keep_offline_mirrors: false,
+            hide_spaces_in_agents: None,
         }
     }
 

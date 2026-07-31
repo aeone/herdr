@@ -35,6 +35,10 @@ pub struct SessionSnapshot {
     /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
     #[serde(default)]
     pub keep_offline_mirrors: bool,
+    /// Whether the Space list hides spaces the Agent panel already lists, once
+    /// the user has answered. Absent means the config value still decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hide_spaces_in_agents: Option<bool>,
 }
 
 /// Sidebar marks carried with a session: which spaces and agents the user
@@ -47,6 +51,7 @@ pub struct SessionMarks {
     pub highlighted_workspaces: std::collections::HashSet<String>,
     pub highlighted_panes: std::collections::HashSet<u32>,
     pub keep_offline_mirrors: bool,
+    pub hide_spaces_in_agents: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -216,6 +221,8 @@ struct RawSessionSnapshot {
     highlighted_panes: std::collections::HashSet<u32>,
     #[serde(default)]
     keep_offline_mirrors: bool,
+    #[serde(default)]
+    hide_spaces_in_agents: Option<bool>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -234,6 +241,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         highlighted_workspaces: raw.highlighted_workspaces,
         highlighted_panes: raw.highlighted_panes,
         keep_offline_mirrors: raw.keep_offline_mirrors,
+        hide_spaces_in_agents: raw.hide_spaces_in_agents,
     })
 }
 
@@ -323,6 +331,7 @@ pub fn capture(
         highlighted_workspaces: marks.highlighted_workspaces,
         highlighted_panes: marks.highlighted_panes,
         keep_offline_mirrors: marks.keep_offline_mirrors,
+        hide_spaces_in_agents: marks.hide_spaces_in_agents,
     }
 }
 
@@ -617,6 +626,7 @@ mod tests {
                 highlighted_workspaces: state.highlighted_workspaces.clone(),
                 highlighted_panes: state.highlighted_panes.clone(),
                 keep_offline_mirrors: state.keep_offline_mirrors,
+                hide_spaces_in_agents: state.hide_spaces_in_agents,
             },
         )
     }
@@ -685,6 +695,7 @@ mod tests {
             highlighted_workspaces: Default::default(),
             highlighted_panes: Default::default(),
             keep_offline_mirrors: false,
+            hide_spaces_in_agents: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -778,6 +789,7 @@ mod tests {
             highlighted_workspaces: Default::default(),
             highlighted_panes: Default::default(),
             keep_offline_mirrors: false,
+            hide_spaces_in_agents: None,
         };
 
         let json = serde_json::to_string_pretty(&snap).unwrap();
@@ -1410,6 +1422,7 @@ mod tests {
             highlighted_workspaces: Default::default(),
             highlighted_panes: Default::default(),
             keep_offline_mirrors: false,
+            hide_spaces_in_agents: None,
         };
 
         let json = serde_json::to_string(&snap).unwrap();

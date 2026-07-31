@@ -606,6 +606,7 @@ impl App {
             highlighted_workspaces: std::collections::HashSet::new(),
             highlighted_panes: std::collections::HashSet::new(),
             keep_offline_mirrors: false,
+            hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
@@ -899,6 +900,7 @@ impl App {
         app.state.highlighted_workspaces = snapshot.highlighted_workspaces.clone();
         app.state.highlighted_panes = snapshot.highlighted_panes.clone();
         app.state.keep_offline_mirrors = snapshot.keep_offline_mirrors;
+        app.state.hide_spaces_in_agents = snapshot.hide_spaces_in_agents;
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
         } else {
@@ -2894,6 +2896,38 @@ mod tests {
         assert_eq!(report.status, crate::config::ConfigReloadStatus::Applied);
         assert_eq!(app.state.default_sidebar_width, 35);
         assert_eq!(app.state.sidebar_width, 31);
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn toggling_spaces_in_agents_outlives_a_config_reload() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("toggle-spaces-in-agents");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+
+        std::fs::write(&path, "[ui.sidebar.spaces]\nhide_when_in_agents = true\n").unwrap();
+        assert_eq!(
+            app.reload_config().status,
+            crate::config::ConfigReloadStatus::Applied
+        );
+        // Nothing toggled yet, so the config still decides.
+        assert!(app.state.hides_spaces_in_agents());
+
+        app.state.hide_spaces_in_agents = Some(false);
+        assert!(!app.state.hides_spaces_in_agents());
+
+        // A reload rebuilds `sidebar_spaces` from the file. The answer the user
+        // gave lives outside it, so it is not quietly undone.
+        assert_eq!(
+            app.reload_config().status,
+            crate::config::ConfigReloadStatus::Applied
+        );
+        assert!(app.state.sidebar_spaces.hide_when_in_agents);
+        assert!(!app.state.hides_spaces_in_agents());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

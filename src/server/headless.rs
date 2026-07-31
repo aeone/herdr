@@ -1130,6 +1130,7 @@ impl HeadlessServer {
                 highlighted_workspaces: self.app.state.highlighted_workspaces.clone(),
                 highlighted_panes: self.app.state.highlighted_panes.clone(),
                 keep_offline_mirrors: self.app.state.keep_offline_mirrors,
+                hide_spaces_in_agents: self.app.state.hide_spaces_in_agents,
             },
         );
 

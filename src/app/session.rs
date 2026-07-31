@@ -55,6 +55,7 @@ impl App {
                     highlighted_workspaces: self.state.highlighted_workspaces.clone(),
                     highlighted_panes: self.state.highlighted_panes.clone(),
                     keep_offline_mirrors: self.state.keep_offline_mirrors,
+                    hide_spaces_in_agents: self.state.hide_spaces_in_agents,
                 },
             );
             let history = self.persist_pane_history.then(|| {

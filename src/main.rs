@@ -212,6 +212,17 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_mode = "prefix+r"
 # toggle_sidebar = "prefix+b"
 
+# Mark the selected space, or the agent in the focused pane, so it stands out.
+# toggle_space_highlight = ""
+# toggle_agent_highlight = ""
+# Show or hide, in the Space list, the spaces the Agent panel already lists.
+# Starts from ui.sidebar.spaces.hide_when_in_agents; the choice is kept with the
+# session and is not undone by a config reload.
+# toggle_spaces_in_agents = ""
+# Keep mirrors of an unreachable host in place, greyed, or hide them until it
+# answers again.
+# toggle_offline_mirrors = ""
+
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.
 # navigate_workspace_up = "up"
@@ -345,6 +356,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Hide spaces whose panes already appear in the Agent panel. The active space
 # always stays listed.
 # hide_when_in_agents = false
+# Sets the starting value only; keys.toggle_spaces_in_agents flips it live.
 
 # Accent color for highlights, borders, and navigation UI.
 # Accepts: hex (#89b4fa), named colors (cyan, blue, magenta), or rgb(r,g,b)

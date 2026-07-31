@@ -1410,6 +1410,33 @@ mod tests {
     }
 
     #[test]
+    fn ryi_group_leads_the_help_and_lists_its_actions_even_when_unbound() {
+        let app = crate::app::state::AppState::test_new();
+        let groups = keybind_help_groups(&app);
+
+        // Leading, so the fork's own actions are the first thing in the list.
+        assert_eq!(groups[0].0, "ryi");
+
+        // All four are unbound by default. They still appear: an action missing
+        // from the help is indistinguishable from a client too old to have it.
+        let labels: Vec<&str> = groups[0]
+            .1
+            .iter()
+            .map(|(_, label)| label.as_ref())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "mark space",
+                "mark agent",
+                "spaces listed under agents: hide or show",
+                "offline mirrors: keep or hide",
+            ]
+        );
+        assert!(groups[0].1.iter().all(|(key, _)| key == "unset"));
+    }
+
+    #[test]
     fn keybind_help_shows_unset_for_optional_actions() {
         let app = crate::app::state::AppState::test_new();
         let groups = keybind_help_groups(&app);

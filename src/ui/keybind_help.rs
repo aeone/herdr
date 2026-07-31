@@ -64,24 +64,24 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     let mut groups = Vec::new();
 
     // Fork-only actions, listed first and under their own heading so they are
-    // not lost among the upstream bindings. Only bound ones appear, and the
-    // heading is omitted entirely when none are, since these are unbound by
-    // default and would otherwise show a section of "unset" to everyone else.
-    let custom: Vec<HelpEntry> = [
-        (&kb.toggle_space_highlight, "mark space"),
-        (&kb.toggle_agent_highlight, "mark agent"),
-        (&kb.toggle_offline_mirrors, "offline mirrors: keep or hide"),
-    ]
-    .into_iter()
-    .filter_map(|(bindings, label)| {
-        bindings
-            .label()
-            .map(|keys| (keys, std::borrow::Cow::Borrowed(label)))
-    })
-    .collect();
-    if !custom.is_empty() {
-        groups.push(("ryi", custom));
-    }
+    // not lost among the upstream bindings. Unbound ones are listed as "unset"
+    // rather than hidden: an action that is missing from the list is
+    // indistinguishable from a client too old to have it.
+    groups.push((
+        "ryi",
+        vec![
+            help_entry(keybind_label(&kb.toggle_space_highlight), "mark space"),
+            help_entry(keybind_label(&kb.toggle_agent_highlight), "mark agent"),
+            help_entry(
+                keybind_label(&kb.toggle_spaces_in_agents),
+                "spaces listed under agents: hide or show",
+            ),
+            help_entry(
+                keybind_label(&kb.toggle_offline_mirrors),
+                "offline mirrors: keep or hide",
+            ),
+        ],
+    ));
 
     groups.push((
         "global",

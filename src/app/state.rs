@@ -1588,6 +1588,13 @@ pub struct AppState {
     pub highlighted_panes: std::collections::HashSet<u32>,
     /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
     pub keep_offline_mirrors: bool,
+    /// The user's own answer to whether the Space list hides the spaces the
+    /// Agent panel already shows, once they have given one.
+    ///
+    /// Held apart from `sidebar_spaces.hide_when_in_agents`, which a config
+    /// reload replaces wholesale and would otherwise silently undo the toggle.
+    /// The config value remains the default until the key is first pressed.
+    pub hide_spaces_in_agents: Option<bool>,
     /// Remote workspace ids, per host target, that the user created from here.
     /// They are mirrored even before an agent runs in them, so a space made from
     /// the sidebar shows up on a host that is not mirroring everything.
@@ -1839,6 +1846,13 @@ impl AppState {
         }
     }
 
+    /// Whether the Space list drops the spaces the Agent panel already lists.
+    /// The keybind's answer wins once given; until then the config decides.
+    pub fn hides_spaces_in_agents(&self) -> bool {
+        self.hide_spaces_in_agents
+            .unwrap_or(self.sidebar_spaces.hide_when_in_agents)
+    }
+
     pub fn estimate_pane_size(&self) -> (u16, u16) {
         if let Some(info) = self.view.pane_infos.first() {
             (info.rect.height, info.rect.width)
@@ -1984,6 +1998,7 @@ impl AppState {
             highlighted_workspaces: std::collections::HashSet::new(),
             highlighted_panes: std::collections::HashSet::new(),
             keep_offline_mirrors: false,
+            hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),
             request_complete_onboarding: false,
             name_input: String::new(),

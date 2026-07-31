@@ -334,6 +334,10 @@ pub struct KeysConfig {
     /// Mark or unmark the focused agent so it stands out in the Agent panel.
     /// Unset by default.
     pub toggle_agent_highlight: BindingConfig,
+    /// Show or hide, in the Space list, the spaces the Agent panel already
+    /// lists. Starts from `ui.sidebar.spaces.hide_when_in_agents`, and the
+    /// choice is kept with the session. Unset by default.
+    pub toggle_spaces_in_agents: BindingConfig,
     /// Cycle how mirrors of an unreachable host are shown: kept in place and
     /// greyed, or hidden until the host is back. Unset by default.
     pub toggle_offline_mirrors: BindingConfig,
@@ -458,6 +462,7 @@ pub(crate) struct KeysConfigOverlay {
     rename_workspace: Option<BindingConfig>,
     toggle_space_highlight: Option<BindingConfig>,
     toggle_agent_highlight: Option<BindingConfig>,
+    toggle_spaces_in_agents: Option<BindingConfig>,
     toggle_offline_mirrors: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     close_workspace: Option<BindingConfig>,
@@ -582,6 +587,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(rename_workspace);
         apply_field!(toggle_space_highlight);
         apply_field!(toggle_agent_highlight);
+        apply_field!(toggle_spaces_in_agents);
         apply_field!(toggle_offline_mirrors);
         apply_field!(close_workspace);
         apply_field!(workspace_picker);
@@ -683,6 +689,7 @@ impl KeysConfig {
         copy_effective_action_field!(rename_workspace, keybinds.rename_workspace);
         copy_effective_action_field!(toggle_space_highlight, keybinds.toggle_space_highlight);
         copy_effective_action_field!(toggle_agent_highlight, keybinds.toggle_agent_highlight);
+        copy_effective_action_field!(toggle_spaces_in_agents, keybinds.toggle_spaces_in_agents);
         copy_effective_action_field!(toggle_offline_mirrors, keybinds.toggle_offline_mirrors);
         copy_effective_action_field!(close_workspace, keybinds.close_workspace);
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
@@ -1011,6 +1018,7 @@ impl Default for KeysConfig {
             rename_workspace: BindingConfig::one("prefix+shift+w"),
             toggle_space_highlight: BindingConfig::default(),
             toggle_agent_highlight: BindingConfig::default(),
+            toggle_spaces_in_agents: BindingConfig::default(),
             toggle_offline_mirrors: BindingConfig::default(),
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),

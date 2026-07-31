@@ -194,6 +194,10 @@ impl App {
             NavigateAction::ToggleAgentHighlight => {
                 self.toggle_focused_agent_highlight();
             }
+            NavigateAction::ToggleSpacesInAgents => {
+                self.state.hide_spaces_in_agents = Some(!self.state.hides_spaces_in_agents());
+                self.state.mark_session_dirty();
+            }
             NavigateAction::ToggleOfflineMirrors => {
                 self.state.keep_offline_mirrors = !self.state.keep_offline_mirrors;
                 self.state.mark_session_dirty();
@@ -1303,6 +1307,7 @@ pub(crate) enum NavigateAction {
     RenameWorkspace,
     ToggleSpaceHighlight,
     ToggleAgentHighlight,
+    ToggleSpacesInAgents,
     ToggleOfflineMirrors,
     CloseWorkspace,
     SwitchWorkspace(usize),
@@ -1450,6 +1455,10 @@ fn non_indexed_action_for_key(
             NavigateAction::ToggleAgentHighlight,
         ),
         (
+            &kb.toggle_spaces_in_agents,
+            NavigateAction::ToggleSpacesInAgents,
+        ),
+        (
             &kb.toggle_offline_mirrors,
             NavigateAction::ToggleOfflineMirrors,
         ),
@@ -1581,6 +1590,9 @@ pub(super) fn execute_navigate_action_in_context(
                     state.highlighted_panes.insert(pane_id);
                 }
             }
+        }
+        NavigateAction::ToggleSpacesInAgents => {
+            state.hide_spaces_in_agents = Some(!state.hides_spaces_in_agents());
         }
         NavigateAction::ToggleOfflineMirrors => {
             state.keep_offline_mirrors = !state.keep_offline_mirrors;

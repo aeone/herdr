@@ -768,6 +768,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
             highlighted_workspaces: state.highlighted_workspaces.clone(),
             highlighted_panes: state.highlighted_panes.clone(),
             keep_offline_mirrors: state.keep_offline_mirrors,
+            hide_spaces_in_agents: state.hide_spaces_in_agents,
         },
     )
 }

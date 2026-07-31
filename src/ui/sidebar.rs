@@ -542,7 +542,7 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
             }
         }
     }
-    if app.sidebar_spaces.hide_when_in_agents {
+    if app.hides_spaces_in_agents() {
         entries = hide_entries_listed_in_agent_panel(app, entries);
     }
     // Mirrors of an unreachable host sink to the bottom — you can't work with

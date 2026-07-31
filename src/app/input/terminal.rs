@@ -1365,6 +1365,7 @@ mod tests {
                 highlighted_workspaces: app.state.highlighted_workspaces.clone(),
                 highlighted_panes: app.state.highlighted_panes.clone(),
                 keep_offline_mirrors: app.state.keep_offline_mirrors,
+                hide_spaces_in_agents: app.state.hide_spaces_in_agents,
             },
         );
         assert_eq!(snapshot.workspaces[0].tabs[0].panes.len(), 1);
