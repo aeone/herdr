@@ -1437,6 +1437,45 @@ mod tests {
     }
 
     #[test]
+    fn switching_keys_are_repeated_below_ryi_and_match_their_canonical_group() {
+        let app = crate::app::state::AppState::test_new();
+        let groups = keybind_help_groups(&app);
+
+        assert_eq!(groups[1].0, "ryi · switching");
+
+        // The reminder is only useful while it says the same thing as the group
+        // it is reminding you of.
+        let canonical = groups
+            .iter()
+            .find(|(name, _)| *name == "workspaces / tabs")
+            .expect("workspaces / tabs group")
+            .1
+            .clone();
+        for entry in &groups[1].1 {
+            assert!(
+                canonical.contains(entry),
+                "{entry:?} is not in workspaces / tabs"
+            );
+        }
+        let labels: Vec<&str> = groups[1]
+            .1
+            .iter()
+            .map(|(_, label)| label.as_ref())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "switch workspace 1-9",
+                "focus agent 1-9",
+                "previous workspace",
+                "next workspace",
+                "previous agent",
+                "next agent",
+            ]
+        );
+    }
+
+    #[test]
     fn keybind_help_shows_unset_for_optional_actions() {
         let app = crate::app::state::AppState::test_new();
         let groups = keybind_help_groups(&app);

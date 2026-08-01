@@ -23,6 +23,20 @@ fn help_entry(key: impl Into<String>, label: &'static str) -> HelpEntry {
     (key.into(), Cow::Borrowed(label))
 }
 
+/// Moving between spaces and agents. Listed twice: once in its own group near
+/// the top, and again in "workspaces / tabs" where it belongs alphabetically
+/// among everything else. Built here so the two copies cannot drift apart.
+fn switching_entries(kb: &crate::config::Keybinds) -> Vec<HelpEntry> {
+    vec![
+        help_entry(indexed_label(&kb.switch_workspace), "switch workspace 1-9"),
+        help_entry(indexed_label(&kb.focus_agent), "focus agent 1-9"),
+        help_entry(keybind_label(&kb.previous_workspace), "previous workspace"),
+        help_entry(keybind_label(&kb.next_workspace), "next workspace"),
+        help_entry(keybind_label(&kb.previous_agent), "previous agent"),
+        help_entry(keybind_label(&kb.next_agent), "next agent"),
+    ]
+}
+
 fn keybind_label(bindings: &crate::config::ActionKeybinds) -> String {
     bindings.label().unwrap_or_else(|| "unset".to_string())
 }
@@ -83,6 +97,11 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         ],
     ));
 
+    // The same entries as in "workspaces / tabs" below, repeated here because
+    // they are the ones reached for constantly and the group they belong to is
+    // long enough to have to be read through.
+    groups.push(("ryi · switching", switching_entries(kb)));
+
     groups.push((
         "global",
         vec![
@@ -129,7 +148,7 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         ],
     ));
 
-    let workspace_tab = vec![
+    let mut workspace_tab = vec![
         help_entry(keybind_label(&kb.workspace_picker), "workspace navigation"),
         help_entry(keybind_label(&kb.goto), "session navigator"),
         help_entry(keybind_label(&kb.new_workspace), "new workspace"),
@@ -141,19 +160,16 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         ),
         help_entry(keybind_label(&kb.rename_workspace), "rename workspace"),
         help_entry(keybind_label(&kb.close_workspace), "close workspace"),
-        help_entry(keybind_label(&kb.previous_workspace), "previous workspace"),
-        help_entry(keybind_label(&kb.next_workspace), "next workspace"),
-        help_entry(indexed_label(&kb.switch_workspace), "switch workspace 1-9"),
-        help_entry(keybind_label(&kb.previous_agent), "previous agent"),
-        help_entry(keybind_label(&kb.next_agent), "next agent"),
-        help_entry(indexed_label(&kb.focus_agent), "focus agent 1-9"),
+    ];
+    workspace_tab.extend(switching_entries(kb));
+    workspace_tab.extend([
         help_entry(keybind_label(&kb.new_tab), "new tab"),
         help_entry(keybind_label(&kb.rename_tab), "rename tab"),
         help_entry(keybind_label(&kb.previous_tab), "previous tab"),
         help_entry(keybind_label(&kb.next_tab), "next tab"),
         help_entry(indexed_label(&kb.switch_tab), "switch tab 1-9"),
         help_entry(keybind_label(&kb.close_tab), "close tab"),
-    ];
+    ]);
     groups.push(("workspaces / tabs", workspace_tab));
 
     let panes = vec![
