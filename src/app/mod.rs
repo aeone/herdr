@@ -157,6 +157,11 @@ pub struct App {
     pub(crate) manage_ssh_config: bool,
     #[cfg(unix)]
     pub(crate) remote_space_workers: HashMap<String, remote_mirrors::RemoteSpaceWorker>,
+    /// Mirror renames sent to a host but not yet reflected in its snapshots,
+    /// by mirror key. Reconcile leaves these alone so the name the user typed
+    /// does not flicker back to the old one while the host is catching up.
+    #[cfg(unix)]
+    pub(crate) pending_mirror_renames: HashMap<String, remote_mirrors::PendingMirrorRename>,
     prefix_input_source: Box<dyn crate::platform::PrefixInputSource>,
 }
 
@@ -836,6 +841,8 @@ impl App {
             manage_ssh_config: config.remote.manage_ssh_config,
             #[cfg(unix)]
             remote_space_workers: HashMap::new(),
+            #[cfg(unix)]
+            pending_mirror_renames: HashMap::new(),
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
     }

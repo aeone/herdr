@@ -43,11 +43,34 @@ pub(crate) enum MirrorAction {
 /// independent and an empty poll for one never disturbs another's spaces.
 /// `Close` actions come first and in descending index order, so applying the
 /// plan in order cannot invalidate a later index.
+/// The remote's own workspace id, recovered from a mirror key.
+///
+/// The key is built by `RemoteAgentPane::mirror_key` as target, workspace and
+/// terminal joined by unit separators.
+fn remote_workspace_id(key: &str) -> Option<String> {
+    key.split('\u{1f}').nth(1).map(str::to_string)
+}
+
+/// A rename sent to a host, waiting for that host to report it back.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingMirrorRename {
+    pub(crate) label: String,
+    /// When to stop protecting the local name. A host that never reports the
+    /// rename — because the call was lost, or someone renamed it again there —
+    /// must not pin a name that nothing agrees with forever.
+    pub(crate) expires_at: std::time::Instant,
+}
+
+/// How long a sent rename keeps the local name before the remote has the last
+/// word. Long enough for an ssh round trip and the snapshot that follows it.
+pub(crate) const MIRROR_RENAME_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub(crate) fn plan_remote_mirrors(
     workspaces: &[Workspace],
     space: &RemoteSpaceConfig,
     snapshot: &RemoteSpaceSnapshot,
     pinned: &std::collections::HashSet<String>,
+    renaming: &std::collections::HashSet<String>,
 ) -> Vec<MirrorAction> {
     // A space the user created on this host is mirrored even with no agent in it
     // yet. Without this it would be planned as stale and closed on the very next
@@ -94,7 +117,13 @@ pub(crate) fn plan_remote_mirrors(
             // A remote workspace can be renamed, or gain a sibling that changes
             // how duplicate labels are disambiguated.
             Some(ws_idx) => {
-                if workspaces[ws_idx].custom_name.as_deref() != Some(label.as_str()) {
+                // A rename on its way to the host has not come back in a
+                // snapshot yet, so the remote still reports the old label.
+                // Overwriting now would undo the name mid-flight and then put
+                // it back, which reads as the rename having failed.
+                if workspaces[ws_idx].custom_name.as_deref() != Some(label.as_str())
+                    && !renaming.contains(key)
+                {
                     plan.push(MirrorAction::Rename {
                         ws_idx,
                         label: label.clone(),
@@ -375,6 +404,73 @@ impl App {
         });
     }
 
+    /// Sends a mirror's new name to the host that owns the space.
+    ///
+    /// The mirror shows whatever label the remote reports, so a local rename
+    /// alone is undone by the next snapshot. Renaming it there makes the new
+    /// name the real one, and every other host mirroring the space follows.
+    pub(crate) fn request_remote_rename(&mut self, ws_idx: usize, label: String) {
+        let Some(mirror) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.remote_mirror.clone())
+        else {
+            return;
+        };
+        let Some(space) = self
+            .config_remote_spaces()
+            .into_iter()
+            .find(|space| space.target == mirror.target)
+        else {
+            return;
+        };
+        let Some(workspace_id) = remote_workspace_id(&mirror.key) else {
+            return;
+        };
+        self.pending_mirror_renames.insert(
+            mirror.key.clone(),
+            PendingMirrorRename {
+                label: label.clone(),
+                expires_at: std::time::Instant::now() + MIRROR_RENAME_GRACE,
+            },
+        );
+        let manage_ssh_config = self.manage_ssh_config;
+        let event_tx = self.event_tx.clone();
+        let key = mirror.key;
+        std::thread::spawn(move || {
+            let result = crate::remote::spaces::rename_remote_workspace(
+                &space,
+                manage_ssh_config,
+                &workspace_id,
+                &label,
+            );
+            let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteSpaceRenamed {
+                target: space.target.clone(),
+                key,
+                result: result.map_err(|err| err.to_string()),
+            });
+        });
+    }
+
+    /// Applies the result of [`Self::request_remote_rename`].
+    ///
+    /// Only failure needs handling: dropping the pending entry hands the name
+    /// back to the remote, so the next snapshot restores what the host still
+    /// calls it rather than leaving a name that only exists here. A success is
+    /// left pending until a snapshot carries the new label.
+    pub(crate) fn handle_remote_space_renamed(
+        &mut self,
+        target: String,
+        key: String,
+        result: Result<(), String>,
+    ) {
+        if let Err(err) = result {
+            tracing::warn!(target = %target, %err, "renaming a remote space failed");
+            self.pending_mirror_renames.remove(&key);
+        }
+    }
+
     /// Applies the result of [`Self::request_remote_space`].
     pub(crate) fn handle_remote_space_created(
         &mut self,
@@ -457,7 +553,21 @@ impl App {
             .get(&space.target)
             .cloned()
             .unwrap_or_default();
-        let plan = plan_remote_mirrors(&self.state.workspaces, space, snapshot, &pinned);
+        // A pending rename is done with once the host reports the new label, or
+        // once it has had long enough to and has not.
+        let now = std::time::Instant::now();
+        let reported: std::collections::HashMap<String, String> = snapshot
+            .panes
+            .iter()
+            .chain(snapshot.shell_panes.iter())
+            .map(|pane| (pane.mirror_key(&space.target), pane.workspace_label.clone()))
+            .collect();
+        self.pending_mirror_renames.retain(|key, pending| {
+            now < pending.expires_at && reported.get(key) != Some(&pending.label)
+        });
+        let renaming: std::collections::HashSet<String> =
+            self.pending_mirror_renames.keys().cloned().collect();
+        let plan = plan_remote_mirrors(&self.state.workspaces, space, snapshot, &pinned, &renaming);
 
         let mut closed = 0usize;
         for action in plan {
@@ -680,7 +790,13 @@ mod tests {
         space: &RemoteSpaceConfig,
         snapshot: &RemoteSpaceSnapshot,
     ) -> Vec<MirrorAction> {
-        super::plan_remote_mirrors(workspaces, space, snapshot, &Default::default())
+        super::plan_remote_mirrors(
+            workspaces,
+            space,
+            snapshot,
+            &Default::default(),
+            &Default::default(),
+        )
     }
 
     fn snapshot(panes: Vec<RemoteAgentPane>) -> RemoteSpaceSnapshot {
@@ -815,7 +931,13 @@ mod tests {
         let snapshot = snapshot_with_shells(vec![], vec![agent_pane("w7", "notes", "term-7")]);
         let pinned = std::collections::HashSet::from(["w7".to_string()]);
 
-        let plan = super::plan_remote_mirrors(&[], &space("workbox"), &snapshot, &pinned);
+        let plan = super::plan_remote_mirrors(
+            &[],
+            &space("workbox"),
+            &snapshot,
+            &pinned,
+            &Default::default(),
+        );
 
         assert_eq!(
             plan,
@@ -855,7 +977,13 @@ mod tests {
             "notes",
         )];
 
-        let plan = super::plan_remote_mirrors(&workspaces, &space("workbox"), &snapshot, &pinned);
+        let plan = super::plan_remote_mirrors(
+            &workspaces,
+            &space("workbox"),
+            &snapshot,
+            &pinned,
+            &Default::default(),
+        );
 
         assert_eq!(plan, Vec::new());
     }
@@ -1001,6 +1129,62 @@ mod tests {
                 label: "api-server".into(),
             }]
         );
+    }
+
+    #[test]
+    fn plan_leaves_a_mirror_alone_while_its_rename_is_on_its_way_to_the_host() {
+        // Renamed here to "api-server"; the host still reports the old "api",
+        // because the rename has not reached it yet.
+        let key = key_for("workbox", "w1", "term-1");
+        let workspaces = vec![mirror("workbox", &key, "api-server")];
+        let renaming = std::collections::HashSet::from([key]);
+
+        let plan = super::plan_remote_mirrors(
+            &workspaces,
+            &space("workbox"),
+            &snapshot(vec![agent_pane("w1", "api", "term-1")]),
+            &Default::default(),
+            &renaming,
+        );
+
+        assert!(
+            plan.is_empty(),
+            "a rename in flight must not be undone mid-way: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn plan_takes_the_hosts_label_back_once_no_rename_is_in_flight() {
+        // The same disagreement, with nothing pending: the host wins, which is
+        // what makes a failed or expired rename fall back rather than stick.
+        let workspaces = vec![mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "api-server",
+        )];
+
+        let plan = plan_remote_mirrors(
+            &workspaces,
+            &space("workbox"),
+            &snapshot(vec![agent_pane("w1", "api", "term-1")]),
+        );
+
+        assert_eq!(
+            plan,
+            vec![MirrorAction::Rename {
+                ws_idx: 0,
+                label: "api".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn remote_workspace_id_comes_back_out_of_a_mirror_key() {
+        assert_eq!(
+            super::remote_workspace_id(&key_for("workbox", "w1", "term-1")),
+            Some("w1".to_string())
+        );
+        assert_eq!(super::remote_workspace_id("not-a-key"), None);
     }
 
     #[test]

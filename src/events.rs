@@ -158,6 +158,14 @@ pub enum AppEvent {
         target: String,
         result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
     },
+    /// A rename of a mirrored space was sent to its host, and either took or
+    /// did not. Like creation, an ssh round trip that must not block the loop.
+    #[cfg(unix)]
+    RemoteSpaceRenamed {
+        target: String,
+        key: String,
+        result: Result<(), String>,
+    },
     /// A plugin action or event command finished.
     PluginCommandFinished {
         log_id: String,

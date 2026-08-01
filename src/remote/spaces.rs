@@ -534,6 +534,56 @@ pub(crate) fn create_remote_workspace(
     parse_created_workspace(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// Renames a workspace on the mirrored host.
+///
+/// A mirror shows the remote's own label, so the only way for a new name to
+/// survive reconcile is for the remote to start reporting it. Renaming there
+/// also means every other host mirroring the same space sees the change.
+pub(crate) fn rename_remote_workspace(
+    space: &RemoteSpaceConfig,
+    manage_ssh_config: bool,
+    workspace_id: &str,
+    label: &str,
+) -> io::Result<()> {
+    let script = rename_workspace_script(
+        space.session.as_deref(),
+        space.is_local(),
+        workspace_id,
+        label,
+    );
+    let output = if space.is_local() {
+        local_sh_output(&script)?
+    } else {
+        RemoteSsh::new(space.target.clone(), manage_ssh_config).sh_output(&script)?
+    };
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "renaming a space on {} failed: {}",
+            space.target,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn rename_workspace_script(
+    session: Option<&str>,
+    local: bool,
+    workspace_id: &str,
+    label: &str,
+) -> String {
+    let mut script = script_prologue(session, local);
+    // No `--` separator: `workspace rename` takes its label as a variadic
+    // positional, which keeps the separator as a value rather than consuming
+    // it, so it would end up at the front of the name.
+    script.push_str(&format!(
+        "\"$herdr_bin\" workspace rename {} {}\n",
+        shell_quote(workspace_id),
+        shell_quote(label)
+    ));
+    script
+}
+
 fn create_workspace_script(session: Option<&str>, local: bool, label: Option<&str>) -> String {
     let mut script = script_prologue(session, local);
     // Same first line as discovery: the mirror's attach command needs the remote
@@ -1106,6 +1156,27 @@ mod tests {
         let (mirrored, _) = parse_mirror_panes(line, &labels, false).expect("parse");
 
         assert_eq!(mirrored[0].state_changed_at_ms, None);
+    }
+
+    #[test]
+    fn rename_script_passes_the_label_as_one_argument_and_no_separator() {
+        let script = super::rename_workspace_script(None, false, "w8", "nocturne probe");
+
+        assert!(
+            script.contains("workspace rename 'w8' 'nocturne probe'"),
+            "{script}"
+        );
+        // `label` is a variadic positional, so a `--` would be kept as a value
+        // and land at the front of the name instead of separating anything.
+        assert!(!script.contains(" -- "), "{script}");
+    }
+
+    #[test]
+    fn rename_script_quotes_a_label_that_would_otherwise_run_as_shell() {
+        let script = super::rename_workspace_script(None, false, "w8", "a'; rm -rf ~; echo '");
+
+        assert!(!script.contains("rm -rf ~;\n"), "{script}");
+        assert!(script.contains("workspace rename 'w8' 'a'"), "{script}");
     }
 
     #[test]

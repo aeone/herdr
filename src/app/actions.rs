@@ -2849,6 +2849,17 @@ impl AppState {
                 let _ = result;
                 Vec::new()
             }
+            #[cfg(unix)]
+            AppEvent::RemoteSpaceRenamed {
+                target,
+                key,
+                result,
+            } => {
+                let _ = target;
+                let _ = key;
+                let _ = result;
+                Vec::new()
+            }
             AppEvent::WorktreeAddFinished(_) => Vec::new(),
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),

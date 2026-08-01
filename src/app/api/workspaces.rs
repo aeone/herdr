@@ -99,7 +99,17 @@ impl App {
             return workspace_not_found(id, &params.workspace_id);
         };
         ws.set_custom_name(params.label.clone());
+        let is_mirror = ws.remote_mirror.is_some();
         crate::logging::workspace_renamed(&ws.id);
+        // A mirror's label is whatever its host reports, so the local change
+        // above is only half of it: without this the next snapshot puts the old
+        // name straight back.
+        #[cfg(unix)]
+        if is_mirror {
+            self.request_remote_rename(index, params.label.clone());
+        }
+        #[cfg(not(unix))]
+        let _ = is_mirror;
         self.schedule_session_save();
         self.emit_event(EventEnvelope {
             event: EventKind::WorkspaceRenamed,
