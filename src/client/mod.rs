@@ -19,6 +19,8 @@ use std::io::{self, BufRead, Write as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use base64::Engine;
 use crossterm::event::{
@@ -1316,6 +1318,10 @@ async fn run_client_loop(
     // to the loop: both the reader of stdin bytes and the periodic repair live
     // here, so no sharing is needed.
     let mut saw_mouse_report = false;
+    // When a repair has turned mouse reporting off and is waiting to turn it
+    // back on. See `MOUSE_CAPTURE_REPAIR_GAP`.
+    #[cfg(unix)]
+    let mut mouse_capture_repair_at: Option<Instant> = None;
     let mut state = ClientState {
         blit_encoder: render_ansi::BlitEncoder::new(),
         mouse_capture_active: config.mouse_capture_active,
@@ -1400,6 +1406,18 @@ async fn run_client_loop(
             ev = event_rx.recv() => ev.unwrap_or(ClientLoopEvent::Timer),
             _ = tokio::time::sleep(Duration::from_millis(100)) => ClientLoopEvent::Timer,
         };
+
+        // Second half of a repair: the terminal has been without mouse
+        // reporting long enough for the intervening state to have been sent on,
+        // so turning it back on is now a change rather than a round trip to
+        // where it started.
+        #[cfg(unix)]
+        if mouse_capture_repair_at.is_some_and(|at| Instant::now() >= at) {
+            mouse_capture_repair_at = None;
+            if state.mouse_capture_active {
+                set_mouse_capture(true).map_err(ClientError::ConnectionFailed)?;
+            }
+        }
 
         match event {
             #[cfg(unix)]
@@ -1537,12 +1555,18 @@ async fn run_client_loop(
                 // a session-resuming layer such as mosh models terminal state
                 // and transmits only differences — asking for a mode it already
                 // believes is set produces nothing on the wire. Turning it off
-                // and on again is a difference it has to carry.
+                // and on again is the difference it has to carry, but only if
+                // the two halves land in different frames, so the second half
+                // waits: see `MOUSE_CAPTURE_REPAIR_GAP`.
                 let was_reporting = std::mem::replace(&mut saw_mouse_report, false);
-                if state.mouse_capture_active && !was_reporting {
+                #[cfg(unix)]
+                if state.mouse_capture_active && !was_reporting && mouse_capture_repair_at.is_none()
+                {
                     set_mouse_capture(false).map_err(ClientError::ConnectionFailed)?;
-                    set_mouse_capture(true).map_err(ClientError::ConnectionFailed)?;
+                    mouse_capture_repair_at = Some(Instant::now() + MOUSE_CAPTURE_REPAIR_GAP);
                 }
+                #[cfg(not(unix))]
+                let _ = was_reporting;
             }
             ClientLoopEvent::Resize(new_cols, new_rows, cell_width_px, cell_height_px) => {
                 state.reported_size = (new_cols, new_rows);
@@ -2136,10 +2160,18 @@ fn current_terminal_geometry(kitty_graphics_enabled: bool) -> (u16, u16, u32, u3
     )
 }
 
-/// How often the mouse-reporting mode is rewritten in case the terminal lost
+/// How often mouse reporting is checked, and repaired if the terminal has lost
 /// it. Long enough to be free, short enough that a reconnect does not leave
 /// scrolling broken for long.
 const MOUSE_CAPTURE_REASSERT_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long mouse reporting is left off during a repair. A layer that models
+/// terminal state and sends only differences — mosh — collapses an off and an
+/// on that fall between the same two frames back into no change at all, so the
+/// gap has to outlast a frame. Mosh sends at most 250ms apart; this is triple
+/// that, and costs nothing on a terminal that was reporting fine.
+#[cfg(unix)]
+const MOUSE_CAPTURE_REPAIR_GAP: Duration = Duration::from_millis(750);
 
 /// Polls the terminal size and sends resize events when it changes.
 fn resize_poll_loop(
@@ -2158,9 +2190,8 @@ fn resize_poll_loop(
         initial_cell_height,
     );
     // A reconnect is invisible to this process — the pty is unchanged and no
-    // resize need occur — so the mode is rewritten on a timer rather than in
-    // response to an event. It is a few bytes, and setting a mode that is
-    // already set is a no-op for the terminal.
+    // resize need occur — so the repair runs on a timer rather than in response
+    // to an event. The main loop decides whether it is needed.
     let mut since_reassert = Duration::ZERO;
     while !should_quit.load(Ordering::Acquire) {
         std::thread::sleep(Duration::from_millis(100));
