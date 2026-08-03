@@ -14,6 +14,7 @@ mod config_io;
 mod creation;
 mod ids;
 mod input;
+mod jump;
 mod popup;
 #[cfg(unix)]
 mod remote_mirrors;
@@ -573,6 +574,7 @@ impl App {
         let (theme_palette, theme_name) = resolve_effective_theme(&theme_runtime, None);
 
         let mut state = AppState {
+            jump_input: String::new(),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             wheel_events: std::collections::HashMap::new(),
@@ -1824,6 +1826,9 @@ impl App {
             }
             Mode::Copy => {
                 self.handle_copy_mode_key(key);
+            }
+            Mode::Jump => {
+                self.handle_jump_key(key_event);
             }
             Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                 self.handle_rename_key_via_api(key_event);

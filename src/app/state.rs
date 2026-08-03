@@ -811,6 +811,7 @@ pub enum Mode {
     GlobalMenu,
     KeybindHelp,
     Navigator,
+    Jump,
 }
 
 impl Mode {
@@ -1588,6 +1589,9 @@ pub struct AppState {
     pub highlighted_panes: std::collections::HashSet<u32>,
     /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
     pub keep_offline_mirrors: bool,
+    /// Keys typed so far in jump mode, empty on entry. Only meaningful while
+    /// the mode is `Jump`; the labels themselves are derived, not stored.
+    pub jump_input: String,
     /// The user's own answer to whether the Space list hides the spaces the
     /// Agent panel already shows, once they have given one.
     ///
@@ -1846,6 +1850,15 @@ impl AppState {
         }
     }
 
+    /// Jump labels for the sidebar, or `None` when the mode is not open.
+    ///
+    /// Built per frame rather than held: the entries move as agents change
+    /// status, and a stored set would send a keystroke to whatever used to be
+    /// under that label.
+    pub(crate) fn jump_labels(&self) -> Option<crate::app::jump::JumpLabels> {
+        (self.mode == Mode::Jump).then(|| crate::app::jump::JumpLabels::for_app(self))
+    }
+
     /// Whether the Space list drops the spaces the Agent panel already lists.
     /// The keybind's answer wins once given; until then the config decides.
     pub fn hides_spaces_in_agents(&self) -> bool {
@@ -1998,6 +2011,7 @@ impl AppState {
             highlighted_workspaces: std::collections::HashSet::new(),
             highlighted_panes: std::collections::HashSet::new(),
             keep_offline_mirrors: false,
+            jump_input: String::new(),
             hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),
             request_complete_onboarding: false,

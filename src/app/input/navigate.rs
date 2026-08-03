@@ -194,6 +194,9 @@ impl App {
             NavigateAction::ToggleAgentHighlight => {
                 self.toggle_focused_agent_highlight();
             }
+            NavigateAction::Jump => {
+                self.open_jump();
+            }
             NavigateAction::ToggleSpacesInAgents => {
                 self.state.hide_spaces_in_agents = Some(!self.state.hides_spaces_in_agents());
                 self.state.mark_session_dirty();
@@ -1307,6 +1310,7 @@ pub(crate) enum NavigateAction {
     RenameWorkspace,
     ToggleSpaceHighlight,
     ToggleAgentHighlight,
+    Jump,
     ToggleSpacesInAgents,
     ToggleOfflineMirrors,
     CloseWorkspace,
@@ -1454,6 +1458,7 @@ fn non_indexed_action_for_key(
             &kb.toggle_agent_highlight,
             NavigateAction::ToggleAgentHighlight,
         ),
+        (&kb.jump, NavigateAction::Jump),
         (
             &kb.toggle_spaces_in_agents,
             NavigateAction::ToggleSpacesInAgents,
@@ -1590,6 +1595,10 @@ pub(super) fn execute_navigate_action_in_context(
                     state.highlighted_panes.insert(pane_id);
                 }
             }
+        }
+        NavigateAction::Jump => {
+            state.jump_input.clear();
+            state.mode = Mode::Jump;
         }
         NavigateAction::ToggleSpacesInAgents => {
             state.hide_spaces_in_agents = Some(!state.hides_spaces_in_agents());

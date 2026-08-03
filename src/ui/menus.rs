@@ -127,6 +127,41 @@ pub(super) fn render_copy_mode_overlay(app: &AppState, frame: &mut Frame, area: 
     render_bottom_bar(frame, overlay_area, line, app.palette.panel_bg);
 }
 
+/// Bottom bar for jump mode: what has been typed, and how to get out.
+///
+/// The labels themselves are in the sidebar's number column, so this only has
+/// to show progress through a two-character label — without it, typing the
+/// first half looks identical to the mode having closed.
+pub(super) fn render_jump_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
+    let key = Style::default()
+        .fg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(app.palette.overlay0);
+    let mode_style = Style::default()
+        .fg(panel_contrast_fg(&app.palette))
+        .bg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+
+    let mut spans = vec![Span::styled(" JUMP ", mode_style), Span::raw(" ")];
+    if app.jump_input.is_empty() {
+        spans.push(Span::styled("a-z 1-9", key));
+        spans.push(Span::styled(" go to space or agent  ", dim));
+    } else {
+        spans.push(Span::styled(
+            app.jump_input.clone(),
+            Style::default().fg(app.palette.text),
+        ));
+        spans.push(Span::styled("█", key));
+        spans.push(Span::styled("  ", dim));
+    }
+    spans.push(Span::styled("esc", key));
+    spans.push(Span::styled(" cancel", dim));
+
+    let overlay_y = area.y + area.height.saturating_sub(1);
+    let overlay_area = Rect::new(area.x, overlay_y, area.width, 1);
+    render_bottom_bar(frame, overlay_area, Line::from(spans), app.palette.panel_bg);
+}
+
 pub(super) fn render_navigate_overlay(app: &AppState, frame: &mut Frame, area: Rect) {
     let key = Style::default()
         .fg(app.palette.accent)

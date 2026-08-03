@@ -212,6 +212,12 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # resize_mode = "prefix+r"
 # toggle_sidebar = "prefix+b"
 
+# Label every space and agent with a key and jump to whichever is pressed.
+# Reaches the whole list, where switch_workspace and focus_agent reach the
+# first nine. Labels past the alphabet take two keys, and no label is the
+# prefix of another, so nothing has to wait to know what you meant.
+# jump = ""
+
 # Mark the selected space, or the agent in the focused pane, so it stands out.
 # toggle_space_highlight = ""
 # toggle_agent_highlight = ""

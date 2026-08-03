@@ -48,7 +48,7 @@ pub(super) fn agent_rows(
     config: &AgentsSidebarConfig,
     entry: &AgentPanelEntry,
     state_text: &str,
-    switch_number: Option<usize>,
+    switch_label: Option<&str>,
 ) -> Vec<Vec<ResolvedToken>> {
     config
         .rows_for_agent(entry.agent)
@@ -64,7 +64,7 @@ pub(super) fn agent_rows(
                                 Some(ResolvedTokenKind::StateText(state_text.to_string()))
                             }
                             AgentSidebarToken::Number => {
-                                Some(ResolvedTokenKind::Number(switch_number_text(switch_number)))
+                                Some(ResolvedTokenKind::Number(switch_label_text(switch_label)))
                             }
                             AgentSidebarToken::Workspace => {
                                 Some(ResolvedTokenKind::Workspace(entry.primary_label.clone()))
@@ -111,8 +111,8 @@ pub(super) fn agent_rows(
 
 pub(super) struct SpaceTokenContext<'a> {
     pub workspace: &'a str,
-    /// 1-9 switch position of this space, when it has one.
-    pub switch_number: Option<usize>,
+    /// Jump label for this space, when it has one.
+    pub switch_label: Option<&'a str>,
     /// Host prefix when this space mirrors a remote Herdr.
     pub remote_host: Option<&'a str>,
     /// Resolved colour for that prefix, if the host configured one.
@@ -142,7 +142,7 @@ pub(super) fn space_rows(
                             Some(ResolvedTokenKind::StateText(context.state_text.to_string()))
                         }
                         SpaceSidebarToken::Number => Some(ResolvedTokenKind::Number(
-                            switch_number_text(context.switch_number),
+                            switch_label_text(context.switch_label),
                         )),
                         SpaceSidebarToken::Workspace => {
                             Some(ResolvedTokenKind::Workspace(context.workspace.to_string()))
@@ -179,16 +179,13 @@ pub(super) fn space_rows(
         .collect()
 }
 
-/// The switch number as it is drawn, or a space holding its column.
+/// The jump label as it is drawn, or a space holding its column.
 ///
-/// Only the first nine entries get a number, so omitting the token entirely
-/// would pull every row past the ninth two columns left and break the alignment
-/// the number is there to provide.
-fn switch_number_text(switch_number: Option<usize>) -> String {
-    match switch_number {
-        Some(number) => number.to_string(),
-        None => " ".to_string(),
-    }
+/// Only the first entries get a label, so omitting the token entirely would
+/// pull every row past them two columns left and break the alignment the label
+/// is there to provide.
+fn switch_label_text(switch_label: Option<&str>) -> String {
+    switch_label.unwrap_or(" ").to_string()
 }
 
 pub(super) fn separator(previous: &ResolvedToken, current: &ResolvedToken) -> &'static str {
@@ -254,7 +251,7 @@ mod tests {
             row_gap: 0,
         };
 
-        let numbered = agent_rows(&config, &entry, "idle", Some(3));
+        let numbered = agent_rows(&config, &entry, "idle", Some("3"));
         let unnumbered = agent_rows(&config, &entry, "idle", None);
 
         assert_eq!(numbered[0][1].kind, ResolvedTokenKind::Number("3".into()));
@@ -380,7 +377,7 @@ mod tests {
             space_rows(
                 &config,
                 SpaceTokenContext {
-                    switch_number: None,
+                    switch_label: None,
                     remote_host: None,
                     remote_host_color: None,
                     workspace: "feature",
@@ -410,7 +407,7 @@ mod tests {
             space_rows(
                 &config,
                 SpaceTokenContext {
-                    switch_number: None,
+                    switch_label: None,
                     remote_host: None,
                     remote_host_color: None,
                     workspace: "repo",
@@ -436,8 +433,8 @@ mod tests {
             ..SpacesSidebarConfig::default()
         };
         let tokens = std::collections::HashMap::new();
-        let ctx = |n: Option<usize>| SpaceTokenContext {
-            switch_number: n,
+        let ctx = |n: Option<&'static str>| SpaceTokenContext {
+            switch_label: n,
             workspace: "repo",
             remote_host: None,
             remote_host_color: None,
@@ -448,7 +445,7 @@ mod tests {
             suppress_git_details: false,
         };
 
-        let numbered = space_rows(&config, ctx(Some(3)));
+        let numbered = space_rows(&config, ctx(Some("3")));
         assert_eq!(numbered[0][0].kind, ResolvedTokenKind::Number("3".into()));
 
         // No position (past 9) -> the column is held by a blank rather than
@@ -500,7 +497,7 @@ mod tests {
         let rows = space_rows(
             &config,
             SpaceTokenContext {
-                switch_number: None,
+                switch_label: None,
                 workspace: "lifestream",
                 remote_host: Some("sera"),
                 remote_host_color: Some(ratatui::style::Color::Blue),

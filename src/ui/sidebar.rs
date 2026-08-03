@@ -302,7 +302,7 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
         &app.sidebar_spaces,
         SpaceTokenContext {
             workspace: &label,
-            switch_number: None,
+            switch_label: None,
             remote_host: ws
                 .remote_mirror
                 .as_ref()
@@ -733,21 +733,24 @@ fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<Resol
 
 /// 1-9 switch position for the given position, blank past 9 to match the
 /// `focus_agent` / `switch_workspace` indexed keybinds.
-fn switch_number_for(position: usize) -> Option<usize> {
-    (position < 9).then_some(position + 1)
+///
+/// Jump mode replaces this with a label for every entry, not just the first
+/// nine; see [`crate::app::jump`].
+fn switch_number_for(position: usize) -> Option<String> {
+    (position < 9).then(|| (position + 1).to_string())
 }
 
 fn resolved_agent_rows_numbered(
     app: &AppState,
     entry: &AgentPanelEntry,
-    switch_number: Option<usize>,
+    switch_label: Option<&str>,
 ) -> Vec<Vec<ResolvedToken>> {
     let label = entry
         .state_labels
         .get(agent_panel_status_key(entry.state, entry.seen))
         .map(String::as_str)
         .unwrap_or_else(|| state_label(entry.state, entry.seen));
-    tokens::agent_rows(&app.sidebar_agents, entry, label, switch_number)
+    tokens::agent_rows(&app.sidebar_agents, entry, label, switch_label)
 }
 
 pub(crate) fn agent_entry_height_in_body(
@@ -1475,6 +1478,9 @@ fn render_workspace_list(
     let cards = &app.view.workspace_card_areas;
     // Positions for the number token, matching switch_workspace's indexed order.
     let visible_order = app.visible_workspace_order();
+    // Jump mode labels every entry, so its labels replace the 1-9 positions
+    // rather than sitting in a column of their own.
+    let jump = app.jump_labels();
 
     for card in cards {
         let i = card.ws_idx;
@@ -1541,14 +1547,18 @@ fn render_workspace_list(
             p.overlay0
         });
         let token_values = ws.metadata_tokens.values();
+        let number = visible_order
+            .iter()
+            .position(|idx| *idx == i)
+            .and_then(switch_number_for);
         let rows = tokens::space_rows(
             &app.sidebar_spaces,
             SpaceTokenContext {
                 workspace: &display_label,
-                switch_number: visible_order
-                    .iter()
-                    .position(|idx| *idx == i)
-                    .and_then(switch_number_for),
+                switch_label: match &jump {
+                    Some(jump) => jump.space(i),
+                    None => number.as_deref(),
+                },
                 remote_host: ws
                     .remote_mirror
                     .as_ref()
@@ -1707,6 +1717,7 @@ fn render_agent_detail(
     }
 
     let details = agent_panel_entries_from(app, terminal_runtimes);
+    let jump = app.jump_labels();
     let metrics = agent_panel_scroll_metrics(app, area);
     let scrollbar_rect = agent_panel_scrollbar_rect(app, area);
     let body = agent_panel_body_rect(area, should_show_scrollbar(metrics));
@@ -1745,7 +1756,15 @@ fn render_agent_detail(
         let height = row.height;
         let label_color = state_label_color(detail.state, detail.seen, p);
         let host_offline = workspace_host_offline(app, detail.ws_idx);
-        let rows = resolved_agent_rows_numbered(app, detail, switch_number_for(index));
+        let number = switch_number_for(index);
+        let rows = resolved_agent_rows_numbered(
+            app,
+            detail,
+            match &jump {
+                Some(jump) => jump.agent(detail.pane_id),
+                None => number.as_deref(),
+            },
+        );
 
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);
         let row_style = if is_active {

@@ -37,6 +37,7 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
 }
 
 mod copy_mode;
+mod jump;
 mod modal;
 mod mouse;
 mod navigate;
@@ -96,6 +97,7 @@ impl App {
                 Mode::ReleaseNotes => self.handle_release_notes_key(key_event),
                 Mode::ProductAnnouncement => self.handle_product_announcement_key(key_event),
                 Mode::Prefix | Mode::Navigate | Mode::Copy => unreachable!(),
+                Mode::Jump => self.handle_jump_key(key_event),
                 Mode::RenameWorkspace | Mode::RenameTab | Mode::RenamePane => {
                     self.handle_rename_key_via_api(key_event)
                 }

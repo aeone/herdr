@@ -84,6 +84,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     groups.push((
         "ryi",
         vec![
+            help_entry(
+                keybind_label(&kb.jump),
+                "jump: label every space and agent, press one",
+            ),
             help_entry(keybind_label(&kb.toggle_space_highlight), "mark space"),
             help_entry(keybind_label(&kb.toggle_agent_highlight), "mark agent"),
             help_entry(
