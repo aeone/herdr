@@ -494,6 +494,14 @@ fn restore_tab(
             .and_then(crate::detect::parse_canonical_agent_label);
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_state_changed_at_ms = saved_pane.and_then(|p| p.agent_state_changed_at_ms);
+        // The state the agent was actually in, rather than assuming idle. A
+        // quiet agent gives detection nothing to re-read from, so whatever is
+        // seeded here is what shows until it next prints — and a blocked agent
+        // shown as idle is the one that gets missed.
+        let (saved_state, saved_seen) = saved_pane
+            .and_then(|p| p.agent_status)
+            .map(crate::app::pane_state_and_seen)
+            .unwrap_or((AgentState::Idle, true));
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
         let saved_history =
             old_id.and_then(|old_id| history.and_then(|history| history.panes.get(old_id)));
@@ -551,7 +559,7 @@ fn restore_tab(
             if let Some(agent) = initial_restore_agent {
                 let _ = terminal.set_detected_state_with_screen_signals_at(
                     Some(agent),
-                    AgentState::Idle,
+                    saved_state,
                     false,
                     false,
                     false,
@@ -559,7 +567,9 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
-            panes.insert(*id, PaneState::new(terminal_id));
+            let mut pane = PaneState::new(terminal_id);
+            pane.seen = saved_seen;
+            panes.insert(*id, pane);
             terminals.push(terminal);
             continue;
         }
@@ -652,7 +662,7 @@ fn restore_tab(
                 if let Some(agent) = initial_restore_agent {
                     let _ = terminal.set_detected_state_with_screen_signals_at(
                         Some(agent),
-                        AgentState::Idle,
+                        saved_state,
                         false,
                         false,
                         false,
@@ -660,7 +670,9 @@ fn restore_tab(
                         std::time::Instant::now(),
                     );
                 }
-                panes.insert(*id, PaneState::new(terminal_id.clone()));
+                let mut pane = PaneState::new(terminal_id.clone());
+                pane.seen = saved_seen;
+                panes.insert(*id, pane);
                 terminal_runtimes.insert(terminal_id, runtime);
                 terminals.push(terminal);
             }
@@ -1199,6 +1211,7 @@ mod tests {
                             }),
                             launch_argv: None,
                             agent_state_changed_at_ms: None,
+                            agent_status: None,
                         },
                     )]),
                     zoomed: false,
@@ -1285,6 +1298,7 @@ mod tests {
                                 agent_session: None,
                                 launch_argv: None,
                                 agent_state_changed_at_ms: None,
+                                agent_status: None,
                             },
                         ),
                         (
@@ -1297,6 +1311,7 @@ mod tests {
                                 agent_session: None,
                                 launch_argv: None,
                                 agent_state_changed_at_ms: None,
+                                agent_status: None,
                             },
                         ),
                     ]),
@@ -1355,6 +1370,7 @@ mod tests {
                     agent_session: None,
                     launch_argv: None,
                     agent_state_changed_at_ms: None,
+                    agent_status: None,
                 },
             )
         };
@@ -1371,6 +1387,7 @@ mod tests {
             }),
             launch_argv: None,
             agent_state_changed_at_ms: None,
+            agent_status: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1527,6 +1544,7 @@ mod tests {
                             }),
                             launch_argv: None,
                             agent_state_changed_at_ms: None,
+                            agent_status: None,
                         },
                     )]),
                     zoomed: false,
@@ -1693,6 +1711,7 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
+                agent_status: None,
             },
         );
         let history = SessionHistorySnapshot {

@@ -138,6 +138,16 @@ pub struct PaneSnapshot {
     /// recorded age, which renders as the `unknown` group rather than a wrong one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state_changed_at_ms: Option<u64>,
+    /// The agent's state as it last stood, so a restart shows what was true
+    /// rather than starting blank.
+    ///
+    /// Detection re-runs from the pane's output, so a pane that is quiet — which
+    /// an idle or blocked agent is — has nothing to detect from until it next
+    /// prints. Without this every agent reads as unknown after a restart until
+    /// something makes it speak. Stored as the API's status because that is the
+    /// form with a stable serialisation, and it carries `seen` with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<crate::api::schema::AgentStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -415,6 +425,13 @@ fn capture_tab(
         let launch_argv = terminal.and_then(|terminal| terminal.launch_argv.clone());
         let agent_state_changed_at_ms =
             terminal.and_then(|terminal| terminal.agent_state_changed_at_ms);
+        let agent_status = terminal.and_then(|terminal| {
+            let seen = tab.panes.get(id).is_none_or(|pane| pane.seen);
+            match terminal.state {
+                crate::detect::AgentState::Unknown => None,
+                state => Some(crate::app::pane_agent_status(state, seen)),
+            }
+        });
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
@@ -446,6 +463,7 @@ fn capture_tab(
                 agent_session,
                 launch_argv,
                 agent_state_changed_at_ms,
+                agent_status,
             },
         );
     }
@@ -559,6 +577,50 @@ pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use crate::api::schema::AgentStatus;
+    use crate::app::{pane_agent_status, pane_state_and_seen};
+    use crate::detect::AgentState;
+
+    /// A restart re-detects from pane output, and an idle or blocked agent is
+    /// producing none — so whatever the snapshot says is what shows until the
+    /// agent next prints. Restore used to assume `Idle` for every agent, which
+    /// is why a blocked one read as idle until it was opened.
+    #[test]
+    fn every_agent_state_survives_a_round_trip_through_a_status() {
+        for (state, seen) in [
+            (AgentState::Idle, true),
+            (AgentState::Idle, false),
+            (AgentState::Working, true),
+            (AgentState::Blocked, true),
+        ] {
+            let stored = pane_agent_status(state, seen);
+            assert_eq!(
+                pane_state_and_seen(stored),
+                (state, seen),
+                "{state:?}/{seen} did not survive"
+            );
+        }
+    }
+
+    #[test]
+    fn a_snapshot_without_a_status_is_still_readable() {
+        // Snapshots written before the field existed have no status, and must
+        // restore rather than fail.
+        let json = r#"{"cwd":"/tmp"}"#;
+        let pane: PaneSnapshot = serde_json::from_str(json).expect("older snapshot");
+        assert_eq!(pane.agent_status, None);
+        assert_eq!(pane.agent_state_changed_at_ms, None);
+    }
+
+    #[test]
+    fn an_unknown_agent_records_no_status_rather_than_a_wrong_one() {
+        // Unknown is the absence of a reading, not a state worth restoring.
+        assert_eq!(
+            pane_agent_status(AgentState::Unknown, true),
+            AgentStatus::Unknown
+        );
+    }
+
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -740,6 +802,7 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
+                agent_status: None,
             },
         );
         panes.insert(
@@ -752,6 +815,7 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
+                agent_status: None,
             },
         );
 
@@ -1371,6 +1435,7 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
+                agent_status: None,
             },
         );
         panes.insert(
@@ -1385,6 +1450,7 @@ mod tests {
                 agent_session: None,
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
+                agent_status: None,
             },
         );
 

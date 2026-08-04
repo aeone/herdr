@@ -10,6 +10,7 @@ pub(crate) mod agent_view;
 mod agents;
 mod api;
 mod api_helpers;
+pub(crate) use api_helpers::{pane_agent_status, pane_state_and_seen};
 mod config_io;
 mod creation;
 mod ids;

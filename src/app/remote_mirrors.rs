@@ -146,24 +146,6 @@ pub(crate) fn plan_remote_mirrors(
     plan
 }
 
-/// Maps a remote's reported status onto local state plus its seen flag.
-///
-/// `done` is the remote's way of saying "idle, with output you have not looked
-/// at", which locally is idle with `seen` cleared.
-fn remote_state_and_seen(
-    status: crate::api::schema::AgentStatus,
-) -> (crate::detect::AgentState, bool) {
-    use crate::api::schema::AgentStatus;
-    use crate::detect::AgentState;
-    match status {
-        AgentStatus::Idle => (AgentState::Idle, true),
-        AgentStatus::Done => (AgentState::Idle, false),
-        AgentStatus::Working => (AgentState::Working, true),
-        AgentStatus::Blocked => (AgentState::Blocked, true),
-        AgentStatus::Unknown => (AgentState::Unknown, true),
-    }
-}
-
 /// Builds the mirror record a created workspace carries.
 ///
 /// Production and tests share this so a mirror's stored identity can never
@@ -638,7 +620,7 @@ impl App {
             let Some(agent_label) = pane.agent.clone() else {
                 continue;
             };
-            let (state, seen) = remote_state_and_seen(pane.status);
+            let (state, seen) = crate::app::pane_state_and_seen(pane.status);
             let remote_changed_at = pane.state_changed_at_ms;
             self.handle_internal_event(crate::events::AppEvent::HookStateReported {
                 pane_id,

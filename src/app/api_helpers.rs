@@ -88,7 +88,24 @@ pub(super) fn detect_state_from_api(
     }
 }
 
-pub(super) fn pane_agent_status(
+/// Inverse of [`pane_agent_status`]: recovers the state and seen flag a status
+/// was made from. Used when reading a status back, from a snapshot or a
+/// mirrored host, rather than computing one to send.
+pub(crate) fn pane_state_and_seen(
+    status: crate::api::schema::AgentStatus,
+) -> (crate::detect::AgentState, bool) {
+    use crate::api::schema::AgentStatus;
+    use crate::detect::AgentState;
+    match status {
+        AgentStatus::Idle => (AgentState::Idle, true),
+        AgentStatus::Done => (AgentState::Idle, false),
+        AgentStatus::Working => (AgentState::Working, true),
+        AgentStatus::Blocked => (AgentState::Blocked, true),
+        AgentStatus::Unknown => (AgentState::Unknown, true),
+    }
+}
+
+pub(crate) fn pane_agent_status(
     state: crate::detect::AgentState,
     seen: bool,
 ) -> crate::api::schema::AgentStatus {
