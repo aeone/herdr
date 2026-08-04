@@ -303,6 +303,7 @@ fn workspace_row_height(app: &AppState, ws: &crate::workspace::Workspace, indent
         SpaceTokenContext {
             workspace: &label,
             switch_label: None,
+            force_label: false,
             remote_host: ws
                 .remote_mirror
                 .as_ref()
@@ -728,7 +729,7 @@ pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
 }
 
 fn resolved_agent_rows(app: &AppState, entry: &AgentPanelEntry) -> Vec<Vec<ResolvedToken>> {
-    resolved_agent_rows_numbered(app, entry, None)
+    resolved_agent_rows_numbered(app, entry, None, false)
 }
 
 /// 1-9 switch position for the given position, blank past 9 to match the
@@ -744,13 +745,14 @@ fn resolved_agent_rows_numbered(
     app: &AppState,
     entry: &AgentPanelEntry,
     switch_label: Option<&str>,
+    force_label: bool,
 ) -> Vec<Vec<ResolvedToken>> {
     let label = entry
         .state_labels
         .get(agent_panel_status_key(entry.state, entry.seen))
         .map(String::as_str)
         .unwrap_or_else(|| state_label(entry.state, entry.seen));
-    tokens::agent_rows(&app.sidebar_agents, entry, label, switch_label)
+    tokens::agent_rows(&app.sidebar_agents, entry, label, switch_label, force_label)
 }
 
 pub(crate) fn agent_entry_height_in_body(
@@ -1559,6 +1561,7 @@ fn render_workspace_list(
                     Some(jump) => jump.space(i),
                     None => number.as_deref(),
                 },
+                force_label: jump.is_some(),
                 remote_host: ws
                     .remote_mirror
                     .as_ref()
@@ -1764,6 +1767,7 @@ fn render_agent_detail(
                 Some(jump) => jump.agent(detail.pane_id),
                 None => number.as_deref(),
             },
+            jump.is_some(),
         );
 
         let is_active = app.is_active_pane(detail.ws_idx, detail.tab_idx, detail.pane_id);

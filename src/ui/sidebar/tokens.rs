@@ -49,8 +49,9 @@ pub(super) fn agent_rows(
     entry: &AgentPanelEntry,
     state_text: &str,
     switch_label: Option<&str>,
+    force_label: bool,
 ) -> Vec<Vec<ResolvedToken>> {
-    config
+    let mut rows: Vec<Vec<ResolvedToken>> = config
         .rows_for_agent(entry.agent)
         .iter()
         .filter_map(|row| {
@@ -106,13 +107,22 @@ pub(super) fn agent_rows(
                     .collect::<Vec<_>>();
             (!resolved.is_empty()).then_some(resolved)
         })
-        .collect()
+        .collect();
+    if force_label {
+        if let Some(label) = switch_label {
+            ensure_label_shown(&mut rows, label);
+        }
+    }
+    rows
 }
 
 pub(super) struct SpaceTokenContext<'a> {
     pub workspace: &'a str,
     /// Jump label for this space, when it has one.
     pub switch_label: Option<&'a str>,
+    /// Show that label even where no number token is configured. Set while
+    /// jump mode is open, so its labels are visible on any configuration.
+    pub force_label: bool,
     /// Host prefix when this space mirrors a remote Herdr.
     pub remote_host: Option<&'a str>,
     /// Resolved colour for that prefix, if the host configured one.
@@ -128,7 +138,7 @@ pub(super) fn space_rows(
     config: &SpacesSidebarConfig,
     context: SpaceTokenContext<'_>,
 ) -> Vec<Vec<ResolvedToken>> {
-    config
+    let mut rows: Vec<Vec<ResolvedToken>> = config
         .rows
         .iter()
         .filter_map(|row| {
@@ -176,7 +186,37 @@ pub(super) fn space_rows(
                 .collect::<Vec<_>>();
             (!resolved.is_empty()).then_some(resolved)
         })
-        .collect()
+        .collect();
+    if context.force_label {
+        if let Some(label) = context.switch_label {
+            ensure_label_shown(&mut rows, label);
+        }
+    }
+    rows
+}
+
+/// Puts a jump label on rows whose configuration has no number token.
+///
+/// The label is normally drawn in the number token's place, but that token is
+/// optional and absent from the default rows. Without this a host that never
+/// configured one gets a jump mode with nothing visible to aim at — the keys
+/// work, but the labels naming them are drawn nowhere.
+fn ensure_label_shown(rows: &mut Vec<Vec<ResolvedToken>>, label: &str) {
+    let already_drawn = rows
+        .iter()
+        .flatten()
+        .any(|token| matches!(token.kind, ResolvedTokenKind::Number(_)));
+    if already_drawn {
+        return;
+    }
+    let token = ResolvedToken::new(
+        ResolvedTokenKind::Number(label.to_string()),
+        SidebarTokenStyle::default(),
+    );
+    match rows.first_mut() {
+        Some(first) => first.insert(0, token),
+        None => rows.push(vec![token]),
+    }
 }
 
 /// The jump label as it is drawn, or a space holding its column.
@@ -238,6 +278,56 @@ mod tests {
 
     /// Entries past the ninth have no switch number, and the column has to stay
     /// reserved or their text sits two columns left of everything above it.
+    /// The number token is optional and the default rows do not include it, so
+    /// on a host that never configured one the jump labels had nowhere to be
+    /// drawn: the keys worked, but nothing on screen said which key was which.
+    #[test]
+    fn jump_labels_show_even_when_no_number_token_is_configured() {
+        let entry = entry();
+        let config = AgentsSidebarConfig {
+            rows: vec![vec![
+                AgentSidebarToken::StateIcon,
+                AgentSidebarToken::Workspace,
+            ]],
+            rows_by_agent: Default::default(),
+            row_gap: 0,
+        };
+
+        let jumping = agent_rows(&config, &entry, "idle", Some("a"), true);
+        let normal = agent_rows(&config, &entry, "idle", Some("a"), false);
+
+        assert_eq!(jumping[0][0].kind, ResolvedTokenKind::Number("a".into()));
+        // Without jump mode the configuration is left exactly as written.
+        assert!(!normal
+            .iter()
+            .flatten()
+            .any(|token| matches!(token.kind, ResolvedTokenKind::Number(_))));
+    }
+
+    #[test]
+    fn a_configured_number_token_is_not_duplicated_by_the_jump_label() {
+        let entry = entry();
+        let config = AgentsSidebarConfig {
+            rows: vec![vec![
+                AgentSidebarToken::StateIcon,
+                AgentSidebarToken::Number,
+                AgentSidebarToken::Workspace,
+            ]],
+            rows_by_agent: Default::default(),
+            row_gap: 0,
+        };
+
+        let rows = agent_rows(&config, &entry, "idle", Some("a"), true);
+
+        let numbers = rows
+            .iter()
+            .flatten()
+            .filter(|token| matches!(token.kind, ResolvedTokenKind::Number(_)))
+            .count();
+        assert_eq!(numbers, 1, "the label belongs where it was configured");
+        assert_eq!(rows[0][1].kind, ResolvedTokenKind::Number("a".into()));
+    }
+
     #[test]
     fn an_absent_switch_number_still_holds_its_column() {
         let entry = entry();
@@ -251,8 +341,8 @@ mod tests {
             row_gap: 0,
         };
 
-        let numbered = agent_rows(&config, &entry, "idle", Some("3"));
-        let unnumbered = agent_rows(&config, &entry, "idle", None);
+        let numbered = agent_rows(&config, &entry, "idle", Some("3"), false);
+        let unnumbered = agent_rows(&config, &entry, "idle", None, false);
 
         assert_eq!(numbered[0][1].kind, ResolvedTokenKind::Number("3".into()));
         assert_eq!(unnumbered[0][1].kind, ResolvedTokenKind::Number(" ".into()));
@@ -276,7 +366,7 @@ mod tests {
             ..Default::default()
         };
 
-        let rows = agent_rows(&config, &entry, "working", None);
+        let rows = agent_rows(&config, &entry, "working", None, false);
 
         assert_eq!(rows.len(), 2);
         assert_eq!(
@@ -306,7 +396,7 @@ mod tests {
         };
 
         assert_eq!(
-            agent_rows(&config, &entry, "deep in the mines", None),
+            agent_rows(&config, &entry, "deep in the mines", None, false),
             vec![vec![
                 ResolvedToken::unstyled(ResolvedTokenKind::StateText("deep in the mines".into())),
                 ResolvedToken::unstyled(ResolvedTokenKind::Custom("reviewing auth".into())),
@@ -332,7 +422,7 @@ mod tests {
         };
 
         assert_eq!(
-            agent_rows(&config, &entry, "working", None),
+            agent_rows(&config, &entry, "working", None, false),
             vec![vec![
                 ResolvedToken::unstyled(ResolvedTokenKind::TerminalTitle("⠋ raw title".into())),
                 ResolvedToken::unstyled(ResolvedTokenKind::TerminalTitle("raw title".into())),
@@ -354,7 +444,7 @@ mod tests {
         pi.agent_label = Some("renamed pi".into());
 
         assert_eq!(
-            agent_rows(&config, &pi, "working", None),
+            agent_rows(&config, &pi, "working", None, false),
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Agent(
                 "renamed pi".into()
             ))]]
@@ -362,7 +452,7 @@ mod tests {
 
         pi.agent = None;
         assert_eq!(
-            agent_rows(&config, &pi, "working", None),
+            agent_rows(&config, &pi, "working", None, false),
             vec![vec![ResolvedToken::unstyled(ResolvedTokenKind::Workspace(
                 "repo".into()
             ))]]
@@ -378,6 +468,7 @@ mod tests {
                 &config,
                 SpaceTokenContext {
                     switch_label: None,
+                    force_label: false,
                     remote_host: None,
                     remote_host_color: None,
                     workspace: "feature",
@@ -408,6 +499,7 @@ mod tests {
                 &config,
                 SpaceTokenContext {
                     switch_label: None,
+                    force_label: false,
                     remote_host: None,
                     remote_host_color: None,
                     workspace: "repo",
@@ -435,6 +527,7 @@ mod tests {
         let tokens = std::collections::HashMap::new();
         let ctx = |n: Option<&'static str>| SpaceTokenContext {
             switch_label: n,
+            force_label: false,
             workspace: "repo",
             remote_host: None,
             remote_host_color: None,
@@ -498,6 +591,7 @@ mod tests {
             &config,
             SpaceTokenContext {
                 switch_label: None,
+                force_label: false,
                 workspace: "lifestream",
                 remote_host: Some("sera"),
                 remote_host_color: Some(ratatui::style::Color::Blue),
