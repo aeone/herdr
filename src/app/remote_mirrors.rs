@@ -85,6 +85,7 @@ pub(crate) fn plan_remote_mirrors(
     pinned: &std::collections::HashSet<String>,
     pinned_panes: &std::collections::HashSet<String>,
     mirrored_hosts: &std::collections::HashSet<String>,
+    local_terminals: &std::collections::HashSet<String>,
     renaming: &std::collections::HashSet<String>,
 ) -> Vec<MirrorAction> {
     // A space the user created on this host is mirrored even with no agent in it
@@ -118,11 +119,20 @@ pub(crate) fn plan_remote_mirrors(
     //
     // A mirror of a host we do *not* mirror is kept, since it is the only way
     // that agent reaches this sidebar at all.
+    //
+    // The same goes doubly for a mirror of *us*: two hosts mirroring each other
+    // is an ordinary thing to want, and without this our own panes come home
+    // wearing a remote host's name and sit beside themselves in the sidebar.
+    // Matched on the terminal id rather than the host name because a name is
+    // whatever the other machine happens to call us -- `pandora`, `ryi@pandora`,
+    // a tailnet address -- while the terminal it names is either one of ours or
+    // it is not.
     panes.retain(|pane| {
         pane.origin.as_ref().is_none_or(|origin| {
-            !mirrored_hosts.contains(&crate::remote::spaces::MirrorOrigin::host_key(
-                &origin.target,
-            ))
+            !local_terminals.contains(&origin.terminal_id)
+                && !mirrored_hosts.contains(&crate::remote::spaces::MirrorOrigin::host_key(
+                    &origin.target,
+                ))
         })
     });
 
@@ -708,6 +718,14 @@ impl App {
             .iter()
             .map(|configured| crate::remote::spaces::MirrorOrigin::host_key(&configured.target))
             .collect();
+        // Terminals this machine owns, so a reflection of one of them can be
+        // recognised whatever the reporting host calls us.
+        let local_terminals: std::collections::HashSet<String> = self
+            .state
+            .terminals
+            .keys()
+            .map(|terminal_id| terminal_id.to_string())
+            .collect();
         let plan = plan_remote_mirrors(
             &self.state.workspaces,
             space,
@@ -715,6 +733,7 @@ impl App {
             &pinned,
             &pinned_panes,
             &mirrored_hosts,
+            &local_terminals,
             &renaming,
         );
 
@@ -988,6 +1007,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         )
     }
 
@@ -1225,6 +1245,7 @@ mod tests {
             &Default::default(),
             &mirrored_hosts,
             &Default::default(),
+            &Default::default(),
         );
 
         assert_eq!(
@@ -1277,6 +1298,40 @@ mod tests {
         assert_eq!(record.host_color, None);
     }
 
+    /// Two machines mirroring each other is an ordinary thing to want, and it
+    /// used to mean seeing your own agents twice: the other host reports your
+    /// panes back to you as its mirrors, wearing its name. A pane reflecting a
+    /// terminal this machine owns is us, however the other host addresses us.
+    #[test]
+    fn plan_drops_a_reflection_of_one_of_our_own_terminals() {
+        let snapshot = snapshot(vec![
+            mirrored_pane("w2", "notes", "term-hop", "ryi@pandora", "term-mine"),
+            mirrored_pane("w3", "api", "term-hop2", "ryi@sera", "term-theirs"),
+        ]);
+        let local_terminals = std::collections::HashSet::from(["term-mine".to_string()]);
+
+        let plan = super::plan_remote_mirrors(
+            &[],
+            &space("lute"),
+            &snapshot,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &local_terminals,
+            &Default::default(),
+        );
+
+        // Only sera's agent is worth mirroring; ours is already right here.
+        let created: Vec<&str> = plan
+            .iter()
+            .filter_map(|action| match action {
+                MirrorAction::Create { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(created, ["api"]);
+    }
+
     /// The same reflection when we do not mirror its host: keeping it is the
     /// only way that agent reaches this sidebar at all.
     #[test]
@@ -1293,6 +1348,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &mirrored_hosts,
+            &Default::default(),
             &Default::default(),
         );
 
@@ -1330,6 +1386,7 @@ mod tests {
             &snapshot,
             &Default::default(),
             &pinned_panes,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         );
@@ -1372,6 +1429,7 @@ mod tests {
             &pinned_panes,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(plan, Vec::new());
     }
@@ -1399,6 +1457,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
 
         assert_eq!(plan, Vec::new());
@@ -1416,6 +1475,7 @@ mod tests {
             &space("workbox"),
             &snapshot,
             &pinned,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -1465,6 +1525,7 @@ mod tests {
             &space("workbox"),
             &snapshot,
             &pinned,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
@@ -1628,6 +1689,7 @@ mod tests {
             &workspaces,
             &space("workbox"),
             &snapshot(vec![agent_pane("w1", "api", "term-1")]),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &Default::default(),
