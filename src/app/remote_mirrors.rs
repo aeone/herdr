@@ -772,6 +772,16 @@ impl App {
         space: &RemoteSpaceConfig,
         snapshot: &RemoteSpaceSnapshot,
     ) {
+        // Mirrors come and go; their unread marks should not outlive them.
+        let live: std::collections::HashSet<String> = snapshot
+            .panes
+            .iter()
+            .map(|pane| pane.mirror_key(&space.target))
+            .collect();
+        let prefix = format!("{}\u{1f}", space.target);
+        self.mirror_unseen_marks
+            .retain(|key, _| !key.starts_with(&prefix) || live.contains(key));
+
         for pane in &snapshot.panes {
             let key = pane.mirror_key(&space.target);
             let Some(pane_id) =
@@ -802,17 +812,44 @@ impl App {
                 seq: None,
                 session_ref: None,
             });
-            if let Some(workspace) = self.state.workspaces.iter_mut().find(|workspace| {
-                workspace
-                    .tabs
-                    .first()
-                    .is_some_and(|tab| tab.root_pane == pane_id)
-            }) {
-                // "done" on the remote means idle with unseen output; mirror
-                // that so the attention dot matches what the remote shows.
-                if let Some(tab) = workspace.tabs.first_mut() {
-                    if let Some(pane_state) = tab.panes.get_mut(&pane_id) {
-                        pane_state.seen = seen;
+            // "done" on the remote means idle with output nobody has read, and
+            // the host keeps saying it on every poll until someone reads it
+            // *there*. Reading the mirror here is a local act the host never
+            // hears about, so applying its answer unconditionally would undo the
+            // read a poll later. An unread mark is therefore only laid down once
+            // per remote change: the same "done" repeated leaves the mirror as
+            // the reader left it, and a newer one marks it unread again.
+            let apply_unseen = if seen {
+                self.mirror_unseen_marks.remove(&key);
+                true
+            } else {
+                match remote_changed_at {
+                    // A host too old to stamp its changes cannot be told apart
+                    // from one repeating itself, so it keeps the old behaviour.
+                    None => true,
+                    Some(changed_at) => {
+                        let fresh = self
+                            .mirror_unseen_marks
+                            .get(&key)
+                            .is_none_or(|applied| changed_at > *applied);
+                        if fresh {
+                            self.mirror_unseen_marks.insert(key.clone(), changed_at);
+                        }
+                        fresh
+                    }
+                }
+            };
+            if apply_unseen {
+                if let Some(workspace) = self.state.workspaces.iter_mut().find(|workspace| {
+                    workspace
+                        .tabs
+                        .first()
+                        .is_some_and(|tab| tab.root_pane == pane_id)
+                }) {
+                    if let Some(tab) = workspace.tabs.first_mut() {
+                        if let Some(pane_state) = tab.panes.get_mut(&pane_id) {
+                            pane_state.seen = seen;
+                        }
                     }
                 }
             }
@@ -1051,6 +1088,51 @@ mod tests {
                 workspaces.push(workspace);
             }
         }
+    }
+
+    /// A host says "done" -- idle with output nobody has read -- on every poll
+    /// until someone reads it *there*. Reading the mirror is local and the host
+    /// never hears about it, so re-applying its answer would undo the read a
+    /// poll later. This is the bug that made a mirror marked read pop back to
+    /// unread with nothing having changed.
+    #[test]
+    fn reading_a_mirror_survives_the_host_repeating_itself() {
+        let space = space("workbox");
+        let mut app = crate::app::tests::test_app();
+        let key = {
+            let pane = agent_pane("w1", "api", "term-1");
+            pane.mirror_key(&space.target)
+        };
+        let mut workspace = Workspace::test_new("api");
+        workspace.remote_mirror = Some(remote_mirror_record(&space, &key));
+        let pane_id = workspace.tabs[0].root_pane;
+        app.state.workspaces.push(workspace);
+
+        let done_at = |changed_at: u64| {
+            let mut pane = agent_pane("w1", "api", "term-1");
+            pane.status = crate::api::schema::AgentStatus::Done;
+            pane.state_changed_at_ms = Some(changed_at);
+            snapshot(vec![pane])
+        };
+        let seen = |app: &App| app.state.workspaces[0].tabs[0].panes[&pane_id].seen;
+
+        // First sight of this output: unread, as the host says.
+        app.report_remote_agent_states(&space, &done_at(1_000));
+        assert!(!seen(&app), "new output should arrive unread");
+
+        // The user reads it here. The host is none the wiser and keeps saying
+        // "done", so the next poll must leave the mark alone.
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .expect("pane")
+            .seen = true;
+        app.report_remote_agent_states(&space, &done_at(1_000));
+        assert!(seen(&app), "an unchanged host must not undo a local read");
+
+        // Output the reader has not seen is a change, and marks it unread again.
+        app.report_remote_agent_states(&space, &done_at(2_000));
+        assert!(!seen(&app), "newer remote output should mark it unread");
     }
 
     #[test]

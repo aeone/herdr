@@ -165,6 +165,13 @@ pub struct App {
     /// does not flicker back to the old one while the host is catching up.
     #[cfg(unix)]
     pub(crate) pending_mirror_renames: HashMap<String, remote_mirrors::PendingMirrorRename>,
+    /// The remote change stamp behind each mirror's current unread mark, by
+    /// mirror key. A host reports "done" -- idle with output nobody has read --
+    /// on every poll, so without this, reading a mirror here is undone thirty
+    /// seconds later by the host repeating itself. Only a *newer* stamp marks
+    /// it unread again.
+    #[cfg(unix)]
+    pub(crate) mirror_unseen_marks: HashMap<String, u64>,
     prefix_input_source: Box<dyn crate::platform::PrefixInputSource>,
 }
 
@@ -848,6 +855,8 @@ impl App {
             remote_space_workers: HashMap::new(),
             #[cfg(unix)]
             pending_mirror_renames: HashMap::new(),
+            #[cfg(unix)]
+            mirror_unseen_marks: HashMap::new(),
             prefix_input_source: Box::new(crate::platform::RealPrefixInputSource::default()),
         }
     }
@@ -1933,7 +1942,7 @@ mod tests {
         }
     }
 
-    fn test_app() -> App {
+    pub(crate) fn test_app() -> App {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         App::new(
             &Config::default(),
