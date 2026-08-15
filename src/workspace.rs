@@ -1472,11 +1472,17 @@ mod tests {
         assert!(first.starts_with('w'));
         assert!(second.starts_with('w'));
         assert_ne!(first, second);
-        assert!(first.len() <= 3, "unexpectedly long workspace id: {first}");
-        assert!(
-            second.len() <= 3,
-            "unexpectedly long workspace id: {second}"
-        );
+
+        // Length is asserted against the encoding rather than against whatever
+        // these two ids came out as. The counter behind them is process-wide, so
+        // every other test that makes a workspace advances it, and a test binary
+        // that has handed out more than a session ever would was failing this on
+        // suite size alone. Two characters carry 1056 spaces, which is the claim
+        // worth holding: `w` plus two is still a handle you can read out loud.
+        for counter in [1, 32, 33, 1056] {
+            let id = format!("w{}", encode_public_number(counter));
+            assert!(id.len() <= 3, "unexpectedly long workspace id: {id}");
+        }
     }
 
     #[test]
