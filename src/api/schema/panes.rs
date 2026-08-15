@@ -453,6 +453,13 @@ pub struct MirrorOriginInfo {
     /// The terminal on the origin host. This is the identity that survives
     /// being mirrored, so it is what two hosts can agree a pane is.
     pub terminal_id: String,
+    /// How this host displays the origin, so a machine further along can name
+    /// the pane's real home rather than the hop it arrived through. Absent
+    /// when the origin host has no configured label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
 }
 
 /// Why a pane routes the wheel the way it does.

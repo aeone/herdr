@@ -554,6 +554,10 @@ impl App {
                     target: mirror.target.clone(),
                     workspace_id: workspace_id.to_string(),
                     terminal_id: terminal_id.to_string(),
+                    // Passed on so a host mirroring this one can show the pane
+                    // under its real home's name and colour instead of ours.
+                    label: Some(mirror.host_label.clone()),
+                    color: mirror.host_color.clone(),
                 })
             });
         Some(crate::api::schema::PaneInfo {

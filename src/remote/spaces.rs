@@ -25,6 +25,9 @@ pub(crate) struct MirrorOrigin {
     pub(crate) target: String,
     /// The terminal id on the origin host: the identity that survives a hop.
     pub(crate) terminal_id: String,
+    /// How the reporting host displays that origin, when it knows.
+    pub(crate) label: Option<String>,
+    pub(crate) color: Option<String>,
 }
 
 impl MirrorOrigin {
@@ -532,6 +535,8 @@ fn parse_mirror_panes(
             origin: pane.mirror_origin.map(|origin| MirrorOrigin {
                 target: origin.target,
                 terminal_id: origin.terminal_id,
+                label: origin.label,
+                color: origin.color,
             }),
             state_changed_at_ms: pane.agent_state_changed_at_ms,
         }

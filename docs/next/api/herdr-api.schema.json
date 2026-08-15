@@ -727,6 +727,19 @@
         "MirrorOriginInfo": {
           "description": "The pane a mirror stands for, as its own host names it.",
           "properties": {
+            "color": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "description": "How this host displays the origin, so a machine further along can name\nthe pane's real home rather than the hop it arrived through. Absent\nwhen the origin host has no configured label.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "target": {
               "description": "The ssh target the mirroring host was configured with, so spelled as\nthat host writes it: `sera`, or `ryielle@alleria`, or `local`.",
               "type": "string"
@@ -7230,6 +7243,19 @@
         "MirrorOriginInfo": {
           "description": "The pane a mirror stands for, as its own host names it.",
           "properties": {
+            "color": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "description": "How this host displays the origin, so a machine further along can name\nthe pane's real home rather than the hop it arrived through. Absent\nwhen the origin host has no configured label.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "target": {
               "description": "The ssh target the mirroring host was configured with, so spelled as\nthat host writes it: `sera`, or `ryielle@alleria`, or `local`.",
               "type": "string"

@@ -27,6 +27,10 @@ pub(crate) enum MirrorAction {
         /// Agent the remote reported, passed to the mirror pane as the
         /// `HERDR_AGENT` hint so local detection can see past the ssh wrapper.
         agent: Option<String>,
+        /// Set when this pane reached us through another host. The mirror is
+        /// still reconciled against the host we poll, but it is shown under the
+        /// machine actually running it.
+        origin: Option<crate::remote::spaces::MirrorOrigin>,
     },
     Rename {
         ws_idx: usize,
@@ -177,6 +181,7 @@ pub(crate) fn plan_remote_mirrors(
                     label: label.clone(),
                     argv: attach_argv(space, pane, &snapshot.remote_herdr),
                     agent: pane.agent.clone(),
+                    origin: pane.origin.clone(),
                 });
             }
         }
@@ -195,6 +200,32 @@ pub(crate) fn remote_mirror_record(space: &RemoteSpaceConfig, key: &str) -> Remo
         host_label: space.display_label().to_string(),
         host_color: space.color.clone(),
         key: key.to_string(),
+    }
+}
+
+/// The same record, named after the machine the pane really runs on.
+///
+/// A pane reached through another host is still reconciled against the host we
+/// poll -- that is what `target` and `key` are for -- but showing it under that
+/// host says the wrong thing: the agent is not there, and the sidebar reads as
+/// though one machine is running everything. Only the display changes.
+///
+/// The reporting host passes on how it labels the origin, so the name and
+/// colour match what that machine is called everywhere else. Failing that, the
+/// host part of the target is a better answer than the hop's name, and leaving
+/// the colour unset lets the sidebar derive its usual one from that name.
+pub(crate) fn remote_mirror_record_for_origin(
+    space: &RemoteSpaceConfig,
+    key: &str,
+    origin: &crate::remote::spaces::MirrorOrigin,
+) -> RemoteMirror {
+    RemoteMirror {
+        host_label: origin
+            .label
+            .clone()
+            .unwrap_or_else(|| crate::remote::spaces::MirrorOrigin::host_key(&origin.target)),
+        host_color: origin.color.clone(),
+        ..remote_mirror_record(space, key)
     }
 }
 
@@ -419,7 +450,7 @@ impl App {
             );
             let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteSpaceCreated {
                 target: space.target.clone(),
-                result: result.map_err(|err| err.to_string()),
+                result: result.map(Box::new).map_err(|err| err.to_string()),
             });
         });
     }
@@ -463,7 +494,7 @@ impl App {
             );
             let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteTabCreated {
                 target: space.target.clone(),
-                result: result.map_err(|err| err.to_string()),
+                result: result.map(Box::new).map_err(|err| err.to_string()),
             });
         });
         true
@@ -540,7 +571,7 @@ impl App {
     pub(crate) fn handle_remote_space_created(
         &mut self,
         target: String,
-        result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
+        result: Result<Box<crate::remote::spaces::CreatedRemoteSpace>, String>,
     ) {
         self.mirror_created_remote_pane(target, result, CreatedPin::Workspace);
     }
@@ -554,7 +585,7 @@ impl App {
     pub(crate) fn handle_remote_tab_created(
         &mut self,
         target: String,
-        result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
+        result: Result<Box<crate::remote::spaces::CreatedRemoteSpace>, String>,
     ) {
         self.mirror_created_remote_pane(target, result, CreatedPin::Pane);
     }
@@ -562,7 +593,7 @@ impl App {
     fn mirror_created_remote_pane(
         &mut self,
         target: String,
-        result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
+        result: Result<Box<crate::remote::spaces::CreatedRemoteSpace>, String>,
         pin: CreatedPin,
     ) {
         let Some(space) = self
@@ -704,8 +735,12 @@ impl App {
                     label,
                     argv,
                     agent,
+                    origin,
                 } => {
-                    let mirror = remote_mirror_record(space, &key);
+                    let mirror = match &origin {
+                        Some(origin) => remote_mirror_record_for_origin(space, &key, origin),
+                        None => remote_mirror_record(space, &key),
+                    };
                     if let Err(err) =
                         self.create_remote_mirror(mirror, &label, &argv, agent.as_deref())
                     {
@@ -1079,6 +1114,8 @@ mod tests {
             origin: Some(crate::remote::spaces::MirrorOrigin {
                 target: origin_target.into(),
                 terminal_id: origin_terminal.into(),
+                label: None,
+                color: None,
             }),
             ..agent_pane(workspace_id, label, terminal_id)
         }
@@ -1117,6 +1154,45 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![key_for("workbox", "w1", "term-local")]
         );
+    }
+
+    /// A pane reached through another host belongs to the machine running it,
+    /// and must say so. Showing it under the hop reads as though one machine is
+    /// running everything, and the agent is not there at all.
+    #[test]
+    fn a_reflection_is_shown_under_the_host_that_really_runs_it() {
+        let mut pane = mirrored_pane("w2", "notes", "term-hop", "ryielle@valkyrie", "term-far");
+        let origin = pane.origin.as_mut().expect("origin");
+        origin.label = Some("val".into());
+        origin.color = Some("#cba6f7".into());
+        let origin = pane.origin.clone().expect("origin");
+
+        let record = remote_mirror_record_for_origin(
+            &space("pandora"),
+            &key_for("pandora", "w2", "term-hop"),
+            &origin,
+        );
+
+        // Named and coloured as valkyrie...
+        assert_eq!(record.host_label, "val");
+        assert_eq!(record.host_color.as_deref(), Some("#cba6f7"));
+        // ...but still reconciled against the host we actually poll.
+        assert_eq!(record.target, "pandora");
+        assert_eq!(record.key, key_for("pandora", "w2", "term-hop"));
+    }
+
+    /// A host too old to pass on its labels still should not lend its own name
+    /// to someone else's pane. The target names the machine; use that.
+    #[test]
+    fn a_reflection_without_a_label_falls_back_to_the_origin_host_name() {
+        let pane = mirrored_pane("w2", "notes", "term-hop", "ryielle@valkyrie", "term-far");
+        let origin = pane.origin.clone().expect("origin");
+
+        let record = remote_mirror_record_for_origin(&space("pandora"), "k", &origin);
+
+        assert_eq!(record.host_label, "valkyrie");
+        // Left unset so the sidebar derives its usual per-host colour.
+        assert_eq!(record.host_color, None);
     }
 
     /// The same reflection when we do not mirror its host: keeping it is the
@@ -1194,6 +1270,7 @@ mod tests {
                         "/usr/bin/herdr"
                     ),
                     agent: None,
+                    origin: None,
                 },
             ]
         );
@@ -1273,6 +1350,7 @@ mod tests {
                     "/usr/bin/herdr"
                 ),
                 agent: Some("claude".into()),
+                origin: None,
             }]
         );
     }
@@ -1549,6 +1627,7 @@ mod tests {
                         "/usr/bin/herdr",
                     ),
                     agent: Some("claude".into()),
+                    origin: None,
                 },
             ]
         );
