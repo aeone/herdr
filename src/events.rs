@@ -158,6 +158,13 @@ pub enum AppEvent {
         target: String,
         result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
     },
+    /// A tab the user asked for on a mirrored space was created on that space's
+    /// host, or failed to be. Another ssh round trip, kept off the event loop.
+    #[cfg(unix)]
+    RemoteTabCreated {
+        target: String,
+        result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
+    },
     /// A rename of a mirrored space was sent to its host, and either took or
     /// did not. Like creation, an ssh round trip that must not block the loop.
     #[cfg(unix)]

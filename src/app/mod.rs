@@ -608,11 +608,12 @@ impl App {
             worktree_directory,
             collapsed_space_keys,
             remote_offline_hosts: std::collections::HashSet::new(),
-            highlighted_workspaces: std::collections::HashSet::new(),
-            highlighted_panes: std::collections::HashSet::new(),
+            space_marks: std::collections::HashMap::new(),
+            agent_marks: std::collections::HashMap::new(),
             keep_offline_mirrors: false,
             hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),
+            created_remote_panes: std::collections::HashMap::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,
@@ -1040,16 +1041,24 @@ impl App {
             if self.state.request_new_tab {
                 self.state.request_new_tab = false;
                 let label = self.state.requested_new_tab_name.take();
-                self.runtime_tab_create(
-                    "tui.tab.create",
-                    crate::api::schema::TabCreateParams {
-                        workspace_id: None,
-                        cwd: None,
-                        focus: true,
-                        label,
-                        env: Default::default(),
-                    },
-                );
+                // A mirrored space belongs to another machine, so its tabs are
+                // made there. Only a space that is really local falls through.
+                #[cfg(unix)]
+                let handled = self.request_remote_tab(label.as_deref());
+                #[cfg(not(unix))]
+                let handled = false;
+                if !handled {
+                    self.runtime_tab_create(
+                        "tui.tab.create",
+                        crate::api::schema::TabCreateParams {
+                            workspace_id: None,
+                            cwd: None,
+                            focus: true,
+                            label,
+                            env: Default::default(),
+                        },
+                    );
+                }
                 needs_render = true;
             }
 

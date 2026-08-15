@@ -82,6 +82,12 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::RemoteTabCreated { target, result } = ev {
+            self.handle_remote_tab_created(target, result);
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::RemoteSpaceRenamed {
             target,
             key,

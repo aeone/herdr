@@ -1691,6 +1691,10 @@ pub struct AppState {
     /// the sidebar shows up on a host that is not mirroring everything.
     pub created_remote_workspaces:
         std::collections::HashMap<String, std::collections::HashSet<String>>,
+    /// Remote terminal ids, per host target, that the user created from here as
+    /// tabs on a mirrored space. Pinned by pane rather than by space: the space
+    /// is already mirrored, and only the pane the user asked for should join it.
+    pub created_remote_panes: std::collections::HashMap<String, std::collections::HashSet<String>>,
     pub request_complete_onboarding: bool,
     pub name_input: String,
     pub name_input_replace_on_type: bool,
@@ -2116,12 +2120,13 @@ impl AppState {
             worktree_directory: std::path::PathBuf::from("/tmp/herdr-worktrees"),
             collapsed_space_keys: std::collections::HashSet::new(),
             remote_offline_hosts: std::collections::HashSet::new(),
-            highlighted_workspaces: std::collections::HashSet::new(),
-            highlighted_panes: std::collections::HashSet::new(),
+            space_marks: std::collections::HashMap::new(),
+            agent_marks: std::collections::HashMap::new(),
             keep_offline_mirrors: false,
             jump_input: String::new(),
             hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),
+            created_remote_panes: std::collections::HashMap::new(),
             request_complete_onboarding: false,
             name_input: String::new(),
             name_input_replace_on_type: false,

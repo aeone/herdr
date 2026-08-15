@@ -2850,6 +2850,12 @@ impl AppState {
                 Vec::new()
             }
             #[cfg(unix)]
+            AppEvent::RemoteTabCreated { target, result } => {
+                let _ = target;
+                let _ = result;
+                Vec::new()
+            }
+            #[cfg(unix)]
             AppEvent::RemoteSpaceRenamed {
                 target,
                 key,

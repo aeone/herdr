@@ -164,6 +164,12 @@ pub(crate) struct RemoteSpaceSnapshot {
     /// mirroring wholesale. A space the user explicitly asked for is mirrored
     /// from here even though nothing is running an agent in it yet.
     pub(crate) shell_panes: Vec<RemoteAgentPane>,
+    /// Every other agent-less pane: the second and later panes of a space, and
+    /// the plain shells sharing a space with an agent. Nothing mirrors these by
+    /// default — one candidate is enough to stand for a space in the sidebar —
+    /// but a tab the user asked for on this host is one of them, and is
+    /// mirrored by pane rather than by space.
+    pub(crate) extra_panes: Vec<RemoteAgentPane>,
 }
 
 /// Polls one configured host and returns its agent panes.
@@ -402,11 +408,13 @@ fn parse_discovery_output(stdout: &str, mirror_all: bool) -> io::Result<RemoteSp
         .ok_or_else(|| io::Error::other("remote space discovery returned no pane list"))?;
 
     let workspace_labels = parse_workspace_labels(workspaces_line)?;
-    let (panes, shell_panes) = parse_mirror_panes(panes_line, &workspace_labels, mirror_all)?;
+    let (panes, shell_panes, extra_panes) =
+        parse_mirror_panes(panes_line, &workspace_labels, mirror_all)?;
     Ok(RemoteSpaceSnapshot {
         remote_herdr,
         panes,
         shell_panes,
+        extra_panes,
     })
 }
 
@@ -435,19 +443,27 @@ fn parse_workspace_labels(line: &str) -> io::Result<std::collections::HashMap<St
         .collect())
 }
 
-/// Splits a pane list into the panes to mirror and the agent-less spaces that
-/// could be mirrored on request.
+/// Splits a pane list into the panes to mirror, the agent-less spaces that could
+/// be mirrored on request, and the agent-less panes behind them.
 ///
 /// Agent panes are always mirrored. Every agent-less space is also reduced to a
 /// single candidate, its first listed pane. With `mirror_all` those candidates
 /// are mirrored outright; otherwise they are returned separately, so a caller
 /// holding a space the user asked for by name can mirror just that one while the
 /// sidebar stays limited to agents.
+///
+/// The panes neither rule picks are returned too rather than dropped. They are
+/// not sidebar material on their own, but a tab the user asked for on this host
+/// lands among them, and the caller mirrors that one by name.
 fn parse_mirror_panes(
     line: &str,
     workspace_labels: &std::collections::HashMap<String, String>,
     mirror_all: bool,
-) -> io::Result<(Vec<RemoteAgentPane>, Vec<RemoteAgentPane>)> {
+) -> io::Result<(
+    Vec<RemoteAgentPane>,
+    Vec<RemoteAgentPane>,
+    Vec<RemoteAgentPane>,
+)> {
     let ResponseResult::PaneList { panes } = parse_result(line, "pane list")? else {
         return Err(io::Error::other(
             "remote pane list had an unexpected result type",
@@ -478,6 +494,7 @@ fn parse_mirror_panes(
 
     let mut mirrored = Vec::new();
     let mut shells = Vec::new();
+    let mut extra = Vec::new();
     // One candidate per agent-less workspace, from its first listed pane.
     let mut seen_shell_workspaces = std::collections::HashSet::new();
     for pane in panes {
@@ -485,18 +502,17 @@ fn parse_mirror_panes(
             mirrored.push(to_mirror(pane));
             continue;
         }
-        if agent_workspaces.contains(&pane.workspace_id)
-            || !seen_shell_workspaces.insert(pane.workspace_id.clone())
-        {
-            continue;
-        }
-        if mirror_all {
+        let is_space_candidate = !agent_workspaces.contains(&pane.workspace_id)
+            && seen_shell_workspaces.insert(pane.workspace_id.clone());
+        if !is_space_candidate {
+            extra.push(to_mirror(pane));
+        } else if mirror_all {
             mirrored.push(to_mirror(pane));
         } else {
             shells.push(to_mirror(pane));
         }
     }
-    Ok((mirrored, shells))
+    Ok((mirrored, shells, extra))
 }
 
 /// A space just opened on a mirrored host, with everything needed to mirror it
@@ -532,6 +548,40 @@ pub(crate) fn create_remote_workspace(
         )));
     }
     parse_created_workspace(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Creates a tab in a space on a mirrored host and returns the pane to mirror.
+///
+/// A mirror stands for one remote pane, so a tab asked for on a mirror is not a
+/// local tab: it is another pane on the host, mirrored beside the one it was
+/// asked from. Creating it locally would put the shell on this machine instead,
+/// and reconcile would take it down with the mirror the next time the remote
+/// pane went away.
+pub(crate) fn create_remote_tab(
+    space: &RemoteSpaceConfig,
+    manage_ssh_config: bool,
+    workspace_id: &str,
+    label: Option<&str>,
+) -> io::Result<CreatedRemoteSpace> {
+    let script = create_tab_script(
+        space.session.as_deref(),
+        space.is_local(),
+        workspace_id,
+        label,
+    );
+    let output = if space.is_local() {
+        local_sh_output(&script)?
+    } else {
+        RemoteSsh::new(space.target.clone(), manage_ssh_config).sh_output(&script)?
+    };
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "creating a tab on {} failed: {}",
+            space.target,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    parse_created_tab(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// Renames a workspace on the mirrored host.
@@ -628,6 +678,70 @@ fn parse_created_workspace(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             terminal_id: root_pane.terminal_id,
             workspace_id: root_pane.workspace_id,
             workspace_label: workspace.label,
+            agent: None,
+            state_changed_at_ms: root_pane.agent_state_changed_at_ms,
+        },
+    })
+}
+
+fn create_tab_script(
+    session: Option<&str>,
+    local: bool,
+    workspace_id: &str,
+    label: Option<&str>,
+) -> String {
+    let mut script = script_prologue(session, local);
+    // Same first line as discovery: the mirror's attach command needs the remote
+    // binary path, and the create response does not carry it.
+    script.push_str("printf '%s\\n' \"$herdr_bin\"\n");
+    script.push_str(&format!(
+        "\"$herdr_bin\" tab create --workspace {} --no-focus",
+        shell_quote(workspace_id)
+    ));
+    if let Some(label) = label {
+        script.push_str(&format!(" --label {}", shell_quote(label)));
+    }
+    script.push('\n');
+    // `tab create` names a tab, and a mirror is named after its space. The label
+    // has to come from this same call: waiting for the next poll would leave the
+    // new mirror showing a raw workspace id until it arrived.
+    script.push_str("\"$herdr_bin\" workspace list\n");
+    script
+}
+
+/// Turns a `tab create` response into the pane to mirror.
+///
+/// The response carries the new tab's root pane but not its space's name, so
+/// the trailing `workspace list` supplies the label.
+fn parse_created_tab(stdout: &str) -> io::Result<CreatedRemoteSpace> {
+    let mut lines = stdout.lines().filter(|line| !line.trim().is_empty());
+    let remote_herdr = lines
+        .next()
+        .ok_or_else(|| io::Error::other("remote tab create returned no output"))?
+        .trim()
+        .to_string();
+    let created = lines
+        .next()
+        .ok_or_else(|| io::Error::other("remote tab create returned no response"))?;
+    let workspaces = lines
+        .next()
+        .ok_or_else(|| io::Error::other("remote tab create returned no workspace list"))?;
+    let ResponseResult::TabCreated { root_pane, .. } = parse_result(created, "tab create")? else {
+        return Err(io::Error::other(
+            "remote tab create had an unexpected result type",
+        ));
+    };
+    let workspace_label = parse_workspace_labels(workspaces)?
+        .get(&root_pane.workspace_id)
+        .cloned()
+        .unwrap_or_else(|| root_pane.workspace_id.clone());
+    Ok(CreatedRemoteSpace {
+        remote_herdr,
+        pane: RemoteAgentPane {
+            status: root_pane.agent_status,
+            terminal_id: root_pane.terminal_id,
+            workspace_id: root_pane.workspace_id,
+            workspace_label,
             agent: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
         },
@@ -1086,6 +1200,103 @@ mod tests {
         assert_eq!(created.pane.agent, None);
     }
 
+    /// A tab is created in a named space and, like a space, without stealing the
+    /// remote's focus. The trailing `workspace list` is what names the mirror.
+    #[test]
+    fn create_tab_script_targets_the_space_and_asks_for_its_label() {
+        let script = create_tab_script(Some("agents"), false, "wX", Some("notes"));
+
+        assert!(
+            script.contains("tab create --workspace 'wX' --no-focus"),
+            "{script}"
+        );
+        assert!(script.contains("--label 'notes'"), "{script}");
+        assert!(script.contains("printf '%s\\n' \"$herdr_bin\""), "{script}");
+        assert!(script.contains("workspace list"), "{script}");
+    }
+
+    #[test]
+    fn created_tab_is_parsed_into_the_pane_to_mirror() {
+        let stdout = concat!(
+            "/opt/homebrew/bin/herdr\n",
+            r#"{"id":"cli:tab:create","result":{"type":"tab_created","#,
+            r#""tab":{"agent_status":"unknown","focused":false,"label":"2","number":2,"#,
+            r#""pane_count":1,"tab_id":"wX:t2","workspace_id":"wX"},"#,
+            r#""root_pane":{"agent_status":"unknown","cwd":"/home/ryi","focused":false,"#,
+            r#""pane_id":"wX:p2","revision":0,"tab_id":"wX:t2","#,
+            r#""terminal_id":"term_new","workspace_id":"wX"}}}"#,
+            "\n",
+            r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"#,
+            r#""active_tab_id":"wX:t1","agent_status":"unknown","focused":false,"#,
+            r#""label":"notes","number":3,"pane_count":2,"tab_count":2,"workspace_id":"wX"}]}}"#,
+        );
+
+        let created = parse_created_tab(stdout).expect("parse");
+
+        assert_eq!(created.remote_herdr, "/opt/homebrew/bin/herdr");
+        assert_eq!(created.pane.workspace_id, "wX");
+        assert_eq!(created.pane.terminal_id, "term_new");
+        // Named after the space it joined, not after the tab: that is what the
+        // sidebar shows a mirror as.
+        assert_eq!(created.pane.workspace_label, "notes");
+        assert_eq!(created.pane.agent, None);
+    }
+
+    /// The panes neither the agent rule nor the one-per-space rule picks are
+    /// still reported, so a tab created on the host can be mirrored by name.
+    #[test]
+    fn panes_behind_a_space_candidate_are_reported_as_extras() {
+        let labels = std::collections::HashMap::from([
+            ("w1".to_string(), "api".to_string()),
+            ("w2".to_string(), "notes".to_string()),
+        ]);
+        let line = concat!(
+            r#"{"id":"x","result":{"type":"pane_list","panes":[{"#,
+            r#""agent":"claude","agent_status":"idle","cwd":"/w","focused":false,"#,
+            r#""pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","#,
+            r#""terminal_id":"term-1","workspace_id":"w1"},{"#,
+            // A plain shell sharing a space with that agent.
+            r#""agent_status":"unknown","cwd":"/w","focused":false,"#,
+            r#""pane_id":"w1:p2","revision":0,"tab_id":"w1:t2","#,
+            r#""terminal_id":"term-2","workspace_id":"w1"},{"#,
+            r#""agent_status":"unknown","cwd":"/w","focused":false,"#,
+            r#""pane_id":"w2:p1","revision":0,"tab_id":"w2:t1","#,
+            r#""terminal_id":"term-3","workspace_id":"w2"},{"#,
+            // The second pane of an agent-less space.
+            r#""agent_status":"unknown","cwd":"/w","focused":false,"#,
+            r#""pane_id":"w2:p2","revision":0,"tab_id":"w2:t2","#,
+            r#""terminal_id":"term-4","workspace_id":"w2"}]}}"#,
+        );
+
+        let (mirrored, shells, extra) = parse_mirror_panes(line, &labels, false).expect("parse");
+
+        assert_eq!(
+            mirrored.iter().map(|p| &p.terminal_id).collect::<Vec<_>>(),
+            ["term-1"]
+        );
+        assert_eq!(
+            shells.iter().map(|p| &p.terminal_id).collect::<Vec<_>>(),
+            ["term-3"]
+        );
+        assert_eq!(
+            extra.iter().map(|p| &p.terminal_id).collect::<Vec<_>>(),
+            ["term-2", "term-4"]
+        );
+
+        // `mirror_all` moves the space candidate, and only that, into the
+        // mirrored list; the extras are unchanged either way.
+        let (mirrored, shells, extra) = parse_mirror_panes(line, &labels, true).expect("parse");
+        assert_eq!(
+            mirrored.iter().map(|p| &p.terminal_id).collect::<Vec<_>>(),
+            ["term-1", "term-3"]
+        );
+        assert!(shells.is_empty());
+        assert_eq!(
+            extra.iter().map(|p| &p.terminal_id).collect::<Vec<_>>(),
+            ["term-2", "term-4"]
+        );
+    }
+
     /// Without `mirror_all` the agent-less spaces are still reported, just
     /// separately, so a space the user asked for can be mirrored on its own.
     #[test]
@@ -1104,7 +1315,7 @@ mod tests {
             r#""terminal_id":"term-2","workspace_id":"w2"}]}}"#,
         );
 
-        let (mirrored, shells) = parse_mirror_panes(line, &labels, false).expect("parse");
+        let (mirrored, shells, _) = parse_mirror_panes(line, &labels, false).expect("parse");
 
         assert_eq!(
             mirrored.iter().map(|p| &p.workspace_id).collect::<Vec<_>>(),
@@ -1116,7 +1327,7 @@ mod tests {
         );
 
         // With mirror_all the same space is mirrored outright instead.
-        let (mirrored, shells) = parse_mirror_panes(line, &labels, true).expect("parse");
+        let (mirrored, shells, _) = parse_mirror_panes(line, &labels, true).expect("parse");
         assert_eq!(mirrored.len(), 2);
         assert!(shells.is_empty());
     }
@@ -1136,7 +1347,7 @@ mod tests {
             r#""terminal_id":"term-1","workspace_id":"w1"}]}}"#,
         );
 
-        let (mirrored, _) = parse_mirror_panes(line, &labels, false).expect("parse");
+        let (mirrored, _, _) = parse_mirror_panes(line, &labels, false).expect("parse");
 
         assert_eq!(mirrored[0].state_changed_at_ms, Some(1750000000000));
     }
@@ -1153,7 +1364,7 @@ mod tests {
             r#""terminal_id":"term-1","workspace_id":"w1"}]}}"#,
         );
 
-        let (mirrored, _) = parse_mirror_panes(line, &labels, false).expect("parse");
+        let (mirrored, _, _) = parse_mirror_panes(line, &labels, false).expect("parse");
 
         assert_eq!(mirrored[0].state_changed_at_ms, None);
     }

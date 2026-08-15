@@ -788,13 +788,21 @@ impl HeadlessServer {
         if self.app.state.request_new_tab {
             self.app.state.request_new_tab = false;
             let label = self.app.state.requested_new_tab_name.take();
-            let response = self.headless_tab_create("headless.tab.create", label);
-            if let Err(error) = response {
-                error!(
-                    code = %error.code,
-                    message = %error.message,
-                    "failed to create tab"
-                );
+            // A mirrored space belongs to another machine, so its tabs are made
+            // there. Only a space that is really local falls through.
+            #[cfg(unix)]
+            let handled = self.app.request_remote_tab(label.as_deref());
+            #[cfg(not(unix))]
+            let handled = false;
+            if !handled {
+                let response = self.headless_tab_create("headless.tab.create", label);
+                if let Err(error) = response {
+                    error!(
+                        code = %error.code,
+                        message = %error.message,
+                        "failed to create tab"
+                    );
+                }
             }
             needs_render = true;
             crate::render_prof::event("full_render_cause.deferred_new_tab");

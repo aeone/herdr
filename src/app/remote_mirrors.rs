@@ -51,6 +51,15 @@ fn remote_workspace_id(key: &str) -> Option<String> {
     key.split('\u{1f}').nth(1).map(str::to_string)
 }
 
+/// Which pin keeps a pane the user just created alive across the next poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatedPin {
+    /// A whole new space: mirror its candidate pane until an agent runs there.
+    Workspace,
+    /// A tab in a space that is mirrored already: mirror just this pane.
+    Pane,
+}
+
 /// A rename sent to a host, waiting for that host to report it back.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingMirrorRename {
@@ -70,6 +79,7 @@ pub(crate) fn plan_remote_mirrors(
     space: &RemoteSpaceConfig,
     snapshot: &RemoteSpaceSnapshot,
     pinned: &std::collections::HashSet<String>,
+    pinned_panes: &std::collections::HashSet<String>,
     renaming: &std::collections::HashSet<String>,
 ) -> Vec<MirrorAction> {
     // A space the user created on this host is mirrored even with no agent in it
@@ -80,7 +90,19 @@ pub(crate) fn plan_remote_mirrors(
         snapshot
             .shell_panes
             .iter()
-            .filter(|pane| pinned.contains(&pane.workspace_id))
+            .filter(|pane| {
+                pinned.contains(&pane.workspace_id) || pinned_panes.contains(&pane.terminal_id)
+            })
+            .cloned(),
+    );
+    // A tab the user created on this host, in a space that is mirrored already.
+    // Only the pane itself is pinned, so the rest of that space's plain shells
+    // stay out of the sidebar the way they always have.
+    panes.extend(
+        snapshot
+            .extra_panes
+            .iter()
+            .filter(|pane| pinned_panes.contains(&pane.terminal_id))
             .cloned(),
     );
 
@@ -386,6 +408,51 @@ impl App {
         });
     }
 
+    /// Asks the host that owns the active mirror for another tab in that space.
+    ///
+    /// Returns false when the active space is not a mirror, so the caller falls
+    /// back to creating the tab here. A tab made locally inside a mirror would
+    /// run on this machine rather than the one the space belongs to, and
+    /// reconcile closes a mirror's whole workspace when the remote pane goes
+    /// away, so it would disappear with it.
+    #[cfg(unix)]
+    pub(crate) fn request_remote_tab(&mut self, label: Option<&str>) -> bool {
+        let Some(mirror) = self
+            .state
+            .active
+            .and_then(|ws_idx| self.state.workspaces.get(ws_idx))
+            .and_then(|workspace| workspace.remote_mirror.clone())
+        else {
+            return false;
+        };
+        let Some(space) = self
+            .config_remote_spaces()
+            .into_iter()
+            .find(|space| space.target == mirror.target)
+        else {
+            return false;
+        };
+        let Some(workspace_id) = remote_workspace_id(&mirror.key) else {
+            return false;
+        };
+        let manage_ssh_config = self.manage_ssh_config;
+        let event_tx = self.event_tx.clone();
+        let label = label.map(str::to_string);
+        std::thread::spawn(move || {
+            let result = crate::remote::spaces::create_remote_tab(
+                &space,
+                manage_ssh_config,
+                &workspace_id,
+                label.as_deref(),
+            );
+            let _ = event_tx.blocking_send(crate::events::AppEvent::RemoteTabCreated {
+                target: space.target.clone(),
+                result: result.map_err(|err| err.to_string()),
+            });
+        });
+        true
+    }
+
     /// Sends a mirror's new name to the host that owns the space.
     ///
     /// The mirror shows whatever label the remote reports, so a local rename
@@ -459,6 +526,29 @@ impl App {
         target: String,
         result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
     ) {
+        self.mirror_created_remote_pane(target, result, CreatedPin::Workspace);
+    }
+
+    /// Applies the result of [`Self::request_remote_tab`].
+    ///
+    /// Same handling as a created space: the pane is mirrored straight from the
+    /// response and focused. Only the pin differs — the space is mirrored
+    /// already, so pinning it would pull in its other shells too.
+    #[cfg(unix)]
+    pub(crate) fn handle_remote_tab_created(
+        &mut self,
+        target: String,
+        result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
+    ) {
+        self.mirror_created_remote_pane(target, result, CreatedPin::Pane);
+    }
+
+    fn mirror_created_remote_pane(
+        &mut self,
+        target: String,
+        result: Result<crate::remote::spaces::CreatedRemoteSpace, String>,
+        pin: CreatedPin,
+    ) {
         let Some(space) = self
             .config_remote_spaces()
             .into_iter()
@@ -475,13 +565,22 @@ impl App {
             }
         };
 
-        // Pin it first: the space has no agent yet, so without the pin the very
-        // next snapshot would plan it as stale and close it again.
-        self.state
-            .created_remote_workspaces
-            .entry(target.clone())
-            .or_default()
-            .insert(created.pane.workspace_id.clone());
+        // Pin it first: the new pane runs no agent yet, so without the pin the
+        // very next snapshot would plan it as stale and close it again.
+        match pin {
+            CreatedPin::Workspace => self
+                .state
+                .created_remote_workspaces
+                .entry(target.clone())
+                .or_default()
+                .insert(created.pane.workspace_id.clone()),
+            CreatedPin::Pane => self
+                .state
+                .created_remote_panes
+                .entry(target.clone())
+                .or_default()
+                .insert(created.pane.terminal_id.clone()),
+        };
         self.state.remote_offline_hosts.remove(&target);
 
         // Mirror it from the create response instead of waiting for a snapshot,
@@ -549,7 +648,20 @@ impl App {
         });
         let renaming: std::collections::HashSet<String> =
             self.pending_mirror_renames.keys().cloned().collect();
-        let plan = plan_remote_mirrors(&self.state.workspaces, space, snapshot, &pinned, &renaming);
+        let pinned_panes = self
+            .state
+            .created_remote_panes
+            .get(&space.target)
+            .cloned()
+            .unwrap_or_default();
+        let plan = plan_remote_mirrors(
+            &self.state.workspaces,
+            space,
+            snapshot,
+            &pinned,
+            &pinned_panes,
+            &renaming,
+        );
 
         let mut closed = 0usize;
         for action in plan {
@@ -778,6 +890,7 @@ mod tests {
             snapshot,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         )
     }
 
@@ -786,6 +899,28 @@ mod tests {
             remote_herdr: "/usr/bin/herdr".into(),
             panes,
             shell_panes: Vec::new(),
+            extra_panes: Vec::new(),
+        }
+    }
+
+    /// A snapshot carrying agent-less panes that stand for nothing on their own:
+    /// the second and later panes of a space, and shells beside an agent.
+    fn snapshot_with_extras(
+        panes: Vec<RemoteAgentPane>,
+        extra_panes: Vec<RemoteAgentPane>,
+    ) -> RemoteSpaceSnapshot {
+        RemoteSpaceSnapshot {
+            remote_herdr: "/usr/bin/herdr".into(),
+            panes,
+            shell_panes: Vec::new(),
+            extra_panes,
+        }
+    }
+
+    fn shell_pane(workspace_id: &str, label: &str, terminal_id: &str) -> RemoteAgentPane {
+        RemoteAgentPane {
+            agent: None,
+            ..agent_pane(workspace_id, label, terminal_id)
         }
     }
 
@@ -799,6 +934,7 @@ mod tests {
             remote_herdr: "/usr/bin/herdr".into(),
             panes,
             shell_panes,
+            extra_panes: Vec::new(),
         }
     }
 
@@ -906,6 +1042,101 @@ mod tests {
         agent_pane(workspace_id, "ignored", terminal_id).mirror_key(target)
     }
 
+    /// A tab the user asked for on a mirrored space becomes another mirror of
+    /// that space, beside the one it was asked from. It is pinned by pane, not
+    /// by space, so nothing else living in that remote space comes with it.
+    #[test]
+    fn plan_mirrors_a_pinned_pane_from_an_already_mirrored_space() {
+        let snapshot = snapshot_with_extras(
+            vec![agent_pane("w1", "api", "term-1")],
+            vec![
+                shell_pane("w1", "api", "term-2"),
+                shell_pane("w1", "api", "term-unwanted"),
+            ],
+        );
+        let pinned_panes = std::collections::HashSet::from(["term-2".to_string()]);
+        let mut workspaces = vec![mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "api",
+        )];
+
+        let plan = super::plan_remote_mirrors(
+            &workspaces,
+            &space("workbox"),
+            &snapshot,
+            &Default::default(),
+            &pinned_panes,
+            &Default::default(),
+        );
+
+        // Two mirrors of one remote space now, so the shared label is
+        // disambiguated and the existing mirror is renamed to match.
+        assert_eq!(
+            plan,
+            vec![
+                MirrorAction::Rename {
+                    ws_idx: 0,
+                    label: "api 1".into(),
+                },
+                MirrorAction::Create {
+                    key: key_for("workbox", "w1", "term-2"),
+                    label: "api 2".into(),
+                    argv: attach_argv(
+                        &space("workbox"),
+                        &shell_pane("w1", "api", "term-2"),
+                        "/usr/bin/herdr"
+                    ),
+                    agent: None,
+                },
+            ]
+        );
+
+        // And the next poll leaves it alone rather than closing it again.
+        for action in &plan {
+            if let MirrorAction::Rename { ws_idx, label } = action {
+                workspaces[*ws_idx].custom_name = Some(label.clone());
+            }
+        }
+        apply_creates(&mut workspaces, &space("workbox"), &plan);
+        let plan = super::plan_remote_mirrors(
+            &workspaces,
+            &space("workbox"),
+            &snapshot,
+            &Default::default(),
+            &pinned_panes,
+            &Default::default(),
+        );
+        assert_eq!(plan, Vec::new());
+    }
+
+    /// The panes nobody asked for stay out of the sidebar. A remote space can
+    /// hold any number of plain shells, and mirroring them all would bury the
+    /// agents the sidebar exists for.
+    #[test]
+    fn plan_ignores_unpinned_panes_from_a_mirrored_space() {
+        let snapshot = snapshot_with_extras(
+            vec![agent_pane("w1", "api", "term-1")],
+            vec![shell_pane("w1", "api", "term-2")],
+        );
+        let workspaces = vec![mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "api",
+        )];
+
+        let plan = super::plan_remote_mirrors(
+            &workspaces,
+            &space("workbox"),
+            &snapshot,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+
+        assert_eq!(plan, Vec::new());
+    }
+
     /// A space the user asked for on a host is mirrored even with no agent in
     /// it, which is the whole point of creating one from the sidebar.
     #[test]
@@ -918,6 +1149,7 @@ mod tests {
             &space("workbox"),
             &snapshot,
             &pinned,
+            &Default::default(),
             &Default::default(),
         );
 
@@ -964,6 +1196,7 @@ mod tests {
             &space("workbox"),
             &snapshot,
             &pinned,
+            &Default::default(),
             &Default::default(),
         );
 
@@ -1125,6 +1358,7 @@ mod tests {
             &workspaces,
             &space("workbox"),
             &snapshot(vec![agent_pane("w1", "api", "term-1")]),
+            &Default::default(),
             &Default::default(),
             &renaming,
         );
