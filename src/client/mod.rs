@@ -179,7 +179,14 @@ fn attach_scroll_action(
             let direction = match mouse.kind {
                 MouseEventKind::ScrollUp => AttachScrollDirection::Up,
                 MouseEventKind::ScrollDown => AttachScrollDirection::Down,
-                _ => return Some(AttachInputAction::None),
+                // Clicks, drags and motion are not scroll actions, so they are
+                // forwarded like any other input rather than swallowed here.
+                // Whether the attached pane actually wants them is the server's
+                // question to answer: this client enables mouse capture
+                // unconditionally to get the wheel, so it is told about mouse
+                // events no application asked for, and it cannot see which
+                // modes the pane it is attached to has set.
+                _ => return None,
             };
             Some(AttachInputAction::Scroll {
                 source: AttachScrollSource::Wheel,
@@ -2616,6 +2623,26 @@ mod tests {
         }
     }
 
+    /// A click has to reach the pane. The wheel is intercepted here to drive the
+    /// attached viewport, and every other mouse event used to be dropped with
+    /// it, so a mirrored space never saw a button press at all.
+    #[cfg(unix)]
+    #[test]
+    fn attach_escape_forwards_clicks_instead_of_swallowing_them() {
+        let mut escape = AttachEscapeState::default();
+        for report in [
+            b"\x1b[<0;11;6M".as_slice(),  // left press
+            b"\x1b[<0;11;6m".as_slice(),  // left release
+            b"\x1b[<32;11;6M".as_slice(), // left drag
+            b"\x1b[<35;11;6M".as_slice(), // motion, no button
+        ] {
+            match escape.filter_input(report.to_vec(), 24, 7) {
+                AttachInputAction::Forward(bytes) => assert_eq!(bytes, report),
+                other => panic!("expected {report:?} forwarded, got {other:?}"),
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn attach_escape_turns_wheel_into_scroll_action() {
@@ -2637,16 +2664,6 @@ mod tests {
             }
             other => panic!("expected scroll action, got {other:?}"),
         }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn attach_escape_swallows_non_wheel_mouse_reports() {
-        let mut escape = AttachEscapeState::default();
-        assert!(matches!(
-            escape.filter_input(b"\x1b[<0;11;6M".to_vec(), 24, 7),
-            AttachInputAction::None
-        ));
     }
 
     #[cfg(unix)]

@@ -351,10 +351,40 @@ fn apply_terminal_attach_input(
     runtime: &crate::terminal::TerminalRuntime,
     data: Vec<u8>,
 ) -> Result<(), String> {
+    let wants_mouse = runtime
+        .input_state()
+        .is_some_and(crate::pane::InputState::mouse_reporting_enabled);
+    if is_unwanted_mouse_report(&data, wants_mouse) {
+        return Ok(());
+    }
     runtime.scroll_reset();
     runtime
         .try_send_bytes(Bytes::from(data))
         .map_err(|err| format!("terminal attach input failed: {err}"))
+}
+
+/// Whether attach input is a mouse report the attached pane never asked for.
+///
+/// An attach client enables mouse capture on its own terminal whatever it is
+/// attached to, because that is the only way to get the wheel, so it forwards
+/// mouse reports for panes running a plain shell as readily as for one running
+/// an application that wants them. The pane's modes live here, so this is where
+/// the ones nobody asked for are dropped — otherwise a click in a mirrored
+/// shell types `[<0;5;3M` at its prompt.
+///
+/// Only a chunk that is exactly one mouse event is ever dropped. Anything the
+/// framer did not hand over as a lone mouse report — typed text, a paste that
+/// happens to contain one — is passed through untouched, since silently eating
+/// real input is far worse than letting a stray report through.
+fn is_unwanted_mouse_report(data: &[u8], wants_mouse: bool) -> bool {
+    if wants_mouse {
+        return false;
+    }
+    let events = crate::raw_input::parse_raw_input_bytes_sync(data);
+    matches!(
+        events.as_slice(),
+        [crate::raw_input::RawInputEvent::Mouse(_)]
+    )
 }
 
 #[cfg(windows)]
@@ -5220,6 +5250,36 @@ next_tab = ""
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// A pane running a plain shell must not be typed at by the mouse. The
+    /// attach client cannot tell — it captures the mouse whatever it attached
+    /// to — so the pane's own modes decide here.
+    #[test]
+    fn unwanted_mouse_reports_are_dropped_only_for_panes_that_want_no_mouse() {
+        let click = b"\x1b[<0;11;6M";
+
+        assert!(super::is_unwanted_mouse_report(click, false));
+        assert!(!super::is_unwanted_mouse_report(click, true));
+    }
+
+    /// The drop is deliberately narrow: eating something a user actually typed
+    /// is far worse than letting a stray report reach an application.
+    #[test]
+    fn mouse_report_filtering_never_touches_typed_input() {
+        for data in [
+            b"ls -la".as_slice(),
+            b"\r".as_slice(),
+            b"\x1b".as_slice(),
+            b"\x1b[A".as_slice(),                     // cursor key
+            b"\x1b[<0;11;6Mecho hi".as_slice(),       // report plus real typing
+            b"\x1b[<0;11;6M\x1b[<0;11;6m".as_slice(), // two events in one chunk
+        ] {
+            assert!(
+                !super::is_unwanted_mouse_report(data, false),
+                "would have dropped {data:?}"
+            );
+        }
     }
 
     #[test]
