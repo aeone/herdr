@@ -433,7 +433,26 @@ pub struct PaneInfo {
     /// not by when the mirror happened to be built.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state_changed_at_ms: Option<u64>,
+    /// Set when this pane is itself a mirror of a pane on another host, naming
+    /// the pane it stands for. A host mirroring this one uses it to tell a real
+    /// pane from a reflection, so mirroring both ends of a chain shows each
+    /// agent once instead of twice. Absent on ordinary panes, and on any build
+    /// that does not know about mirrors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror_origin: Option<MirrorOriginInfo>,
     pub revision: u64,
+}
+
+/// The pane a mirror stands for, as its own host names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct MirrorOriginInfo {
+    /// The ssh target the mirroring host was configured with, so spelled as
+    /// that host writes it: `sera`, or `ryielle@alleria`, or `local`.
+    pub target: String,
+    pub workspace_id: String,
+    /// The terminal on the origin host. This is the identity that survives
+    /// being mirrored, so it is what two hosts can agree a pane is.
+    pub terminal_id: String,
 }
 
 /// Why a pane routes the wheel the way it does.

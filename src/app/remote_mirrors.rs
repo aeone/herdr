@@ -80,6 +80,7 @@ pub(crate) fn plan_remote_mirrors(
     snapshot: &RemoteSpaceSnapshot,
     pinned: &std::collections::HashSet<String>,
     pinned_panes: &std::collections::HashSet<String>,
+    mirrored_hosts: &std::collections::HashSet<String>,
     renaming: &std::collections::HashSet<String>,
 ) -> Vec<MirrorAction> {
     // A space the user created on this host is mirrored even with no agent in it
@@ -105,6 +106,21 @@ pub(crate) fn plan_remote_mirrors(
             .filter(|pane| pinned_panes.contains(&pane.terminal_id))
             .cloned(),
     );
+
+    // A pane that is itself a mirror of a host we also mirror is that host's
+    // agent seen a second time, one hop further away. Drop it and keep the one
+    // that comes straight from the machine running it: it carries that host's
+    // own colour and label, and its pane is one ssh hop rather than two.
+    //
+    // A mirror of a host we do *not* mirror is kept, since it is the only way
+    // that agent reaches this sidebar at all.
+    panes.retain(|pane| {
+        pane.origin.as_ref().is_none_or(|origin| {
+            !mirrored_hosts.contains(&crate::remote::spaces::MirrorOrigin::host_key(
+                &origin.target,
+            ))
+        })
+    });
 
     let labels = mirror_labels(&panes);
     let desired: Vec<(String, String)> = panes
@@ -654,12 +670,20 @@ impl App {
             .get(&space.target)
             .cloned()
             .unwrap_or_default();
+        // Every host we are configured to mirror, so a reflection of one of
+        // them can be told from a reflection of somewhere we cannot reach.
+        let mirrored_hosts: std::collections::HashSet<String> = self
+            .config_remote_spaces()
+            .iter()
+            .map(|configured| crate::remote::spaces::MirrorOrigin::host_key(&configured.target))
+            .collect();
         let plan = plan_remote_mirrors(
             &self.state.workspaces,
             space,
             snapshot,
             &pinned,
             &pinned_panes,
+            &mirrored_hosts,
             &renaming,
         );
 
@@ -891,6 +915,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         )
     }
 
@@ -945,6 +970,7 @@ mod tests {
             workspace_label: label.into(),
             agent: Some("claude".into()),
             status: crate::api::schema::AgentStatus::Idle,
+            origin: None,
             state_changed_at_ms: None,
         }
     }
@@ -1042,6 +1068,85 @@ mod tests {
         agent_pane(workspace_id, "ignored", terminal_id).mirror_key(target)
     }
 
+    fn mirrored_pane(
+        workspace_id: &str,
+        label: &str,
+        terminal_id: &str,
+        origin_target: &str,
+        origin_terminal: &str,
+    ) -> RemoteAgentPane {
+        RemoteAgentPane {
+            origin: Some(crate::remote::spaces::MirrorOrigin {
+                target: origin_target.into(),
+                terminal_id: origin_terminal.into(),
+            }),
+            ..agent_pane(workspace_id, label, terminal_id)
+        }
+    }
+
+    /// Mirroring two hosts that also mirror each other must not show their
+    /// agents twice. The copy that comes straight from the machine running it
+    /// is the one to keep: its own colour and label, and one ssh hop not two.
+    #[test]
+    fn plan_ignores_a_reflection_of_a_host_we_mirror_ourselves() {
+        // workbox reports one of its own agents and one it mirrors from sera,
+        // spelled with a login name we do not use.
+        let snapshot = snapshot(vec![
+            agent_pane("w1", "api", "term-local"),
+            mirrored_pane("w2", "notes", "term-hop", "ryi@sera", "term-far"),
+        ]);
+        let mirrored_hosts =
+            std::collections::HashSet::from(["workbox".to_string(), "sera".to_string()]);
+
+        let plan = super::plan_remote_mirrors(
+            &[],
+            &space("workbox"),
+            &snapshot,
+            &Default::default(),
+            &Default::default(),
+            &mirrored_hosts,
+            &Default::default(),
+        );
+
+        assert_eq!(
+            plan.iter()
+                .filter_map(|action| match action {
+                    MirrorAction::Create { key, .. } => Some(key.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![key_for("workbox", "w1", "term-local")]
+        );
+    }
+
+    /// The same reflection when we do not mirror its host: keeping it is the
+    /// only way that agent reaches this sidebar at all.
+    #[test]
+    fn plan_keeps_a_reflection_of_a_host_we_cannot_reach() {
+        let snapshot = snapshot(vec![mirrored_pane(
+            "w2", "notes", "term-hop", "ryi@sera", "term-far",
+        )]);
+        let mirrored_hosts = std::collections::HashSet::from(["workbox".to_string()]);
+
+        let plan = super::plan_remote_mirrors(
+            &[],
+            &space("workbox"),
+            &snapshot,
+            &Default::default(),
+            &Default::default(),
+            &mirrored_hosts,
+            &Default::default(),
+        );
+
+        assert!(
+            plan.iter().any(|action| matches!(
+                action,
+                MirrorAction::Create { key, .. } if key == &key_for("workbox", "w2", "term-hop")
+            )),
+            "{plan:?}"
+        );
+    }
+
     /// A tab the user asked for on a mirrored space becomes another mirror of
     /// that space, beside the one it was asked from. It is pinned by pane, not
     /// by space, so nothing else living in that remote space comes with it.
@@ -1067,6 +1172,7 @@ mod tests {
             &snapshot,
             &Default::default(),
             &pinned_panes,
+            &Default::default(),
             &Default::default(),
         );
 
@@ -1106,6 +1212,7 @@ mod tests {
             &Default::default(),
             &pinned_panes,
             &Default::default(),
+            &Default::default(),
         );
         assert_eq!(plan, Vec::new());
     }
@@ -1132,6 +1239,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
         );
 
         assert_eq!(plan, Vec::new());
@@ -1149,6 +1257,7 @@ mod tests {
             &space("workbox"),
             &snapshot,
             &pinned,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         );
@@ -1196,6 +1305,7 @@ mod tests {
             &space("workbox"),
             &snapshot,
             &pinned,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
         );
@@ -1358,6 +1468,7 @@ mod tests {
             &workspaces,
             &space("workbox"),
             &snapshot(vec![agent_pane("w1", "api", "term-1")]),
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             &renaming,

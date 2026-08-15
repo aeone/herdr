@@ -17,6 +17,31 @@ use crate::config::RemoteSpaceConfig;
 
 use super::unix::RemoteSsh;
 
+/// The pane a remote mirror stands for, on the host that really runs it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MirrorOrigin {
+    /// The ssh target as the *reporting* host spells it, which need not match
+    /// how we spell the same machine.
+    pub(crate) target: String,
+    /// The terminal id on the origin host: the identity that survives a hop.
+    pub(crate) terminal_id: String,
+}
+
+impl MirrorOrigin {
+    /// A host name two configurations can be compared on.
+    ///
+    /// One host may be reached as `alleria` and another may write
+    /// `ryielle@alleria` for the same machine, and neither spelling is more
+    /// correct. The login name is not part of which machine it is.
+    pub(crate) fn host_key(target: &str) -> String {
+        target
+            .rsplit('@')
+            .next()
+            .unwrap_or(target)
+            .to_ascii_lowercase()
+    }
+}
+
 /// One remote agent pane, reduced to what a mirrored local pane needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteAgentPane {
@@ -32,6 +57,10 @@ pub(crate) struct RemoteAgentPane {
     /// own agents, so this is more accurate than screen-detecting the attached
     /// copy, which never sees anything but idle.
     pub(crate) status: crate::api::schema::AgentStatus,
+    /// Set when this remote pane is itself a mirror of a pane somewhere else.
+    /// Kept so a chain of hosts mirroring each other does not show the same
+    /// agent once per hop.
+    pub(crate) origin: Option<MirrorOrigin>,
     /// When the remote says this agent last changed state, in unix ms.
     ///
     /// Carried across so the sidebar ages a mirrored agent by what happened on
@@ -49,6 +78,18 @@ impl RemoteAgentPane {
             "{target}\u{1f}{}\u{1f}{}",
             self.workspace_id, self.terminal_id
         )
+    }
+
+    /// Splits a mirror key back into the origin's workspace and terminal ids.
+    ///
+    /// The key is built by [`RemoteAgentPane::mirror_key`], and the terminal id
+    /// in it is the one the origin host knows the pane by. That is the identity
+    /// that survives being mirrored, so it is what tells a pane from a
+    /// reflection of it.
+    pub(crate) fn split_key(key: &str) -> Option<(&str, &str)> {
+        let mut parts = key.split('\u{1f}');
+        let _target = parts.next()?;
+        Some((parts.next()?, parts.next()?))
     }
 
     /// Name for the mirrored local space. The host is not baked in: it is a
@@ -488,9 +529,32 @@ fn parse_mirror_panes(
             workspace_id: pane.workspace_id,
             workspace_label,
             agent: pane.display_agent.or(pane.agent),
+            origin: pane.mirror_origin.map(|origin| MirrorOrigin {
+                target: origin.target,
+                terminal_id: origin.terminal_id,
+            }),
             state_changed_at_ms: pane.agent_state_changed_at_ms,
         }
     };
+
+    // A host mirroring its own session reports the reflection and the real pane
+    // side by side. The reflection is dropped here rather than downstream,
+    // because both are on this one host and nothing further along can tell them
+    // apart -- the identity that gives it away is the origin terminal id.
+    let direct_terminals: std::collections::HashSet<&str> = panes
+        .iter()
+        .filter(|pane| pane.mirror_origin.is_none())
+        .map(|pane| pane.terminal_id.as_str())
+        .collect();
+    let panes: Vec<_> = panes
+        .iter()
+        .filter(|pane| {
+            pane.mirror_origin
+                .as_ref()
+                .is_none_or(|origin| !direct_terminals.contains(origin.terminal_id.as_str()))
+        })
+        .cloned()
+        .collect();
 
     let mut mirrored = Vec::new();
     let mut shells = Vec::new();
@@ -679,6 +743,7 @@ fn parse_created_workspace(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             workspace_id: root_pane.workspace_id,
             workspace_label: workspace.label,
             agent: None,
+            origin: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
         },
     })
@@ -743,6 +808,7 @@ fn parse_created_tab(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             workspace_id: root_pane.workspace_id,
             workspace_label,
             agent: None,
+            origin: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
         },
     })
@@ -860,6 +926,7 @@ mod tests {
                 workspace_label: "api-server".into(),
                 agent: Some("claude".into()),
                 status: crate::api::schema::AgentStatus::Working,
+                origin: None,
                 state_changed_at_ms: None,
             }]
         );
@@ -890,6 +957,7 @@ mod tests {
                     workspace_label: "lifestream".into(),
                     agent: Some("claude".into()),
                     status: crate::api::schema::AgentStatus::Idle,
+                    origin: None,
                     state_changed_at_ms: None,
                 },
                 RemoteAgentPane {
@@ -898,6 +966,7 @@ mod tests {
                     workspace_label: "emf".into(),
                     agent: Some("claude".into()),
                     status: crate::api::schema::AgentStatus::Done,
+                    origin: None,
                     state_changed_at_ms: None,
                 },
             ]
@@ -981,6 +1050,7 @@ mod tests {
             workspace_label: workspace_label.into(),
             agent: Some("claude".into()),
             status: crate::api::schema::AgentStatus::Idle,
+            origin: None,
             state_changed_at_ms: None,
         }
     }
@@ -1027,6 +1097,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: Some("claude".into()),
             status: crate::api::schema::AgentStatus::Idle,
+            origin: None,
             state_changed_at_ms: None,
         };
 
@@ -1043,6 +1114,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: None,
             status: crate::api::schema::AgentStatus::Idle,
+            origin: None,
             state_changed_at_ms: None,
         };
 
@@ -1114,6 +1186,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: None,
             status: crate::api::schema::AgentStatus::Idle,
+            origin: None,
             state_changed_at_ms: None,
         };
 
@@ -1240,6 +1313,73 @@ mod tests {
         // sidebar shows a mirror as.
         assert_eq!(created.pane.workspace_label, "notes");
         assert_eq!(created.pane.agent, None);
+    }
+
+    /// A host that mirrors its own session reports the reflection beside the
+    /// pane it reflects. Both are on that one host, so nothing downstream can
+    /// tell them apart -- the reflection has to go here.
+    #[test]
+    fn a_hosts_reflection_of_its_own_pane_is_dropped_beside_the_real_one() {
+        let labels = std::collections::HashMap::from([
+            ("w1".to_string(), "api".to_string()),
+            ("w9".to_string(), "api".to_string()),
+        ]);
+        let line = concat!(
+            r#"{"id":"x","result":{"type":"pane_list","panes":[{"#,
+            r#""agent":"claude","agent_status":"idle","focused":false,"#,
+            r#""pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","#,
+            r#""terminal_id":"term-real","workspace_id":"w1"},{"#,
+            // The same pane, mirrored by this host from its own session.
+            r#""agent":"claude","agent_status":"idle","focused":false,"#,
+            r#""pane_id":"w9:p1","revision":0,"tab_id":"w9:t1","#,
+            r#""mirror_origin":{"target":"local","workspace_id":"w1","#,
+            r#""terminal_id":"term-real"},"#,
+            r#""terminal_id":"term-reflection","workspace_id":"w9"}]}}"#,
+        );
+
+        let (mirrored, _, _) = parse_mirror_panes(line, &labels, false).expect("parse");
+
+        assert_eq!(
+            mirrored.iter().map(|p| &p.terminal_id).collect::<Vec<_>>(),
+            ["term-real"]
+        );
+    }
+
+    /// A reflection of a host we cannot see ourselves is still worth having:
+    /// dropping it would lose that agent entirely rather than de-duplicate it.
+    #[test]
+    fn a_reflection_of_another_host_survives_discovery() {
+        let labels = std::collections::HashMap::from([("w2".to_string(), "api".to_string())]);
+        let line = concat!(
+            r#"{"id":"x","result":{"type":"pane_list","panes":[{"#,
+            r#""agent":"claude","agent_status":"idle","focused":false,"#,
+            r#""pane_id":"w2:p1","revision":0,"tab_id":"w2:t1","#,
+            r#""mirror_origin":{"target":"ryielle@alleria","workspace_id":"wA","#,
+            r#""terminal_id":"term-far"},"#,
+            r#""terminal_id":"term-hop","workspace_id":"w2"}]}}"#,
+        );
+
+        let (mirrored, _, _) = parse_mirror_panes(line, &labels, false).expect("parse");
+
+        assert_eq!(mirrored.len(), 1);
+        assert_eq!(
+            mirrored[0].origin.as_ref().map(|o| o.terminal_id.as_str()),
+            Some("term-far")
+        );
+    }
+
+    /// One machine, two spellings. Neither is more correct, so the login name
+    /// cannot be part of deciding which machine a target names.
+    #[test]
+    fn host_key_ignores_the_login_name_and_case() {
+        assert_eq!(
+            MirrorOrigin::host_key("ryielle@alleria"),
+            MirrorOrigin::host_key("Alleria")
+        );
+        assert_ne!(
+            MirrorOrigin::host_key("sera"),
+            MirrorOrigin::host_key("valkyrie")
+        );
     }
 
     /// The panes neither the agent rule nor the one-per-space rule picks are

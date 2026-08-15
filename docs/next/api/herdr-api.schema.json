@@ -724,6 +724,28 @@
           ],
           "type": "string"
         },
+        "MirrorOriginInfo": {
+          "description": "The pane a mirror stands for, as its own host names it.",
+          "properties": {
+            "target": {
+              "description": "The ssh target the mirroring host was configured with, so spelled as\nthat host writes it: `sera`, or `ryielle@alleria`, or `local`.",
+              "type": "string"
+            },
+            "terminal_id": {
+              "description": "The terminal on the origin host. This is the identity that survives\nbeing mirrored, so it is what two hosts can agree a pane is.",
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "workspace_id",
+            "terminal_id"
+          ],
+          "type": "object"
+        },
         "PaneInfo": {
           "properties": {
             "agent": {
@@ -791,6 +813,17 @@
                 "string",
                 "null"
               ]
+            },
+            "mirror_origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/MirrorOriginInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set when this pane is itself a mirror of a pane on another host, naming\nthe pane it stands for. A host mirroring this one uses it to tell a real\npane from a reflection, so mirroring both ends of a chain shows each\nagent once instead of twice. Absent on ordinary panes, and on any build\nthat does not know about mirrors."
             },
             "pane_id": {
               "type": "string"
@@ -7194,6 +7227,28 @@
             }
           ]
         },
+        "MirrorOriginInfo": {
+          "description": "The pane a mirror stands for, as its own host names it.",
+          "properties": {
+            "target": {
+              "description": "The ssh target the mirroring host was configured with, so spelled as\nthat host writes it: `sera`, or `ryielle@alleria`, or `local`.",
+              "type": "string"
+            },
+            "terminal_id": {
+              "description": "The terminal on the origin host. This is the identity that survives\nbeing mirrored, so it is what two hosts can agree a pane is.",
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "workspace_id",
+            "terminal_id"
+          ],
+          "type": "object"
+        },
         "NotificationShowReason": {
           "enum": [
             "shown",
@@ -7352,6 +7407,17 @@
                 "string",
                 "null"
               ]
+            },
+            "mirror_origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/MirrorOriginInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set when this pane is itself a mirror of a pane on another host, naming\nthe pane it stands for. A host mirroring this one uses it to tell a real\npane from a reflection, so mirroring both ends of a chain shows each\nagent once instead of twice. Absent on ordinary panes, and on any build\nthat does not know about mirrors."
             },
             "pane_id": {
               "type": "string"

@@ -540,6 +540,22 @@ impl App {
                 .focused_pane_id()
                 .is_some_and(|focused| focused == pane_id);
         let presentation = terminal.effective_presentation();
+        // Only the pane the attach actually runs in is a reflection. A split
+        // someone made inside a mirror is a local shell like any other, and
+        // claiming otherwise would hide it from a host mirroring this one.
+        let mirror_origin = ws
+            .remote_mirror
+            .as_ref()
+            .filter(|_| ws.tabs.first().is_some_and(|tab| tab.root_pane == pane_id))
+            .and_then(|mirror| {
+                let (workspace_id, terminal_id) =
+                    crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)?;
+                Some(crate::api::schema::MirrorOriginInfo {
+                    target: mirror.target.clone(),
+                    workspace_id: workspace_id.to_string(),
+                    terminal_id: terminal_id.to_string(),
+                })
+            });
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             terminal_id: terminal.id.to_string(),
@@ -564,6 +580,7 @@ impl App {
             agent_session: terminal_agent_session_info(terminal),
             scroll,
             input,
+            mirror_origin,
             agent_state_changed_at_ms: terminal.agent_state_changed_at_ms,
             revision: terminal.revision,
         })
