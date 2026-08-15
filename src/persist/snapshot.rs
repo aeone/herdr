@@ -26,12 +26,12 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
-    /// Spaces marked to stand out, by workspace id.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
-    pub highlighted_workspaces: std::collections::HashSet<String>,
-    /// Agents marked to stand out, by pane id.
-    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
-    pub highlighted_panes: std::collections::HashSet<u32>,
+    /// Marks on spaces, by workspace id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub space_marks: HashMap<String, crate::app::MarkLevel>,
+    /// Marks on agents, by pane id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub agent_marks: HashMap<u32, crate::app::MarkLevel>,
     /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
     #[serde(default)]
     pub keep_offline_mirrors: bool,
@@ -48,8 +48,8 @@ pub struct SessionSnapshot {
 /// which already takes plenty.
 #[derive(Debug, Clone, Default)]
 pub struct SessionMarks {
-    pub highlighted_workspaces: std::collections::HashSet<String>,
-    pub highlighted_panes: std::collections::HashSet<u32>,
+    pub space_marks: HashMap<String, crate::app::MarkLevel>,
+    pub agent_marks: HashMap<u32, crate::app::MarkLevel>,
     pub keep_offline_mirrors: bool,
     pub hide_spaces_in_agents: Option<bool>,
 }
@@ -226,6 +226,12 @@ struct RawSessionSnapshot {
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
     #[serde(default)]
+    space_marks: HashMap<String, crate::app::MarkLevel>,
+    #[serde(default)]
+    agent_marks: HashMap<u32, crate::app::MarkLevel>,
+    /// Marks as they were before levels existed: a plain set, all one colour.
+    /// Read once so an existing session keeps its marks, never written back.
+    #[serde(default)]
     highlighted_workspaces: std::collections::HashSet<String>,
     #[serde(default)]
     highlighted_panes: std::collections::HashSet<u32>,
@@ -248,11 +254,26 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
-        highlighted_workspaces: raw.highlighted_workspaces,
-        highlighted_panes: raw.highlighted_panes,
+        // A pre-levels mark meant "this is the thing I care about", which is
+        // what the top level means now, so they land there. Any level already
+        // recorded for the same key wins — the levelled field is the newer one.
+        space_marks: merge_legacy_marks(raw.space_marks, raw.highlighted_workspaces),
+        agent_marks: merge_legacy_marks(raw.agent_marks, raw.highlighted_panes),
         keep_offline_mirrors: raw.keep_offline_mirrors,
         hide_spaces_in_agents: raw.hide_spaces_in_agents,
     })
+}
+
+/// Folds pre-levels marks into the levelled map at the top level, without
+/// disturbing a key the levelled map already carries.
+fn merge_legacy_marks<K: std::hash::Hash + Eq>(
+    mut marks: HashMap<K, crate::app::MarkLevel>,
+    legacy: std::collections::HashSet<K>,
+) -> HashMap<K, crate::app::MarkLevel> {
+    for key in legacy {
+        marks.entry(key).or_insert(crate::app::MarkLevel::High);
+    }
+    marks
 }
 
 fn migrate_workspace(raw: serde_json::Value) -> Result<WorkspaceSnapshot, String> {
@@ -338,8 +359,8 @@ pub fn capture(
         sidebar_width: Some(sidebar_width),
         sidebar_section_split: Some(sidebar_section_split),
         collapsed_space_keys,
-        highlighted_workspaces: marks.highlighted_workspaces,
-        highlighted_panes: marks.highlighted_panes,
+        space_marks: marks.space_marks,
+        agent_marks: marks.agent_marks,
         keep_offline_mirrors: marks.keep_offline_mirrors,
         hide_spaces_in_agents: marks.hide_spaces_in_agents,
     }
@@ -578,8 +599,86 @@ pub(super) fn snapshot_file_version(content: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use crate::api::schema::AgentStatus;
-    use crate::app::{pane_agent_status, pane_state_and_seen};
+    use crate::app::{pane_agent_status, pane_state_and_seen, MarkLevel};
     use crate::detect::AgentState;
+
+    /// Marks written before levels existed were a plain set, all one colour —
+    /// the colour the top level now has. They have to survive the upgrade, or
+    /// a running session silently loses every mark on the next restart.
+    #[test]
+    fn pre_levels_marks_restore_at_the_top_level() {
+        let content = r#"{
+            "version": 3,
+            "workspaces": [],
+            "active": null,
+            "selected": 0,
+            "highlighted_workspaces": ["ws-a"],
+            "highlighted_panes": [7]
+        }"#;
+
+        let snapshot = super::parse_snapshot(content).expect("snapshot parses");
+
+        assert_eq!(snapshot.space_marks.get("ws-a"), Some(&MarkLevel::High));
+        assert_eq!(snapshot.agent_marks.get(&7), Some(&MarkLevel::High));
+    }
+
+    /// Written by a build that has both fields, the levelled one is the one
+    /// the user last set, so it must not be overwritten by the legacy set.
+    #[test]
+    fn a_recorded_level_wins_over_the_legacy_set_for_the_same_key() {
+        let content = r#"{
+            "version": 3,
+            "workspaces": [],
+            "active": null,
+            "selected": 0,
+            "space_marks": {"ws-a": 0},
+            "highlighted_workspaces": ["ws-a", "ws-b"]
+        }"#;
+
+        let snapshot = super::parse_snapshot(content).expect("snapshot parses");
+
+        assert_eq!(
+            snapshot.space_marks.get("ws-a"),
+            Some(&MarkLevel::Background)
+        );
+        assert_eq!(snapshot.space_marks.get("ws-b"), Some(&MarkLevel::High));
+    }
+
+    /// Marks round-trip as their priority number, and the legacy set is never
+    /// written back — otherwise every level would resurrect as the top one.
+    #[test]
+    fn marks_round_trip_as_numbers_without_rewriting_the_legacy_set() {
+        let mut snapshot = empty_snapshot();
+        snapshot
+            .space_marks
+            .insert("ws-a".to_string(), MarkLevel::Low);
+        snapshot.agent_marks.insert(7, MarkLevel::Background);
+
+        let json = serde_json::to_string(&snapshot).expect("snapshot serialises");
+        assert!(json.contains(r#""space_marks":{"ws-a":1}"#), "{json}");
+        assert!(json.contains(r#""agent_marks":{"7":0}"#), "{json}");
+        assert!(!json.contains("highlighted_workspaces"), "{json}");
+
+        let restored = super::parse_snapshot(&json).expect("snapshot parses");
+        assert_eq!(restored.space_marks.get("ws-a"), Some(&MarkLevel::Low));
+        assert_eq!(restored.agent_marks.get(&7), Some(&MarkLevel::Background));
+    }
+
+    fn empty_snapshot() -> super::SessionSnapshot {
+        super::SessionSnapshot {
+            version: super::SNAPSHOT_VERSION,
+            workspaces: vec![],
+            active: None,
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            space_marks: Default::default(),
+            agent_marks: Default::default(),
+            keep_offline_mirrors: false,
+            hide_spaces_in_agents: None,
+        }
+    }
 
     /// A restart re-detects from pane output, and an idle or blocked agent is
     /// producing none — so whatever the snapshot says is what shows until the
@@ -685,8 +784,8 @@ mod tests {
             state.sidebar_section_split,
             state.collapsed_space_keys.clone(),
             SessionMarks {
-                highlighted_workspaces: state.highlighted_workspaces.clone(),
-                highlighted_panes: state.highlighted_panes.clone(),
+                space_marks: state.space_marks.clone(),
+                agent_marks: state.agent_marks.clone(),
                 keep_offline_mirrors: state.keep_offline_mirrors,
                 hide_spaces_in_agents: state.hide_spaces_in_agents,
             },
@@ -754,8 +853,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
-            highlighted_workspaces: Default::default(),
-            highlighted_panes: Default::default(),
+            space_marks: Default::default(),
+            agent_marks: Default::default(),
             keep_offline_mirrors: false,
             hide_spaces_in_agents: None,
         };
@@ -850,8 +949,8 @@ mod tests {
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
             version: SNAPSHOT_VERSION,
-            highlighted_workspaces: Default::default(),
-            highlighted_panes: Default::default(),
+            space_marks: Default::default(),
+            agent_marks: Default::default(),
             keep_offline_mirrors: false,
             hide_spaces_in_agents: None,
         };
@@ -1485,8 +1584,8 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
-            highlighted_workspaces: Default::default(),
-            highlighted_panes: Default::default(),
+            space_marks: Default::default(),
+            agent_marks: Default::default(),
             keep_offline_mirrors: false,
             hide_spaces_in_agents: None,
         };

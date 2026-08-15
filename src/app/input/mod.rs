@@ -767,8 +767,8 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
         state.sidebar_section_split,
         state.collapsed_space_keys.clone(),
         crate::persist::SessionMarks {
-            highlighted_workspaces: state.highlighted_workspaces.clone(),
-            highlighted_panes: state.highlighted_panes.clone(),
+            space_marks: state.space_marks.clone(),
+            agent_marks: state.agent_marks.clone(),
             keep_offline_mirrors: state.keep_offline_mirrors,
             hide_spaces_in_agents: state.hide_spaces_in_agents,
         },

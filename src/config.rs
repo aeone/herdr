@@ -29,7 +29,7 @@ pub use self::{
         SpaceSidebarToken, SpacesSidebarConfig,
     },
     sound::SoundConfig,
-    theme::{parse_color, CustomThemeColors, ThemeConfig},
+    theme::{parse_color, resolve_mark_colors, CustomThemeColors, ThemeConfig},
 };
 
 pub(crate) use self::io::upsert_top_level_bool;

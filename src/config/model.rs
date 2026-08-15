@@ -820,7 +820,12 @@ pub struct UiConfig {
     /// Size the Space and Agent sections from how much content each has,
     /// instead of the fixed divider position. Default: false.
     pub sidebar_section_split_auto: bool,
-    /// Colour for spaces and agents the user has marked. Defaults to pink.
+    /// Colour per mark level for marked spaces and agents, quietest first:
+    /// `[background, low, medium, high]`. An empty entry keeps the default for
+    /// that level — grey from the theme, then blue, purple, pink.
+    pub sidebar_highlight_colors: Vec<String>,
+    /// Older single mark colour, kept working as the colour of the highest
+    /// level. `sidebar_highlight_colors` wins where both are set.
     pub sidebar_highlight_color: String,
     /// Collapsed sidebar presentation. Default: compact.
     pub sidebar_collapsed_mode: SidebarCollapsedModeConfig,
@@ -1096,7 +1101,10 @@ impl Default for UiConfig {
             sidebar_max_width: 36,
             sidebar_start_collapsed: false,
             sidebar_section_split_auto: false,
-            sidebar_highlight_color: "#f5c2e7".to_string(),
+            // Both empty: the defaults live behind `resolve_mark_colors`, so an
+            // unset config and an unset entry resolve the same way.
+            sidebar_highlight_colors: Vec::new(),
+            sidebar_highlight_color: String::new(),
             sidebar_collapsed_mode: SidebarCollapsedModeConfig::Compact,
             mobile_width_threshold: DEFAULT_MOBILE_WIDTH_THRESHOLD,
             mouse_capture: true,

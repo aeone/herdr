@@ -95,6 +95,93 @@ use crate::terminal_theme::{HostAppearance, TerminalTheme};
 use crate::workspace::Workspace;
 
 // ---------------------------------------------------------------------------
+// Sidebar marks — the priority the user pins to a space or an agent
+// ---------------------------------------------------------------------------
+
+/// How loudly a marked space or agent reads in the sidebar.
+///
+/// Ordered quietest to loudest, so a space mark and an agent mark on the same
+/// row combine with `max`. `Background` is not the same as unmarked: it is a
+/// decision that something can wait, and so renders quieter than an untouched
+/// row rather than louder.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(from = "u8", into = "u8")]
+pub enum MarkLevel {
+    /// Priority 0 — parked. Grey, and the only level that does not embolden.
+    Background,
+    /// Priority 1. Blue.
+    Low,
+    /// Priority 2. Purple.
+    Medium,
+    /// Priority 3 — what a single press of the mark key gives. Pink.
+    High,
+}
+
+impl MarkLevel {
+    /// Index of this level's colour in `ui.sidebar_highlight_colors`.
+    pub fn slot(self) -> usize {
+        u8::from(self) as usize
+    }
+
+    /// The mark a row moves to when the mark key is pressed, cycling downward:
+    /// `unmarked → High → Medium → Low → Background → unmarked`.
+    ///
+    /// Downward rather than upward so one press still gives the loudest
+    /// colour, which is what a mark meant before levels existed.
+    pub fn cycle_down(current: Option<Self>) -> Option<Self> {
+        match current {
+            None => Some(Self::High),
+            Some(Self::High) => Some(Self::Medium),
+            Some(Self::Medium) => Some(Self::Low),
+            Some(Self::Low) => Some(Self::Background),
+            Some(Self::Background) => None,
+        }
+    }
+}
+
+impl From<u8> for MarkLevel {
+    /// Saturating, so a level written by a newer build degrades to the loudest
+    /// mark instead of failing the whole session restore.
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::Background,
+            1 => Self::Low,
+            2 => Self::Medium,
+            _ => Self::High,
+        }
+    }
+}
+
+impl From<MarkLevel> for u8 {
+    fn from(level: MarkLevel) -> Self {
+        match level {
+            MarkLevel::Background => 0,
+            MarkLevel::Low => 1,
+            MarkLevel::Medium => 2,
+            MarkLevel::High => 3,
+        }
+    }
+}
+
+/// Applies one press of a mark key to a marks map, removing the entry when the
+/// cycle reaches unmarked so the map never fills with dead keys.
+pub(crate) fn cycle_mark_entry<K: std::hash::Hash + Eq>(
+    marks: &mut std::collections::HashMap<K, MarkLevel>,
+    key: K,
+) {
+    match MarkLevel::cycle_down(marks.get(&key).copied()) {
+        Some(level) => {
+            marks.insert(key, level);
+        }
+        None => {
+            marks.remove(&key);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Theme palette — all UI colors in one place, ready for theming
 // ---------------------------------------------------------------------------
 
@@ -1580,13 +1667,13 @@ pub struct AppState {
     /// Remote-space hosts whose last poll/feed failed. Their mirrors render
     /// dimmed and sort to the bottom, since you cannot work with them.
     pub remote_offline_hosts: std::collections::HashSet<String>,
-    /// Spaces the user marked to stand out, by workspace id. Workspace ids are
-    /// stable across a restart, which is why the mark is stored by id rather
-    /// than index.
-    pub highlighted_workspaces: std::collections::HashSet<String>,
-    /// Agents the user marked, by pane id. Pane ids are restored from the
+    /// Marks the user put on spaces, by workspace id. Workspace ids are stable
+    /// across a restart, which is why the mark is stored by id rather than
+    /// index. Absent means unmarked, which is distinct from `Background`.
+    pub space_marks: std::collections::HashMap<String, MarkLevel>,
+    /// Marks the user put on agents, by pane id. Pane ids are restored from the
     /// snapshot rather than reallocated, so these survive a restart too.
-    pub highlighted_panes: std::collections::HashSet<u32>,
+    pub agent_marks: std::collections::HashMap<u32, MarkLevel>,
     /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
     pub keep_offline_mirrors: bool,
     /// Keys typed so far in jump mode, empty on entry. Only meaningful while
@@ -1653,7 +1740,10 @@ pub struct AppState {
     pub sidebar_section_split: f32,
     /// Size sections from content instead of the stored divider position.
     pub sidebar_section_split_auto: bool,
-    pub sidebar_highlight_color: ratatui::style::Color,
+    /// Colour per mark level, indexed by `MarkLevel::slot`. `None` in a slot
+    /// leaves that level to the palette, which is how `Background` follows the
+    /// same grey as the agent and status text across light and dark themes.
+    pub sidebar_mark_colors: [Option<ratatui::style::Color>; 4],
     /// Content-derived ratio for this frame, recomputed by `compute_view`.
     pub sidebar_auto_split_ratio: Option<f32>,
     pub agent_panel_sort: AgentPanelSort,
@@ -1866,6 +1956,24 @@ impl AppState {
             .unwrap_or(self.sidebar_spaces.hide_when_in_agents)
     }
 
+    /// The mark on this space, if any.
+    pub fn space_mark(&self, ws_idx: usize) -> Option<MarkLevel> {
+        let ws = self.workspaces.get(ws_idx)?;
+        self.space_marks.get(&ws.id).copied()
+    }
+
+    /// The mark on the agent in this pane, if any.
+    pub fn agent_mark(&self, pane_id: PaneId) -> Option<MarkLevel> {
+        self.agent_marks.get(&pane_id.raw()).copied()
+    }
+
+    /// Colour for a mark at this level. A slot left unset by config falls back
+    /// to the palette's own grey, which is what `Background` uses so it reads
+    /// at the same weight as the agent and status text.
+    pub fn mark_color(&self, level: MarkLevel) -> Color {
+        self.sidebar_mark_colors[level.slot()].unwrap_or(self.palette.overlay0)
+    }
+
     pub fn estimate_pane_size(&self) -> (u16, u16) {
         if let Some(info) = self.view.pane_infos.first() {
             (info.rect.height, info.rect.width)
@@ -2071,7 +2179,7 @@ impl AppState {
             sidebar_collapsed_mode: crate::config::SidebarCollapsedModeConfig::Compact,
             sidebar_section_split: 0.5,
             sidebar_section_split_auto: false,
-            sidebar_highlight_color: ratatui::style::Color::Rgb(245, 194, 231),
+            sidebar_mark_colors: crate::config::resolve_mark_colors(&[], ""),
             sidebar_auto_split_ratio: None,
             agent_panel_sort: AgentPanelSort::Spaces,
             agent_view_override: None,
@@ -2502,6 +2610,51 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    /// One press still gives the loudest mark, as it did before levels; the
+    /// rest of the cycle steps down and then off, and the entry leaves the map
+    /// entirely at the end rather than lingering as a dead key.
+    #[test]
+    fn the_mark_key_cycles_down_from_the_loudest_level_and_then_off() {
+        let mut marks = std::collections::HashMap::new();
+
+        let expected = [
+            MarkLevel::High,
+            MarkLevel::Medium,
+            MarkLevel::Low,
+            MarkLevel::Background,
+        ];
+        for level in expected {
+            cycle_mark_entry(&mut marks, "space");
+            assert_eq!(marks.get("space"), Some(&level));
+        }
+
+        cycle_mark_entry(&mut marks, "space");
+        assert!(marks.is_empty());
+    }
+
+    /// Levels are ordered so combining a space's mark with an agent's is a
+    /// `max`, and so the serialised form is the priority number it looks like.
+    #[test]
+    fn levels_order_and_serialise_as_their_priority_number() {
+        assert!(MarkLevel::Background < MarkLevel::Low);
+        assert!(MarkLevel::Low < MarkLevel::Medium);
+        assert!(MarkLevel::Medium < MarkLevel::High);
+
+        for (level, number) in [
+            (MarkLevel::Background, 0u8),
+            (MarkLevel::Low, 1),
+            (MarkLevel::Medium, 2),
+            (MarkLevel::High, 3),
+        ] {
+            assert_eq!(u8::from(level), number);
+            assert_eq!(MarkLevel::from(number), level);
+            assert_eq!(level.slot(), number as usize);
+        }
+
+        // A level from a newer build saturates rather than failing a restore.
+        assert_eq!(MarkLevel::from(9), MarkLevel::High);
+    }
 
     #[test]
     fn agent_terminal_keeps_final_child_cursor_exposed() {

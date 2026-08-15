@@ -62,7 +62,8 @@ use tracing::info;
 use crate::config::Config;
 use crate::events::AppEvent;
 
-pub use state::{AppState, Mode, ToastKind, ViewState};
+pub(crate) use state::cycle_mark_entry;
+pub use state::{AppState, MarkLevel, Mode, ToastKind, ViewState};
 
 pub(crate) fn load_plugin_manifest(
     path: &str,
@@ -386,22 +387,20 @@ fn resolve_effective_theme(
 }
 
 impl App {
-    /// Marks or unmarks a space so it stands out in the sidebar.
+    /// Steps a space's mark down one level, off the end back to unmarked.
     ///
     /// Keyed by workspace id rather than index: indices shift as spaces are
     /// created and closed, and the mark is meant to outlive that.
-    pub(crate) fn toggle_space_highlight(&mut self, ws_idx: usize) {
+    pub(crate) fn cycle_space_mark(&mut self, ws_idx: usize) {
         let Some(id) = self.state.workspaces.get(ws_idx).map(|ws| ws.id.clone()) else {
             return;
         };
-        if !self.state.highlighted_workspaces.remove(&id) {
-            self.state.highlighted_workspaces.insert(id);
-        }
+        cycle_mark_entry(&mut self.state.space_marks, id);
         self.state.mark_session_dirty();
     }
 
-    /// Marks or unmarks the agent in the focused pane.
-    pub(crate) fn toggle_focused_agent_highlight(&mut self) {
+    /// Steps the focused pane's agent mark down one level.
+    pub(crate) fn cycle_focused_agent_mark(&mut self) {
         let Some(ws_idx) = self.state.active else {
             return;
         };
@@ -413,9 +412,7 @@ impl App {
         else {
             return;
         };
-        if !self.state.highlighted_panes.remove(&pane_id.raw()) {
-            self.state.highlighted_panes.insert(pane_id.raw());
-        }
+        cycle_mark_entry(&mut self.state.agent_marks, pane_id.raw());
         self.state.mark_session_dirty();
     }
 
@@ -682,7 +679,10 @@ impl App {
             sidebar_collapsed_mode: config.ui.sidebar_collapsed_mode,
             sidebar_section_split,
             sidebar_section_split_auto: config.ui.sidebar_section_split_auto,
-            sidebar_highlight_color: crate::config::parse_color(&config.ui.sidebar_highlight_color),
+            sidebar_mark_colors: crate::config::resolve_mark_colors(
+                &config.ui.sidebar_highlight_colors,
+                &config.ui.sidebar_highlight_color,
+            ),
             sidebar_auto_split_ratio: None,
             agent_panel_sort,
             agent_view_override: None,
@@ -907,8 +907,8 @@ impl App {
             app.state.sidebar_section_split = split;
         }
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
-        app.state.highlighted_workspaces = snapshot.highlighted_workspaces.clone();
-        app.state.highlighted_panes = snapshot.highlighted_panes.clone();
+        app.state.space_marks = snapshot.space_marks.clone();
+        app.state.agent_marks = snapshot.agent_marks.clone();
         app.state.keep_offline_mirrors = snapshot.keep_offline_mirrors;
         app.state.hide_spaces_in_agents = snapshot.hide_spaces_in_agents;
         app.state.mode = if app.state.active.is_some() {
@@ -1525,8 +1525,10 @@ impl App {
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.sidebar_section_split_auto = config.ui.sidebar_section_split_auto;
-                self.state.sidebar_highlight_color =
-                    crate::config::parse_color(&config.ui.sidebar_highlight_color);
+                self.state.sidebar_mark_colors = crate::config::resolve_mark_colors(
+                    &config.ui.sidebar_highlight_colors,
+                    &config.ui.sidebar_highlight_color,
+                );
                 #[cfg(unix)]
                 {
                     self.remote_spaces = config.remote.spaces.clone();

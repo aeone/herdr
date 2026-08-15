@@ -260,6 +260,18 @@
           "description": "Close the selected workspace."
         },
         {
+          "key": "keys.toggle_space_highlight",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Step the selected space's mark down a level: pink, purple, blue, a parked grey, then off. Marks are saved with the session and coloured by `ui.sidebar_highlight_colors`. Unset by default."
+        },
+        {
+          "key": "keys.toggle_agent_highlight",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Step the focused agent's mark down a level, the same way `toggle_space_highlight` does for a space. A mark reads the same from either sidebar list. Unset by default."
+        },
+        {
           "key": "keys.workspace_picker",
           "type": "keybinding",
           "default": "\"prefix+w\"",
@@ -570,6 +582,18 @@
           "type": "boolean",
           "default": "false",
           "description": "Size the Space and Agent sidebar sections from how much content each has instead of the fixed divider position, so a short list does not hold back a long one."
+        },
+        {
+          "key": "ui.sidebar_highlight_colors",
+          "type": "array of strings",
+          "default": "[\"\", \"#89b4fa\", \"#cba6f7\", \"#f5c2e7\"]",
+          "description": "Colour per mark level for spaces and agents marked with `toggle_space_highlight` or `toggle_agent_highlight`, quietest first: `[background, low, medium, high]`. An empty entry keeps the default for that level — the theme's own grey for background, then blue, purple, pink."
+        },
+        {
+          "key": "ui.sidebar_highlight_color",
+          "type": "string",
+          "default": "unset",
+          "description": "Older single mark colour, from before marks had levels. Still sets the colour of the highest level; `ui.sidebar_highlight_colors` wins where both are set."
         },
         {
           "key": "ui.sidebar_start_collapsed",

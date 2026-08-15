@@ -13,7 +13,7 @@ use super::scrollbar::{render_scrollbar, should_show_scrollbar};
 use super::status::{agent_icon, state_dot, state_label, state_label_color};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{AgentPanelSort, Palette};
-use crate::app::{AppState, Mode};
+use crate::app::{AppState, MarkLevel, Mode};
 use crate::detect::AgentState;
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -555,21 +555,35 @@ fn workspace_list_entries_inner(app: &AppState, force_expanded: bool) -> Vec<Wor
     entries
 }
 
-/// Whether the user has marked this space or the agent in this pane.
+/// The mark on this space or on the agent in this pane, whichever is louder.
 ///
 /// A marked agent also reads as marked in the Space list, and vice versa: the
-/// mark means "this is the thing I care about", and splitting that by surface
-/// would just make it easy to lose.
-pub(crate) fn entry_highlighted(
+/// mark says how much this thing matters, and splitting that by surface would
+/// just make it easy to lose. Taking the max keeps that true once the mark has
+/// levels — a space parked at `Background` still shows an urgent agent inside
+/// it at its own level.
+pub(crate) fn entry_mark(
     app: &AppState,
     ws_idx: usize,
     pane_id: Option<crate::layout::PaneId>,
-) -> bool {
-    let space_marked = app
-        .workspaces
-        .get(ws_idx)
-        .is_some_and(|ws| app.highlighted_workspaces.contains(&ws.id));
-    space_marked || pane_id.is_some_and(|pane_id| app.highlighted_panes.contains(&pane_id.raw()))
+) -> Option<MarkLevel> {
+    let space = app.space_mark(ws_idx);
+    let agent = pane_id.and_then(|pane_id| app.agent_mark(pane_id));
+    space.max(agent)
+}
+
+/// Name style for a row carrying `level`.
+///
+/// Every level but `Background` emboldens, as the single mark colour did.
+/// `Background` is the one that means "not now", so it dims instead: bold grey
+/// would shout the opposite of what the level is for.
+fn mark_name_style(app: &AppState, level: MarkLevel) -> Style {
+    let style = Style::default().fg(app.mark_color(level));
+    if level == MarkLevel::Background {
+        style.add_modifier(Modifier::DIM)
+    } else {
+        style.add_modifier(Modifier::BOLD)
+    }
 }
 
 /// Whether this workspace mirrors a host whose last poll/feed failed.
@@ -1515,10 +1529,8 @@ fn render_workspace_list(
             }
         }
 
-        let name_style = if entry_highlighted(app, card.ws_idx, None) {
-            Style::default()
-                .fg(app.sidebar_highlight_color)
-                .add_modifier(Modifier::BOLD)
+        let name_style = if let Some(level) = entry_mark(app, card.ws_idx, None) {
+            mark_name_style(app, level)
         } else if selected || is_active || is_dragged {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
@@ -1776,11 +1788,8 @@ fn render_agent_detail(
         } else {
             Style::default()
         };
-        let highlighted = entry_highlighted(app, detail.ws_idx, Some(detail.pane_id));
-        let name_style = if highlighted {
-            Style::default()
-                .fg(app.sidebar_highlight_color)
-                .add_modifier(Modifier::BOLD)
+        let name_style = if let Some(level) = entry_mark(app, detail.ws_idx, Some(detail.pane_id)) {
+            mark_name_style(app, level)
         } else if is_active {
             Style::default().fg(p.text).add_modifier(Modifier::BOLD)
         } else {
@@ -2708,14 +2717,49 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let pane = app.workspaces[1].tabs[0].root_pane;
         let first_id = app.workspaces[0].id.clone();
 
-        assert!(!entry_highlighted(&app, 0, None));
+        assert_eq!(entry_mark(&app, 0, None), None);
 
-        app.highlighted_workspaces.insert(first_id);
-        assert!(entry_highlighted(&app, 0, None));
-        assert!(!entry_highlighted(&app, 1, Some(pane)));
+        app.space_marks.insert(first_id, MarkLevel::High);
+        assert_eq!(entry_mark(&app, 0, None), Some(MarkLevel::High));
+        assert_eq!(entry_mark(&app, 1, Some(pane)), None);
 
-        app.highlighted_panes.insert(pane.raw());
-        assert!(entry_highlighted(&app, 1, Some(pane)));
+        app.agent_marks.insert(pane.raw(), MarkLevel::Low);
+        assert_eq!(entry_mark(&app, 1, Some(pane)), Some(MarkLevel::Low));
+    }
+
+    /// A space parked at the quietest level must not drag down an urgent agent
+    /// sitting inside it: the louder of the two marks is what the row shows.
+    #[test]
+    fn the_louder_of_a_space_and_agent_mark_wins() {
+        let mut app = AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("one")];
+        app.ensure_test_terminals();
+        let pane = app.workspaces[0].tabs[0].root_pane;
+        let id = app.workspaces[0].id.clone();
+
+        app.space_marks.insert(id, MarkLevel::Background);
+        app.agent_marks.insert(pane.raw(), MarkLevel::High);
+
+        assert_eq!(entry_mark(&app, 0, Some(pane)), Some(MarkLevel::High));
+        assert_eq!(entry_mark(&app, 0, None), Some(MarkLevel::Background));
+    }
+
+    /// The quietest level is the one that means "not now", so it must not carry
+    /// the bold that every louder level does.
+    #[test]
+    fn only_the_background_level_dims_instead_of_bolding() {
+        let app = AppState::test_new();
+
+        let background = mark_name_style(&app, MarkLevel::Background);
+        assert!(background.add_modifier.contains(Modifier::DIM));
+        assert!(!background.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(background.fg, Some(app.palette.overlay0));
+
+        for level in [MarkLevel::Low, MarkLevel::Medium, MarkLevel::High] {
+            let style = mark_name_style(&app, level);
+            assert!(style.add_modifier.contains(Modifier::BOLD), "{level:?}");
+            assert!(!style.add_modifier.contains(Modifier::DIM), "{level:?}");
+        }
     }
 
     /// A mirror kept after its connection died greys straight away, without

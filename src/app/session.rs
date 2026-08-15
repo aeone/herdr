@@ -52,8 +52,8 @@ impl App {
                 self.state.sidebar_section_split,
                 self.state.collapsed_space_keys.clone(),
                 crate::persist::SessionMarks {
-                    highlighted_workspaces: self.state.highlighted_workspaces.clone(),
-                    highlighted_panes: self.state.highlighted_panes.clone(),
+                    space_marks: self.state.space_marks.clone(),
+                    agent_marks: self.state.agent_marks.clone(),
                     keep_offline_mirrors: self.state.keep_offline_mirrors,
                     hide_spaces_in_agents: self.state.hide_spaces_in_agents,
                 },

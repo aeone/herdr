@@ -1362,8 +1362,8 @@ mod tests {
             app.state.sidebar_section_split,
             app.state.collapsed_space_keys.clone(),
             crate::persist::SessionMarks {
-                highlighted_workspaces: app.state.highlighted_workspaces.clone(),
-                highlighted_panes: app.state.highlighted_panes.clone(),
+                space_marks: app.state.space_marks.clone(),
+                agent_marks: app.state.agent_marks.clone(),
                 keep_offline_mirrors: app.state.keep_offline_mirrors,
                 hide_spaces_in_agents: app.state.hide_spaces_in_agents,
             },

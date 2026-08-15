@@ -188,11 +188,11 @@ impl App {
             }
             NavigateAction::ToggleSpaceHighlight => {
                 if let Some(ws_idx) = workspace_action_target(&self.state, context) {
-                    self.toggle_space_highlight(ws_idx);
+                    self.cycle_space_mark(ws_idx);
                 }
             }
             NavigateAction::ToggleAgentHighlight => {
-                self.toggle_focused_agent_highlight();
+                self.cycle_focused_agent_mark();
             }
             NavigateAction::Jump => {
                 self.open_jump();
@@ -1575,14 +1575,12 @@ pub(super) fn execute_navigate_action_in_context(
             state.request_new_workspace = true;
             leave_navigate_mode(state);
         }
-        // State-only variants of the highlight toggles, for the test harness
-        // that drives actions without an App.
+        // State-only variants of the mark cycles, for the test harness that
+        // drives actions without an App.
         NavigateAction::ToggleSpaceHighlight => {
             if let Some(ws_idx) = workspace_action_target(state, context) {
                 let id = state.workspaces[ws_idx].id.clone();
-                if !state.highlighted_workspaces.remove(&id) {
-                    state.highlighted_workspaces.insert(id);
-                }
+                crate::app::cycle_mark_entry(&mut state.space_marks, id);
             }
         }
         NavigateAction::ToggleAgentHighlight => {
@@ -1591,9 +1589,7 @@ pub(super) fn execute_navigate_action_in_context(
                     .layout
                     .focused()
                     .raw();
-                if !state.highlighted_panes.remove(&pane_id) {
-                    state.highlighted_panes.insert(pane_id);
-                }
+                crate::app::cycle_mark_entry(&mut state.agent_marks, pane_id);
             }
         }
         NavigateAction::Jump => {

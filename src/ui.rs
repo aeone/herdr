@@ -1429,8 +1429,8 @@ mod tests {
             labels,
             vec![
                 "jump: label every space and agent, press one",
-                "mark space",
-                "mark agent",
+                "mark space: pink, purple, blue, grey, off",
+                "mark agent: pink, purple, blue, grey, off",
                 "spaces listed under agents: hide or show",
                 "offline mirrors: keep or hide",
             ]

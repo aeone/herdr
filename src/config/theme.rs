@@ -48,6 +48,52 @@ pub struct CustomThemeColors {
     pub peach: Option<String>,
 }
 
+/// Default colour for each sidebar mark level, indexed by level (0 = parked).
+///
+/// Level 0 is deliberately left to the theme: a fixed grey would be wrong on
+/// the light palettes, and the point of that level is to read at the same
+/// weight as the agent and status text. Levels 1-3 stay fixed, as the single
+/// mark colour did before levels existed.
+fn default_mark_colors() -> [Option<ratatui::style::Color>; 4] {
+    use ratatui::style::Color;
+    [
+        None,
+        Some(Color::Rgb(0x89, 0xb4, 0xfa)), // blue
+        Some(Color::Rgb(0xcb, 0xa6, 0xf7)), // purple
+        Some(Color::Rgb(0xf5, 0xc2, 0xe7)), // pink
+    ]
+}
+
+/// Resolve `ui.sidebar_highlight_colors` over the defaults. A missing or empty
+/// entry keeps the default for that level, so a config can set just one.
+///
+/// `legacy_high` is the older scalar `ui.sidebar_highlight_color`, which named
+/// the only colour there was; it now sets the top level and the array wins
+/// over it.
+pub fn resolve_mark_colors(
+    configured: &[String],
+    legacy_high: &str,
+) -> [Option<ratatui::style::Color>; 4] {
+    let mut colors = default_mark_colors();
+    if !legacy_high.trim().is_empty() {
+        colors[3] = Some(parse_color(legacy_high));
+    }
+    for (slot, value) in configured.iter().enumerate().take(colors.len()) {
+        if value.trim().is_empty() {
+            continue;
+        }
+        colors[slot] = Some(parse_color(value));
+    }
+    if configured.len() > colors.len() {
+        warn!(
+            "ui.sidebar_highlight_colors has {} entries; only the first {} are used",
+            configured.len(),
+            colors.len()
+        );
+    }
+    colors
+}
+
 /// Parse a color string into a ratatui Color.
 /// Supports: hex (#rrggbb, #rgb), named colors, rgb(r,g,b), and reset aliases.
 pub fn parse_color(s: &str) -> ratatui::style::Color {
@@ -129,6 +175,45 @@ name = "dracula"
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.theme.name.as_deref(), Some("dracula"));
+    }
+
+    /// The parked level stays unset so the palette supplies it, and a config
+    /// that names only one level keeps the defaults for the others.
+    #[test]
+    fn mark_colours_fill_in_around_what_the_config_sets() {
+        use ratatui::style::Color;
+
+        let defaults = resolve_mark_colors(&[], "");
+        assert_eq!(defaults[0], None);
+        assert_eq!(defaults[3], Some(Color::Rgb(0xf5, 0xc2, 0xe7)));
+
+        let partial =
+            resolve_mark_colors(&[String::new(), String::new(), "#ff0000".to_string()], "");
+        assert_eq!(partial[0], None);
+        assert_eq!(partial[1], defaults[1]);
+        assert_eq!(partial[2], Some(Color::Rgb(0xff, 0, 0)));
+        assert_eq!(partial[3], defaults[3]);
+    }
+
+    /// The older scalar named the only mark colour there was, so it keeps
+    /// working as the top level — and the array wins where both are set.
+    #[test]
+    fn the_legacy_scalar_sets_the_top_level_and_yields_to_the_array() {
+        use ratatui::style::Color;
+
+        let legacy_only = resolve_mark_colors(&[], "#00ff00");
+        assert_eq!(legacy_only[3], Some(Color::Rgb(0, 0xff, 0)));
+
+        let both = resolve_mark_colors(
+            &[
+                String::new(),
+                String::new(),
+                String::new(),
+                "#0000ff".to_string(),
+            ],
+            "#00ff00",
+        );
+        assert_eq!(both[3], Some(Color::Rgb(0, 0, 0xff)));
     }
 
     #[test]
