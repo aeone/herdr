@@ -610,7 +610,7 @@ impl App {
             remote_offline_hosts: std::collections::HashSet::new(),
             space_marks: std::collections::HashMap::new(),
             agent_marks: std::collections::HashMap::new(),
-            keep_offline_mirrors: false,
+            keep_offline_mirrors: None,
             hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),
             created_remote_panes: std::collections::HashMap::new(),
@@ -689,6 +689,7 @@ impl App {
             agent_view_override: None,
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
+            remote_keep_offline_mirrors: config.remote.keep_offline_mirrors,
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -1533,6 +1534,7 @@ impl App {
                     agent_panel_sort_from_config(config.ui.agent_panel_sort);
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
+                self.state.remote_keep_offline_mirrors = config.remote.keep_offline_mirrors;
                 self.state.sidebar_section_split_auto = config.ui.sidebar_section_split_auto;
                 self.state.sidebar_mark_colors = crate::config::resolve_mark_colors(
                     &config.ui.sidebar_highlight_colors,
@@ -2952,6 +2954,38 @@ mod tests {
         );
         assert!(app.state.sidebar_spaces.hide_when_in_agents);
         assert!(!app.state.hides_spaces_in_agents());
+
+        std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn keeping_offline_mirrors_starts_from_config_and_survives_a_reload() {
+        let _guard = config_env_lock().lock().unwrap();
+        let path = temp_config_path("keep-offline-mirrors");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::env::set_var(crate::config::CONFIG_PATH_ENV_VAR, &path);
+        let mut app = test_app();
+
+        std::fs::write(&path, "[remote]\nkeep_offline_mirrors = true\n").unwrap();
+        assert_eq!(
+            app.reload_config().status,
+            crate::config::ConfigReloadStatus::Applied
+        );
+        // Nothing toggled yet, so the config still decides.
+        assert!(app.state.keeps_offline_mirrors());
+
+        app.state.keep_offline_mirrors = Some(false);
+        assert!(!app.state.keeps_offline_mirrors());
+
+        // The toggle's answer lives outside the config value, so a reload
+        // does not quietly put the mirrors back.
+        assert_eq!(
+            app.reload_config().status,
+            crate::config::ConfigReloadStatus::Applied
+        );
+        assert!(app.state.remote_keep_offline_mirrors);
+        assert!(!app.state.keeps_offline_mirrors());
 
         std::env::remove_var(crate::config::CONFIG_PATH_ENV_VAR);
         let _ = std::fs::remove_dir_all(path.parent().unwrap());

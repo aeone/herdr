@@ -3249,7 +3249,7 @@ impl AppState {
         // since a mirror is a single pane. In keep mode the workspace stays as a
         // greyed placeholder for an unreachable host, and reconcile rebuilds its
         // pane when the host answers again.
-        let keep_dead_mirror = self.keep_offline_mirrors
+        let keep_dead_mirror = self.keeps_offline_mirrors()
             && self.workspaces[ws_idx].remote_mirror.is_some()
             && self.workspaces[ws_idx].tabs.len() == 1
             && self.workspaces[ws_idx].tabs[0].layout.pane_count() <= 1;

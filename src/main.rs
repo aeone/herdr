@@ -413,6 +413,13 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # force keepalive or multiplexing off, it only stops herdr from adding its own.
 # manage_ssh_config = true
 
+# What happens to a host's mirrors when the host stops answering. False (the
+# default) hides them until it comes back; true keeps them in place, greyed,
+# so the list holds still across a sleeping laptop or a dropped link.
+# toggle_offline_mirrors flips this for the running session, and that choice is
+# kept with the session and is not undone by a config reload.
+# keep_offline_mirrors = false
+
 # Remote hosts whose agent panes are mirrored into the local Space list, so
 # local and remote agents appear side by side without a full `herdr --remote`
 # attach. Each mirrored space is a local pane running

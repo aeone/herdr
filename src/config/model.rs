@@ -913,6 +913,13 @@ pub struct RemoteConfig {
     pub manage_ssh_config: bool,
     /// Remote hosts whose agent panes are mirrored into the local Space list.
     pub spaces: Vec<RemoteSpaceConfig>,
+    /// Whether mirrors of an unreachable host stay in the sidebar, greyed,
+    /// instead of disappearing until the host answers again. Worth turning on
+    /// for a fleet with machines that sleep: a mirror vanishing looks the same
+    /// as an agent being finished with, and the greyed row says which host to
+    /// go and wake. The `toggle_offline_mirrors` keybind still overrides this
+    /// for the session once pressed. Default: false.
+    pub keep_offline_mirrors: bool,
 }
 
 impl Default for RemoteConfig {
@@ -920,6 +927,7 @@ impl Default for RemoteConfig {
         Self {
             manage_ssh_config: true,
             spaces: Vec::new(),
+            keep_offline_mirrors: false,
         }
     }
 }

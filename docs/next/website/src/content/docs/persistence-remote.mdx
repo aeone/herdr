@@ -139,6 +139,7 @@ Notes on what gets mirrored and when:
 - Mirrored spaces are derived state. They are never written to `session.json`, and they reappear by polling after a restart rather than being restored.
 - Mirrors appear without stealing focus, and are removed when their remote pane goes away.
 - When a poll fails, existing mirrors are left in place and the host is retried on the next interval, so a brief network drop does not clear and repopulate your sidebar.
+- When a mirror's own connection dies, the mirror is removed. Set `[remote].keep_offline_mirrors = true` to keep it instead, greyed and sorted to the bottom, until the host answers again and the pane is rebuilt — worth it for a fleet with a laptop that sleeps, where the list otherwise shrinks and grows under you. The `toggle_offline_mirrors` keybind flips this for the running session, and that answer is kept with the session rather than reset by a config reload.
 - Remote space names are not unique. When several mirrored spaces would share a name, Herdr appends a number.
 - Each host needs SSH access and a Herdr server already running there. Herdr looks for `herdr` on the remote `PATH`, then in `~/.local/bin`, `~/.cargo/bin`, `/usr/local/bin`, and `/opt/homebrew/bin`. Unlike `--remote`, it never installs a remote binary.
 

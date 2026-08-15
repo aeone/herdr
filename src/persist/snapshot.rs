@@ -32,9 +32,16 @@ pub struct SessionSnapshot {
     /// Marks on agents, by pane id.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub agent_marks: HashMap<u32, crate::app::MarkLevel>,
-    /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
-    #[serde(default)]
-    pub keep_offline_mirrors: bool,
+    /// Whether mirrors of an unreachable host stay in the sidebar, greyed,
+    /// once the user has answered. Absent means the config value still
+    /// decides. Written under a new key: the old one was a plain bool that
+    /// every session wrote, so reading it back would pin the config off.
+    #[serde(
+        default,
+        rename = "offline_mirrors_kept",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub keep_offline_mirrors: Option<bool>,
     /// Whether the Space list hides spaces the Agent panel already lists, once
     /// the user has answered. Absent means the config value still decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,7 +57,7 @@ pub struct SessionSnapshot {
 pub struct SessionMarks {
     pub space_marks: HashMap<String, crate::app::MarkLevel>,
     pub agent_marks: HashMap<u32, crate::app::MarkLevel>,
-    pub keep_offline_mirrors: bool,
+    pub keep_offline_mirrors: Option<bool>,
     pub hide_spaces_in_agents: Option<bool>,
 }
 
@@ -235,8 +242,8 @@ struct RawSessionSnapshot {
     highlighted_workspaces: std::collections::HashSet<String>,
     #[serde(default)]
     highlighted_panes: std::collections::HashSet<u32>,
-    #[serde(default)]
-    keep_offline_mirrors: bool,
+    #[serde(default, rename = "offline_mirrors_kept")]
+    keep_offline_mirrors: Option<bool>,
     #[serde(default)]
     hide_spaces_in_agents: Option<bool>,
 }
@@ -664,6 +671,32 @@ mod tests {
         assert_eq!(restored.agent_marks.get(&7), Some(&MarkLevel::Background));
     }
 
+    /// Every earlier session wrote `keep_offline_mirrors` whether or not the
+    /// user had ever touched the toggle, so reading that key back would pin
+    /// the new config default off for everyone. The choice moved to its own
+    /// key, written only once it has been made.
+    #[test]
+    fn a_pre_config_snapshot_leaves_the_offline_mirror_choice_unmade() {
+        let content = r#"{
+            "version": 3,
+            "workspaces": [],
+            "active": null,
+            "selected": 0,
+            "keep_offline_mirrors": false
+        }"#;
+
+        let snapshot = super::parse_snapshot(content).expect("snapshot parses");
+        assert_eq!(snapshot.keep_offline_mirrors, None);
+
+        let mut made = empty_snapshot();
+        made.keep_offline_mirrors = Some(true);
+        let json = serde_json::to_string(&made).expect("snapshot serialises");
+        assert!(json.contains(r#""offline_mirrors_kept":true"#), "{json}");
+
+        let restored = super::parse_snapshot(&json).expect("snapshot parses");
+        assert_eq!(restored.keep_offline_mirrors, Some(true));
+    }
+
     fn empty_snapshot() -> super::SessionSnapshot {
         super::SessionSnapshot {
             version: super::SNAPSHOT_VERSION,
@@ -675,7 +708,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             space_marks: Default::default(),
             agent_marks: Default::default(),
-            keep_offline_mirrors: false,
+            keep_offline_mirrors: None,
             hide_spaces_in_agents: None,
         }
     }
@@ -855,7 +888,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             space_marks: Default::default(),
             agent_marks: Default::default(),
-            keep_offline_mirrors: false,
+            keep_offline_mirrors: None,
             hide_spaces_in_agents: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -951,7 +984,7 @@ mod tests {
             version: SNAPSHOT_VERSION,
             space_marks: Default::default(),
             agent_marks: Default::default(),
-            keep_offline_mirrors: false,
+            keep_offline_mirrors: None,
             hide_spaces_in_agents: None,
         };
 
@@ -1586,7 +1619,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             space_marks: Default::default(),
             agent_marks: Default::default(),
-            keep_offline_mirrors: false,
+            keep_offline_mirrors: None,
             hide_spaces_in_agents: None,
         };
 

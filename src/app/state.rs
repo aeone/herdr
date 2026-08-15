@@ -1675,7 +1675,13 @@ pub struct AppState {
     /// snapshot rather than reallocated, so these survive a restart too.
     pub agent_marks: std::collections::HashMap<u32, MarkLevel>,
     /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
-    pub keep_offline_mirrors: bool,
+    /// Whether mirrors of an unreachable host are kept, greyed, once the user
+    /// has answered. Absent means `remote.keep_offline_mirrors` still decides.
+    /// Held apart from the config value for the same reason as
+    /// `hide_spaces_in_agents`: a reload replaces that wholesale.
+    pub keep_offline_mirrors: Option<bool>,
+    /// `remote.keep_offline_mirrors`, refreshed on every config reload.
+    pub remote_keep_offline_mirrors: bool,
     /// Keys typed so far in jump mode, empty on entry. Only meaningful while
     /// the mode is `Jump`; the labels themselves are derived, not stored.
     pub jump_input: String,
@@ -1953,6 +1959,13 @@ impl AppState {
         (self.mode == Mode::Jump).then(|| crate::app::jump::JumpLabels::for_app(self))
     }
 
+    /// Whether a mirror whose host went away is kept in the sidebar, greyed.
+    /// The keybind's answer wins once given; until then the config decides.
+    pub fn keeps_offline_mirrors(&self) -> bool {
+        self.keep_offline_mirrors
+            .unwrap_or(self.remote_keep_offline_mirrors)
+    }
+
     /// Whether the Space list drops the spaces the Agent panel already lists.
     /// The keybind's answer wins once given; until then the config decides.
     pub fn hides_spaces_in_agents(&self) -> bool {
@@ -2122,7 +2135,8 @@ impl AppState {
             remote_offline_hosts: std::collections::HashSet::new(),
             space_marks: std::collections::HashMap::new(),
             agent_marks: std::collections::HashMap::new(),
-            keep_offline_mirrors: false,
+            keep_offline_mirrors: None,
+            remote_keep_offline_mirrors: false,
             jump_input: String::new(),
             hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),

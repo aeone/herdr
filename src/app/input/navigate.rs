@@ -202,7 +202,7 @@ impl App {
                 self.state.mark_session_dirty();
             }
             NavigateAction::ToggleOfflineMirrors => {
-                self.state.keep_offline_mirrors = !self.state.keep_offline_mirrors;
+                self.state.keep_offline_mirrors = Some(!self.state.keeps_offline_mirrors());
                 self.state.mark_session_dirty();
             }
             NavigateAction::NewWorktree => {
@@ -1600,7 +1600,7 @@ pub(super) fn execute_navigate_action_in_context(
             state.hide_spaces_in_agents = Some(!state.hides_spaces_in_agents());
         }
         NavigateAction::ToggleOfflineMirrors => {
-            state.keep_offline_mirrors = !state.keep_offline_mirrors;
+            state.keep_offline_mirrors = Some(!state.keeps_offline_mirrors());
         }
         NavigateAction::NewWorktree => {
             if let Some(ws_idx) = workspace_action_target(state, context)
