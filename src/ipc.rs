@@ -109,7 +109,57 @@ fn stale_socket_connect_error(kind: io::ErrorKind) -> bool {
 }
 
 pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<bool> {
+    if peer_process_gone(stream) {
+        return Ok(true);
+    }
     probe_stream_closed(stream)
+}
+
+/// Whether the process that opened this connection has since exited.
+///
+/// A socket outlives its opener whenever something else still holds a copy of
+/// the far end -- a child that inherited it, an ssh session that has not
+/// finished dying. The stream then reads as open forever, so a connection
+/// waiting to be told it is finished never is, and it holds a descriptor and a
+/// thread for the life of the server. Enough of those and herdr runs out of
+/// descriptors while looking perfectly healthy.
+///
+/// The peer credentials record who connected, at the moment they connected. If
+/// that process is gone there is no one left to serve. A recycled pid reads as
+/// alive, so this errs towards holding a connection open rather than closing a
+/// live one by mistake.
+#[cfg(unix)]
+fn peer_process_gone(stream: &LocalStream) -> bool {
+    use interprocess::local_socket::traits::StreamCommon as _;
+
+    let Some(pid) = stream.peer_creds().ok().and_then(|creds| creds.pid()) else {
+        return false;
+    };
+    peer_pid_gone(pid.into())
+}
+
+/// Whether a pid no longer names a running process. Split out so the decision
+/// can be tested without a peer to take credentials from.
+#[cfg(unix)]
+fn peer_pid_gone(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // /proc is the only place that answers this without a signal, and a signal
+    // to a pid we do not own is not something a liveness check should send.
+    // Whether it exists is a property of the machine, so it is answered once
+    // rather than on every poll of every connection.
+    static HAS_PROCFS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*HAS_PROCFS.get_or_init(|| std::path::Path::new("/proc/self").exists()) {
+        // No procfs (macOS, BSD): leave the connection alone rather than guess.
+        return false;
+    }
+    !std::path::Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(not(unix))]
+fn peer_process_gone(_stream: &LocalStream) -> bool {
+    false
 }
 
 pub(crate) fn set_local_stream_polling(stream: &mut LocalStream, enabled: bool) -> io::Result<()> {
@@ -347,6 +397,30 @@ mod tests {
         assert!(local_stream_peer_closed(&mut server).unwrap());
 
         let _ = fs::remove_file(path);
+    }
+
+    /// The leak this guards against: a connection whose opener has exited but
+    /// whose far end someone else still holds, so it never reads as closed and
+    /// keeps a descriptor and a thread until the server dies.
+    #[cfg(unix)]
+    #[test]
+    fn a_peer_that_has_exited_is_gone_and_a_live_one_is_not() {
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a process that exits immediately");
+        let dead_pid = i64::from(child.id());
+        let mut child = child;
+        child.wait().expect("reap it");
+
+        assert!(peer_pid_gone(dead_pid), "a reaped process is gone");
+        assert!(
+            !peer_pid_gone(i64::from(std::process::id())),
+            "this process is not"
+        );
+        // Never act on a pid that says nothing, or the check would close every
+        // connection on a platform that does not report one.
+        assert!(!peer_pid_gone(0));
+        assert!(!peer_pid_gone(-1));
     }
 
     #[cfg(windows)]

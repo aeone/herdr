@@ -31,6 +31,10 @@ pub(super) const APP_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
 const INITIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
+/// How long to wait before accepting again after a failed accept. Long enough
+/// not to spin a core while descriptors are scarce, short enough that the
+/// socket answers promptly once they are not.
+const ACCEPT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
 
 pub struct ServerHandle {
     _thread: std::thread::JoinHandle<()>,
@@ -107,8 +111,18 @@ pub fn start_server_with_capabilities(
                     });
                 }
                 Err(err) => {
+                    // Running out of descriptors, or hitting the per-process
+                    // thread cap, is a passing squeeze: the connections already
+                    // open will end and room comes back. Breaking here retired
+                    // the listener for the life of the server, so a busy minute
+                    // left herdr running but unreachable -- no CLI, no client,
+                    // and no way to stop or hand it over, since both of those
+                    // are themselves API calls. Log it, wait, and keep serving.
+                    if !listener_running.load(Ordering::Relaxed) {
+                        break;
+                    }
                     error!(err = %err, "api listener accept failed");
-                    break;
+                    std::thread::sleep(ACCEPT_RETRY_INTERVAL);
                 }
             }
         }
