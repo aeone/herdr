@@ -89,21 +89,41 @@ static HANDOFF_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 
 #[cfg(unix)]
 extern "C" fn on_handoff_signal(_signum: libc::c_int) {
-    // Async-signal-safe: a relaxed store and nothing else. The loop does the work.
+    // Async-signal-safe: a relaxed store, and a `write` to stderr, which is on
+    // the short list of calls a handler may make. The note matters because the
+    // loop is the only other party that can report the signal arrived, and the
+    // case this lever exists for is the loop not getting there.
     HANDOFF_REQUESTED.store(true, Ordering::Relaxed);
+    const NOTE: &[u8] = b"herdr: SIGUSR1 received; handoff requested\n";
+    // SAFETY: `write` is async-signal-safe and the buffer is a static.
+    unsafe {
+        libc::write(2, NOTE.as_ptr().cast(), NOTE.len());
+    }
 }
 
 /// Asks the kernel to route `SIGUSR1` to [`on_handoff_signal`].
 #[cfg(unix)]
 pub(crate) fn install_handoff_signal_handler() {
-    // SAFETY: `on_handoff_signal` is async-signal-safe -- one relaxed store --
-    // and `libc::signal` is the documented way to install it.
-    unsafe {
+    // SAFETY: `on_handoff_signal` is async-signal-safe and `libc::signal` is
+    // the documented way to install it.
+    let previous = unsafe {
         libc::signal(
             libc::SIGUSR1,
             on_handoff_signal as *const () as libc::sighandler_t,
+        )
+    };
+    if previous == libc::SIG_ERR {
+        // SAFETY: reading errno through the libc helper.
+        warn!(
+            err = %std::io::Error::last_os_error(),
+            "could not install the sigusr1 handoff handler; signal handoff is unavailable"
         );
+        return;
     }
+    info!(
+        pid = std::process::id(),
+        "sigusr1 handoff handler installed"
+    );
 }
 
 #[cfg(not(unix))]
@@ -587,7 +607,9 @@ impl HeadlessServer {
             // that answer requests have stopped doing so -- which is the case
             // it exists for.
             if take_handoff_request() {
-                info!("handoff requested by signal");
+                // Warn rather than info: this is rare, it is asked for by hand,
+                // and the log it lands in is usually being read in a hurry.
+                warn!("handoff requested by signal");
                 match self.perform_live_handoff(Default::default()) {
                     Ok(()) => {
                         self.finish_live_handoff_shutdown();
