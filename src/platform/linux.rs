@@ -13,13 +13,72 @@ use super::{
 
 const WSL_MARKER_ENV_VARS: &[&str] = &["WSL_DISTRO_NAME", "WSL_INTEROP"];
 
+/// Descriptors a busy hub needs: roughly 14 per mirrored pane, so this carries
+/// a few hundred panes. Capped by the hard limit at the point of use.
+const SERVER_NOFILE_LIMIT_TARGET: libc::rlim_t = 65536;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcGroupMember {
     pid: u32,
     comm: String,
 }
 
-pub fn raise_server_nofile_limit() {}
+/// Linux ships a 1024 soft limit against a hard limit in the hundreds of
+/// thousands, and this was a no-op here until a hub holding 65 mirrored panes
+/// ran out at roughly 14 descriptors a pane -- on a machine with 64 GB of RAM
+/// and eleven idle cores. The hard limit is left alone; only the soft one moves,
+/// which needs no privilege.
+pub fn raise_server_nofile_limit() {
+    match raise_nofile_limit(SERVER_NOFILE_LIMIT_TARGET) {
+        Ok(None) => {}
+        Ok(Some((previous, target))) => {
+            tracing::info!(previous, target, "raised server file descriptor soft limit")
+        }
+        Err(err) => tracing::warn!(err = %err, "failed to raise server file descriptor limit"),
+    }
+}
+
+fn raise_nofile_limit(
+    target: libc::rlim_t,
+) -> std::io::Result<Option<(libc::rlim_t, libc::rlim_t)>> {
+    let mut limit = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+    // SAFETY: `getrlimit` writes a `rlimit` through the pointer and nothing else.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limit.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // SAFETY: the call above succeeded, so the value is initialised.
+    let mut limit = unsafe { limit.assume_init() };
+    let Some(target) = target_nofile_soft_limit(limit.rlim_cur, limit.rlim_max, target) else {
+        return Ok(None);
+    };
+
+    let previous = limit.rlim_cur;
+    limit.rlim_cur = target;
+    // SAFETY: `limit` is a fully initialised `rlimit` and the soft limit is
+    // never raised above the hard one, which is what would make this fail.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &limit) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(Some((previous, target)))
+}
+
+/// The soft limit to ask for: the target, capped by whatever the hard limit
+/// allows, and only when it would be a raise.
+fn target_nofile_soft_limit(
+    current: libc::rlim_t,
+    hard: libc::rlim_t,
+    target: libc::rlim_t,
+) -> Option<libc::rlim_t> {
+    let target = if hard == libc::RLIM_INFINITY {
+        target
+    } else {
+        target.min(hard)
+    };
+
+    (current < target).then_some(target)
+}
 
 pub(crate) fn should_draw_host_cursor_by_default() -> bool {
     running_inside_wsl()
