@@ -178,6 +178,22 @@ impl ClientRenderWriter {
             ClientRenderTarget::Channel(sender) => sender.try_send(data),
         }
     }
+
+    /// Queue a frame belonging to one of several observed terminals.
+    ///
+    /// Coalesces per `key` rather than per connection, so a watcher of thirty
+    /// panes does not lose twenty-nine of them to the single render slot.
+    pub(crate) fn try_send_observed(
+        &self,
+        key: &str,
+        data: Vec<u8>,
+    ) -> Result<(), TrySendError<Vec<u8>>> {
+        match &self.target {
+            ClientRenderTarget::Queue(queue) => queue.try_send_observed(key, data),
+            #[cfg(test)]
+            ClientRenderTarget::Channel(sender) => sender.try_send(data),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -190,9 +206,21 @@ struct ClientWriterQueue {
 struct ClientWriterQueueState {
     control: VecDeque<Vec<u8>>,
     render: Option<Vec<u8>>,
+    /// One pending frame per observed terminal, newest wins.
+    ///
+    /// A connection watching many terminals cannot use the single render slot:
+    /// frames for different terminals are not substitutes for one another, so
+    /// one slot would drop every terminal but whichever won the tick. Keyed
+    /// latest-wins keeps the same no-lag property per terminal instead.
+    observed: VecDeque<(String, Vec<u8>)>,
     senders: usize,
     writer_alive: bool,
 }
+
+/// How many terminals may have a frame in flight before further ones are told
+/// to back off. Well above any real pane count on one host; it is a backstop
+/// against an observer asking for an unbounded set, not a working limit.
+const MAX_OBSERVED_QUEUE: usize = 512;
 
 #[derive(Debug, PartialEq, Eq)]
 enum ClientWriteItem {
@@ -245,6 +273,31 @@ impl ClientWriterQueue {
         Ok(())
     }
 
+    fn try_send_observed(&self, key: &str, data: Vec<u8>) -> Result<(), TrySendError<Vec<u8>>> {
+        let mut state = self.lock_state();
+        if !state.writer_alive {
+            return Err(TrySendError::Disconnected(data));
+        }
+        if let Some(pending) = state
+            .observed
+            .iter_mut()
+            .find(|(pending_key, _)| pending_key == key)
+        {
+            // This terminal already has a frame waiting and the sender diffs
+            // against what it last *committed*, not what it queued, so the
+            // newer frame supersedes the older one whole.
+            pending.1 = data;
+            self.ready.notify_one();
+            return Ok(());
+        }
+        if state.observed.len() >= MAX_OBSERVED_QUEUE {
+            return Err(TrySendError::Full(data));
+        }
+        state.observed.push_back((key.to_owned(), data));
+        self.ready.notify_one();
+        Ok(())
+    }
+
     fn recv(&self) -> Option<ClientWriteItem> {
         let mut state = self.lock_state();
         loop {
@@ -252,6 +305,10 @@ impl ClientWriterQueue {
                 return Some(ClientWriteItem::Control(data));
             }
             if let Some(data) = state.render.take() {
+                self.ready.notify_one();
+                return Some(ClientWriteItem::Render(data));
+            }
+            if let Some((_, data)) = state.observed.pop_front() {
                 self.ready.notify_one();
                 return Some(ClientWriteItem::Render(data));
             }
@@ -320,6 +377,11 @@ pub(crate) enum ServerEvent {
     },
     /// A client requested read-only observation of one terminal.
     ClientObserveTerminal { client_id: u64, target: String },
+    /// Observe a set of terminals over one connection, each with its own size.
+    ClientObserveTerminals {
+        client_id: u64,
+        targets: Vec<crate::protocol::ObservedTarget>,
+    },
     /// A client requested writable control of one terminal.
     ClientControlTerminal {
         client_id: u64,
@@ -721,6 +783,9 @@ fn client_read_loop(
             ClientMessage::ObserveTerminal { target } => {
                 ServerEvent::ClientObserveTerminal { client_id, target }
             }
+            ClientMessage::ObserveTerminals { targets } => {
+                ServerEvent::ClientObserveTerminals { client_id, targets }
+            }
             ClientMessage::ControlTerminal { target, takeover } => {
                 ServerEvent::ClientControlTerminal {
                     client_id,
@@ -806,6 +871,34 @@ mod tests {
     use super::*;
     use interprocess::local_socket::traits::Listener as _;
     use std::path::PathBuf;
+
+    /// Two terminals keep two slots; one terminal twice keeps one, holding the
+    /// newer frame. Without this a watcher of many panes would lose all but
+    /// whichever terminal won the single render slot that tick.
+    #[test]
+    fn observed_frames_coalesce_per_terminal_and_not_across_them() {
+        let queue = ClientWriterQueue::new();
+        queue.add_sender();
+
+        assert!(queue.try_send_observed("t1", b"first".to_vec()).is_ok());
+        assert!(queue.try_send_observed("t2", b"other".to_vec()).is_ok());
+        assert!(queue.try_send_observed("t1", b"newer".to_vec()).is_ok());
+
+        assert_eq!(
+            queue.recv(),
+            Some(ClientWriteItem::Render(b"newer".to_vec()))
+        );
+        assert_eq!(
+            queue.recv(),
+            Some(ClientWriteItem::Render(b"other".to_vec()))
+        );
+
+        queue.close_writer();
+        assert!(matches!(
+            queue.try_send_observed("t1", b"late".to_vec()),
+            Err(TrySendError::Disconnected(_))
+        ));
+    }
 
     struct TestSocketPath(PathBuf);
 

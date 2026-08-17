@@ -1588,6 +1588,11 @@ async fn run_client_loop(
                 }
             }
             ClientLoopEvent::ServerMessage(msg) => match msg {
+                // Only a connection that asked with `ObserveTerminals` is sent
+                // these, and the TUI client never does; the mirror stream reads
+                // them on its own path.
+                ServerMessage::ObservedTerminal(_)
+                | ServerMessage::ObservedTerminalEnded { .. } => {}
                 ServerMessage::Frame(frame_data) => {
                     let frame_data = if state.draw_host_cursor {
                         render_ansi::frame_with_drawn_cursor(frame_data)

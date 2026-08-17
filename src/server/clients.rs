@@ -3,13 +3,37 @@ use std::path::PathBuf;
 
 use crate::protocol::RenderEncoding;
 use crate::server::client_transport::ClientWriter;
-use crate::server::render_stream::ClientRenderState;
+pub(crate) use crate::server::render_stream::ClientRenderState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ClientConnectionMode {
     App,
-    TerminalAttach { terminal_id: String },
-    TerminalObserve { terminal_id: String },
+    TerminalAttach {
+        terminal_id: String,
+    },
+    TerminalObserve {
+        terminal_id: String,
+    },
+    /// Watching several terminals over this one connection. The set itself
+    /// lives in [`ClientConnection::observed`] rather than here, so the mode
+    /// stays cheap to clone -- it is copied into a render target every frame.
+    TerminalObserveMany,
+}
+
+/// One terminal a multiplexed observer is watching.
+///
+/// Each carries its own size and render baseline: two watchers of a host are
+/// rarely looking at panes of the same shape, and a diff is only meaningful
+/// against the last frame sent for that terminal.
+pub(crate) struct ObservedTerminal {
+    /// The target string the client asked with, echoed back on every frame.
+    pub(crate) target: String,
+    /// Terminal the target resolved to.
+    pub(crate) terminal_id: String,
+    /// Size to render this terminal at.
+    pub(crate) size: (u16, u16),
+    /// Render baseline for this terminal alone.
+    pub(crate) render_state: ClientRenderState,
 }
 
 pub(crate) type RenderTarget = (
@@ -54,6 +78,8 @@ pub(crate) struct ClientConnection {
     pub(crate) last_activity: u64,
     /// Render baseline for the negotiated client encoding.
     pub(crate) render_state: ClientRenderState,
+    /// Terminals this connection is watching, for `TerminalObserveMany`.
+    pub(crate) observed: Vec<ObservedTerminal>,
     /// Client-local host Kitty graphics cache.
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
     /// Whether the next graphics frame must clear and rebuild host-side Kitty state.
@@ -110,6 +136,7 @@ impl ClientConnection {
         writer: Option<ClientWriter>,
     ) -> Self {
         Self {
+            observed: Vec::new(),
             mode,
             pending_terminal_attach,
             keybindings,
@@ -299,6 +326,7 @@ pub(crate) fn render_targets(
                         client.mode,
                         ClientConnectionMode::TerminalAttach { .. }
                             | ClientConnectionMode::TerminalObserve { .. }
+                            | ClientConnectionMode::TerminalObserveMany
                     ))
         })
         .map(|(&client_id, client)| {

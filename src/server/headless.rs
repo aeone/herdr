@@ -1778,6 +1778,60 @@ impl HeadlessServer {
         Some(terminal_id)
     }
 
+    /// Points one connection at a set of terminals.
+    ///
+    /// Replaces whatever it was watching, so a mirror keeps one connection for
+    /// the life of the host and simply changes the set as panes come and go.
+    /// Targets that do not resolve are dropped with a line in the log rather
+    /// than failing the request: a watcher asking for a pane that has just
+    /// closed is ordinary, not an error.
+    fn observe_terminals_client(
+        &mut self,
+        client_id: u64,
+        targets: Vec<crate::protocol::ObservedTarget>,
+    ) -> bool {
+        // Observed frames carry terminal bytes whatever the connection
+        // negotiated for its own screen: a watcher of many panes has no single
+        // screen to render semantically.
+        let encoding = crate::protocol::RenderEncoding::TerminalAnsi;
+        let mut resolved = Vec::with_capacity(targets.len());
+        for target in targets {
+            let Some(terminal_id) =
+                self.resolve_terminal_session_target(client_id, &target.target, "observe")
+            else {
+                debug!(client_id, target = %target.target, "observe target did not resolve");
+                continue;
+            };
+            resolved.push(crate::server::clients::ObservedTerminal {
+                target: target.target,
+                terminal_id,
+                size: (target.cols.max(1), target.rows.max(1)),
+                render_state: crate::server::clients::ClientRenderState::new(encoding),
+            });
+        }
+
+        let stamp = self.allocate_activity_stamp();
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return false;
+        };
+        let count = resolved.len();
+        client.mode = ClientConnectionMode::TerminalObserveMany;
+        client.observed = resolved;
+        client.pending_terminal_attach = false;
+        client.render_state.reset_baseline();
+        client.last_activity = stamp;
+        let was_foreground = self.foreground_client_id == Some(client_id);
+        if was_foreground {
+            self.promote_latest_remaining_client();
+        }
+
+        info!(
+            client_id,
+            count, "multiplexed terminal observe client connected"
+        );
+        true
+    }
+
     fn observe_terminal_client(&mut self, client_id: u64, target: String) -> bool {
         let Some(terminal_id) = self.resolve_terminal_session_target(client_id, &target, "observe")
         else {
@@ -2905,6 +2959,9 @@ impl HeadlessServer {
             ServerEvent::ClientObserveTerminal { client_id, target } => {
                 self.observe_terminal_client(client_id, target)
             }
+            ServerEvent::ClientObserveTerminals { client_id, targets } => {
+                self.observe_terminals_client(client_id, targets)
+            }
             ServerEvent::ClientControlTerminal {
                 client_id,
                 target,
@@ -3798,6 +3855,138 @@ impl HeadlessServer {
         }
     }
 
+    /// Render every terminal a multiplexed observer asked for and send one
+    /// tagged frame each.
+    ///
+    /// Unlike an app or attach client, a connection here is not looking at one
+    /// screen of its own size: each observed terminal is rendered at the size
+    /// the watcher gave for it and diffed against its own baseline, so one
+    /// connection carries a whole host's panes. Returns `(broken, deferred)`.
+    fn render_observed_terminals(&mut self, client_id: u64) -> (bool, bool) {
+        let Some(client) = self.clients.get(&client_id) else {
+            return (false, false);
+        };
+        let plan: Vec<(String, String, (u16, u16))> = client
+            .observed
+            .iter()
+            .map(|observed| {
+                (
+                    observed.terminal_id.clone(),
+                    observed.target.clone(),
+                    observed.size,
+                )
+            })
+            .collect();
+        if plan.is_empty() {
+            return (false, false);
+        }
+
+        // Render before touching the client again: the runtimes and the client
+        // map are both on `self`, and a terminal that has gone is reported once
+        // and dropped rather than taking the rest of the connection with it.
+        let mut rendered: Vec<Option<FrameData>> = Vec::with_capacity(plan.len());
+        for (terminal_id, _, (cols, rows)) in &plan {
+            let area = Rect::new(0, 0, (*cols).max(1), (*rows).max(1));
+            rendered.push(
+                self.runtime_for_terminal_id_string(terminal_id)
+                    .map(|runtime| {
+                        let (buffer, cursor) =
+                            crate::server::render_stream::render_terminal_virtual(runtime, area);
+                        let hyperlinks = runtime.visible_hyperlinks(area);
+                        FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks)
+                    }),
+            );
+        }
+
+        let Some(client) = self.clients.get_mut(&client_id) else {
+            return (false, false);
+        };
+        let Some(writer) = client.writer.as_ref().cloned() else {
+            return (false, false);
+        };
+
+        let mut ended: Vec<ServerMessage> = Vec::new();
+        let mut deferred = false;
+        let mut sent_any = false;
+        let mut index = 0usize;
+        for frame in rendered {
+            let Some(observed) = client.observed.get_mut(index) else {
+                break;
+            };
+            let Some(frame) = frame else {
+                ended.push(ServerMessage::ObservedTerminalEnded {
+                    terminal_id: observed.terminal_id.clone(),
+                    target: observed.target.clone(),
+                    reason: Some("terminal is gone".to_owned()),
+                });
+                client.observed.remove(index);
+                continue;
+            };
+            index += 1;
+
+            // Graphics are not carried per observed terminal: a watcher renders
+            // the bytes into a terminal of its own rather than onto the host
+            // screen the kitty cache is keyed to.
+            let Some(prepared) = observed.render_state.prepare_frame(frame) else {
+                continue;
+            };
+            let ServerMessage::Terminal(terminal_frame) = prepared.message().clone() else {
+                continue;
+            };
+            let message = ServerMessage::ObservedTerminal(crate::protocol::ObservedTerminalFrame {
+                terminal_id: observed.terminal_id.clone(),
+                target: observed.target.clone(),
+                frame: terminal_frame,
+            });
+            let serialized = match Self::frame_server_message(&message) {
+                Ok(serialized) => serialized,
+                Err(err) => {
+                    warn!(
+                        client_id,
+                        terminal_id = %observed.terminal_id,
+                        err = %err,
+                        "failed to serialize observed terminal frame"
+                    );
+                    continue;
+                }
+            };
+            match writer
+                .render
+                .try_send_observed(&observed.terminal_id, serialized)
+            {
+                Ok(()) => {
+                    // Commit only on send: an uncommitted baseline re-encodes
+                    // the same diff next tick rather than losing it.
+                    observed.render_state.commit_sent_frame(prepared);
+                    sent_any = true;
+                }
+                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                    deferred = true;
+                }
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    debug!(
+                        client_id,
+                        "observer writer channel closed, marking as broken"
+                    );
+                    return (true, false);
+                }
+            }
+        }
+
+        if sent_any {
+            client.clear_deferred_render();
+        }
+        if deferred {
+            client.defer_full_render();
+        }
+
+        for message in ended {
+            self.send_to_client(client_id, message);
+        }
+
+        (false, deferred)
+    }
+
     fn render_and_stream(&mut self) {
         let full_started = crate::render_prof::timer();
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
@@ -3827,6 +4016,14 @@ impl HeadlessServer {
         let mut broken_clients: Vec<u64> = Vec::new();
         let mut deferred_frame = false;
         for (client_id, (cols, rows), cell_size, is_foreground, mode) in render_targets {
+            if matches!(mode, ClientConnectionMode::TerminalObserveMany) {
+                let (broken, deferred) = self.render_observed_terminals(client_id);
+                if broken {
+                    broken_clients.push(client_id);
+                }
+                deferred_frame |= deferred;
+                continue;
+            }
             let area = Rect::new(0, 0, cols, rows);
             let is_app_client = matches!(mode, ClientConnectionMode::App);
             let mut frame = match mode {
@@ -3868,6 +4065,9 @@ impl HeadlessServer {
                     crate::render_prof::duration_since("full_render.frame_build", frame_started);
                     frame
                 }
+                // Handled above: a multiplexed observer renders per terminal,
+                // not once per connection.
+                ClientConnectionMode::TerminalObserveMany => continue,
                 ClientConnectionMode::TerminalAttach { terminal_id }
                 | ClientConnectionMode::TerminalObserve { terminal_id } => {
                     let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) else {
@@ -5402,6 +5602,22 @@ next_tab = ""
         rt.shutdown_timeout(Duration::from_millis(100));
     }
 
+    fn test_client_writer_with_render_capacity(
+        capacity: usize,
+    ) -> (
+        ClientWriter,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+    ) {
+        let (control_tx, control_rx) = std::sync::mpsc::channel();
+        let (render_tx, render_rx) = std::sync::mpsc::sync_channel(capacity);
+        (
+            ClientWriter::test_channel(control_tx, render_tx),
+            control_rx,
+            render_rx,
+        )
+    }
+
     fn connect_pending_terminal_client(server: &mut HeadlessServer, client_id: u64) {
         let _control_rx = connect_pending_terminal_client_with_control_rx(server, client_id);
     }
@@ -5423,6 +5639,118 @@ next_tab = ""
             writer,
         }));
         control_rx
+    }
+
+    /// A watcher of many terminals gets one frame per terminal, each rendered
+    /// at the size it asked for that terminal rather than at the size of the
+    /// connection.
+    #[test]
+    fn observing_many_terminals_sends_a_frame_per_terminal_at_its_own_size() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
+            let second = crate::workspace::Workspace::test_new("second");
+            let second_pane = second.tabs[0].root_pane;
+            let second_terminal = second
+                .terminal_id(second_pane)
+                .expect("terminal id")
+                .clone();
+            let second_terminal_string = second_terminal.to_string();
+            server.app.state.workspaces.push(second);
+            server.app.state.ensure_test_terminals();
+            server.app.terminal_runtimes.insert(
+                second_terminal,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+            );
+
+            let (writer, _control_rx, render_rx) = test_client_writer_with_render_capacity(8);
+            assert!(server.handle_server_event(ServerEvent::ClientConnected {
+                client_id: 7,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: None,
+                direct_attach_requested: true,
+                writer,
+            }));
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![
+                        crate::protocol::ObservedTarget {
+                            target: terminal_id_string.clone(),
+                            cols: 40,
+                            rows: 10,
+                        },
+                        crate::protocol::ObservedTarget {
+                            target: second_terminal_string.clone(),
+                            cols: 20,
+                            rows: 5,
+                        },
+                    ],
+                })
+            );
+
+            server.render_and_stream();
+
+            let mut sizes: Vec<(String, u16, u16)> = Vec::new();
+            while let Ok(bytes) = render_rx.try_recv() {
+                match read_server_message(bytes) {
+                    ServerMessage::ObservedTerminal(observed) => sizes.push((
+                        observed.terminal_id,
+                        observed.frame.width,
+                        observed.frame.height,
+                    )),
+                    other => panic!("unexpected message for an observer: {other:?}"),
+                }
+            }
+            sizes.sort();
+
+            let mut expected = vec![
+                (terminal_id_string, 40, 10),
+                (second_terminal_string, 20, 5),
+            ];
+            expected.sort();
+            assert_eq!(sizes, expected);
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
+    /// One terminal going does not take the connection with it: the watcher is
+    /// told, that terminal is dropped, and the rest keep streaming.
+    #[test]
+    fn an_observed_terminal_that_goes_is_reported_and_dropped() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 40,
+                        rows: 10,
+                    }],
+                })
+            );
+
+            if let Some(runtime) = server.app.terminal_runtimes.remove(&terminal_id) {
+                runtime.shutdown();
+            }
+            server.render_and_stream();
+
+            let ended = std::iter::from_fn(|| control_rx.try_recv().ok())
+                .map(read_server_message)
+                .find(|message| matches!(message, ServerMessage::ObservedTerminalEnded { .. }));
+            assert!(matches!(
+                ended,
+                Some(ServerMessage::ObservedTerminalEnded { ref terminal_id, .. })
+                    if terminal_id == &terminal_id_string
+            ));
+            assert!(server.clients.get(&7).expect("client").observed.is_empty());
+
+            shutdown_test_runtimes(server);
+        });
     }
 
     #[test]

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Current protocol version. Bumped when wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// Maximum allowed frame payload size (2 MB). Frames larger than this are
 /// rejected to prevent denial-of-service via oversized length prefixes.
@@ -405,6 +405,24 @@ pub enum ClientMessage {
         /// Replace an existing writable controller for this terminal.
         takeover: bool,
     },
+
+    /// Observe several terminals over this one connection.
+    ///
+    /// Last in the enum on purpose: the wire tag is the variant's position, so
+    /// a new one may only be appended.
+    ///
+    /// The set replaces whatever this connection was observing, so a watcher
+    /// keeps one connection for the life of the host rather than one per pane.
+    /// Frames come back as [`ServerMessage::ObservedTerminal`], each naming the
+    /// terminal it belongs to, and each terminal carries its own size: two
+    /// watchers of the same host are rarely looking at panes of equal shape.
+    ///
+    /// A host too old to know this message still answers `ObserveTerminal`, so
+    /// a mixed-version fleet falls back to one connection per pane.
+    ObserveTerminals {
+        /// Pane, terminal, or agent targets, with the size to render each at.
+        targets: Vec<ObservedTarget>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -593,6 +611,31 @@ pub struct TerminalFrame {
     pub bytes: Vec<u8>,
 }
 
+/// One terminal a connection is observing, and the size to render it at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedTarget {
+    /// Pane, terminal, or agent target.
+    pub target: String,
+    /// Columns to render this terminal at.
+    pub cols: u16,
+    /// Rows to render this terminal at.
+    pub rows: u16,
+}
+
+/// A frame for one of several terminals observed over a single connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedTerminalFrame {
+    /// Terminal the frame belongs to. Resolved by the server from the target
+    /// the client asked for, so the client can match frames to its own panes
+    /// even when it asked by pane or agent name.
+    pub terminal_id: String,
+    /// The target string the client used, echoed so a watcher that asked by
+    /// agent name does not have to keep its own mapping.
+    pub target: String,
+    /// The frame itself.
+    pub frame: TerminalFrame,
+}
+
 /// Notification kind forwarded from server to client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NotifyKind {
@@ -679,6 +722,27 @@ pub enum ServerMessage {
     PrefixInputSource {
         /// Whether the ASCII input source should be active.
         active: bool,
+    },
+
+    /// Bytes for one of the terminals this connection is observing.
+    ///
+    /// Appended rather than grouped with the other frame variants: the wire
+    /// tag is the variant's position, so inserting one renumbers every message
+    /// after it and two builds one version apart stop understanding each
+    /// other's frames.
+    ///
+    /// Only sent to connections that asked with [`ClientMessage::ObserveTerminals`];
+    /// a single-target observer keeps receiving plain [`ServerMessage::Terminal`].
+    ObservedTerminal(ObservedTerminalFrame),
+
+    /// A terminal this connection was observing has gone.
+    ObservedTerminalEnded {
+        /// Terminal that ended.
+        terminal_id: String,
+        /// The target string the client used.
+        target: String,
+        /// Why it ended, when the server knows.
+        reason: Option<String>,
     },
 }
 
