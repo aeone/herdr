@@ -109,10 +109,20 @@ fn stale_socket_connect_error(kind: io::ErrorKind) -> bool {
 }
 
 pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<bool> {
-    if peer_process_gone(stream) {
+    if local_stream_peer_pid_gone(stream).is_some() {
         return Ok(true);
     }
     probe_stream_closed(stream)
+}
+
+/// The pid of the process that opened this connection, if it has since exited.
+///
+/// Separate from [`local_stream_peer_closed`] so a caller can report which peer
+/// went without saying goodbye, which is the evidence needed to find what keeps
+/// leaving connections behind.
+pub(crate) fn local_stream_peer_pid_gone(stream: &LocalStream) -> Option<i64> {
+    let pid = peer_pid(stream)?;
+    peer_pid_gone(pid).then_some(pid)
 }
 
 /// Whether the process that opened this connection has since exited.
@@ -129,18 +139,23 @@ pub(crate) fn local_stream_peer_closed(stream: &mut LocalStream) -> io::Result<b
 /// alive, so this errs towards holding a connection open rather than closing a
 /// live one by mistake.
 #[cfg(unix)]
-fn peer_process_gone(stream: &LocalStream) -> bool {
+fn peer_pid(stream: &LocalStream) -> Option<i64> {
     use interprocess::local_socket::traits::StreamCommon as _;
 
-    let Some(pid) = stream.peer_creds().ok().and_then(|creds| creds.pid()) else {
-        return false;
-    };
-    peer_pid_gone(pid.into())
+    stream
+        .peer_creds()
+        .ok()
+        .and_then(|creds| creds.pid())
+        .map(i64::from)
+}
+
+#[cfg(not(unix))]
+fn peer_pid(_stream: &LocalStream) -> Option<i64> {
+    None
 }
 
 /// Whether a pid no longer names a running process. Split out so the decision
 /// can be tested without a peer to take credentials from.
-#[cfg(unix)]
 fn peer_pid_gone(pid: i64) -> bool {
     if pid <= 0 {
         return false;

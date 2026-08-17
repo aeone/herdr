@@ -35,6 +35,37 @@ const MAX_INITIAL_REQUEST_BYTES: usize = 1024 * 1024;
 /// not to spin a core while descriptors are scarce, short enough that the
 /// socket answers promptly once they are not.
 const ACCEPT_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+/// Open connections between reports. A healthy server sits in single figures;
+/// the leak that emptied one server's descriptor table climbed past 800, and
+/// nothing said so until `accept` failed.
+const CONNECTION_CENSUS_STEP: usize = 25;
+
+static OPEN_CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts a connection for as long as it is being served, and says so whenever
+/// the number crosses another `CONNECTION_CENSUS_STEP`. Reported on the way up
+/// and on the way down, so a log shows whether connections are being released
+/// at all -- the difference between busy and leaking.
+struct ConnectionCensus;
+
+impl ConnectionCensus {
+    fn open() -> Self {
+        let open = OPEN_CONNECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
+        if open.is_multiple_of(CONNECTION_CENSUS_STEP) {
+            warn!(open, "api connections open");
+        }
+        Self
+    }
+}
+
+impl Drop for ConnectionCensus {
+    fn drop(&mut self) {
+        let open = OPEN_CONNECTIONS.fetch_sub(1, Ordering::Relaxed) - 1;
+        if open.is_multiple_of(CONNECTION_CENSUS_STEP) {
+            debug!(open, "api connections open");
+        }
+    }
+}
 
 pub struct ServerHandle {
     _thread: std::thread::JoinHandle<()>,
@@ -99,6 +130,7 @@ pub fn start_server_with_capabilities(
                     let capabilities = capabilities.clone();
                     let connection_running = Arc::clone(&listener_running);
                     std::thread::spawn(move || {
+                        let _census = ConnectionCensus::open();
                         if let Err(err) = handle_connection(
                             stream,
                             &api_tx,
@@ -750,6 +782,18 @@ pub(super) fn should_stop_connection(
     running: &Arc<AtomicBool>,
 ) -> std::io::Result<bool> {
     if !running.load(Ordering::Relaxed) {
+        return Ok(true);
+    }
+
+    // Worth a line each time: a peer that exits without its connection closing
+    // is the leak, and the pid says which command it was. Rare when nothing is
+    // wrong, so it does not drown the log.
+    if let Some(pid) = crate::ipc::local_stream_peer_pid_gone(stream) {
+        warn!(
+            peer_pid = pid,
+            open = OPEN_CONNECTIONS.load(Ordering::Relaxed),
+            "api connection outlived the process that opened it; closing"
+        );
         return Ok(true);
     }
 
