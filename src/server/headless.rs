@@ -79,6 +79,47 @@ use std::fs;
 
 const LIVE_HANDOFF_RESPONSE_WRITE_TIMEOUT: Duration = Duration::from_secs(6);
 
+/// Set by `SIGUSR1`, meaning "hand over to the binary on disk and keep the
+/// panes". Handoff is normally an API call, but the two times this server has
+/// needed one most it was because the API had stopped answering -- and the only
+/// lever left, a signal that kills it, takes every pane and every agent with
+/// it. A signal that means handoff rather than death costs nothing to have.
+#[cfg(unix)]
+static HANDOFF_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_handoff_signal(_signum: libc::c_int) {
+    // Async-signal-safe: a relaxed store and nothing else. The loop does the work.
+    HANDOFF_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// Asks the kernel to route `SIGUSR1` to [`on_handoff_signal`].
+#[cfg(unix)]
+pub(crate) fn install_handoff_signal_handler() {
+    // SAFETY: `on_handoff_signal` is async-signal-safe -- one relaxed store --
+    // and `libc::signal` is the documented way to install it.
+    unsafe {
+        libc::signal(
+            libc::SIGUSR1,
+            on_handoff_signal as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn install_handoff_signal_handler() {}
+
+/// Whether a handoff signal has arrived since this was last asked, clearing it.
+#[cfg(unix)]
+fn take_handoff_request() -> bool {
+    HANDOFF_REQUESTED.swap(false, Ordering::Relaxed)
+}
+
+#[cfg(not(unix))]
+fn take_handoff_request() -> bool {
+    false
+}
+
 fn wait_for_live_handoff_response_write(
     response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
 ) {
@@ -539,6 +580,23 @@ impl HeadlessServer {
             if self.app.state.should_quit || self.should_quit.load(Ordering::Acquire) {
                 self.initiate_shutdown();
                 continue;
+            }
+
+            // A handoff asked for by signal rather than by API call. Checked
+            // here, at the top, so it still works when the parts of the server
+            // that answer requests have stopped doing so -- which is the case
+            // it exists for.
+            if take_handoff_request() {
+                info!("handoff requested by signal");
+                match self.perform_live_handoff(Default::default()) {
+                    Ok(()) => {
+                        self.finish_live_handoff_shutdown();
+                        continue;
+                    }
+                    Err(err) => {
+                        error!(%err, "handoff requested by signal failed; server continues");
+                    }
+                }
             }
 
             // 1. Check render_dirty flag from PTY reader tasks.
@@ -4366,6 +4424,7 @@ fn is_keybinding_config_diagnostic(diagnostic: &str) -> bool {
 pub fn run_server() -> io::Result<()> {
     init_logging();
     crate::platform::raise_server_nofile_limit();
+    install_handoff_signal_handler();
 
     let args: Vec<String> = std::env::args().collect();
     if args.get(2).map(String::as_str) == Some("--handoff-import") {
