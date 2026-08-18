@@ -176,11 +176,13 @@ pub struct App {
     #[cfg(unix)]
     pub(crate) mirror_remote_herdr: HashMap<String, String>,
     /// Hosts whose build does not know how to stream many terminals at once,
-    /// which go back to an attach per mirrored pane. The fleet runs mixed
-    /// builds as a matter of course -- two of its machines sleep for days --
-    /// so this is the normal state of affairs, not an error.
+    /// and when to try them again. They go back to an attach per mirrored pane
+    /// meanwhile. The fleet runs mixed builds as a matter of course -- two of
+    /// its machines sleep for days -- so this is the normal state of affairs,
+    /// not an error, and a host that gets updated must be able to stop being
+    /// one without this machine being restarted.
     #[cfg(unix)]
-    pub(crate) mirror_multiplex_unsupported: std::collections::HashSet<String>,
+    pub(crate) mirror_multiplex_unsupported: HashMap<String, std::time::Instant>,
     /// When a host's connection may be opened again, and how many times in a
     /// row it has failed. Reconcile runs on every snapshot a host sends, not
     /// on a timer, so without this a host that is down is dialled as fast as
@@ -890,7 +892,7 @@ impl App {
             #[cfg(unix)]
             mirror_remote_herdr: HashMap::new(),
             #[cfg(unix)]
-            mirror_multiplex_unsupported: std::collections::HashSet::new(),
+            mirror_multiplex_unsupported: HashMap::new(),
             #[cfg(unix)]
             mirror_stream_retry: HashMap::new(),
             #[cfg(unix)]

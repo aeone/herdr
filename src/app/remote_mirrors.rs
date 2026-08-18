@@ -1055,7 +1055,10 @@ impl App {
                     complaint = stream.complaint(),
                     "host did not stream any mirrors; falling back to one attach per pane"
                 );
-                self.mirror_multiplex_unsupported.insert(target.to_owned());
+                self.mirror_multiplex_unsupported.insert(
+                    target.to_owned(),
+                    std::time::Instant::now() + Self::MULTIPLEX_RETRY_AFTER,
+                );
             }
         }
         self.mirror_streams.remove(target);
@@ -1226,13 +1229,27 @@ impl App {
         );
     }
 
+    /// How long a host that could not stream keeps being mirrored the old way
+    /// before it is asked again. Deploys are rare; an hour of attach after one
+    /// is cheaper than dialling a host that cannot answer every half minute.
+    const MULTIPLEX_RETRY_AFTER: Duration = Duration::from_secs(3600);
+
     /// Whether this host's mirrors share one connection.
     ///
     /// Configured on, minus the hosts that have shown they cannot: the fleet
     /// runs mixed builds as a matter of course, so falling back per host is the
     /// normal case rather than a failure.
     fn mirrors_are_multiplexed(&self, target: &str) -> bool {
-        self.multiplexed_mirrors && !self.mirror_multiplex_unsupported.contains(target)
+        if !self.multiplexed_mirrors {
+            return false;
+        }
+        match self.mirror_multiplex_unsupported.get(target) {
+            // Asked again once in a while, because the answer changes: a host
+            // is old until someone deploys to it, and noticing that should not
+            // need this machine to be restarted.
+            Some(retry_at) => std::time::Instant::now() >= *retry_at,
+            None => true,
+        }
     }
 
     /// Every terminal we currently mirror of one host, with the size to render
@@ -1421,6 +1438,15 @@ mod tests {
             "a host that said nothing should be mirrored the old way"
         );
         assert!(app.mirror_streams.is_empty());
+
+        // A host is only old until someone deploys to it, and noticing that
+        // should not need this machine to be restarted.
+        app.mirror_multiplex_unsupported
+            .insert("sleepy".to_string(), std::time::Instant::now());
+        assert!(
+            app.mirrors_are_multiplexed("sleepy"),
+            "once the wait is up the host is asked again"
+        );
     }
 
     /// A connection that was working and then dropped says nothing about what
