@@ -11,7 +11,9 @@
 //! the set of agent panes changes.
 
 use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::schema::{EmptyParams, Method, Request};
@@ -19,6 +21,10 @@ use crate::ipc::connect_local_stream;
 
 /// Debounce window so a burst of related events produces one block, not many.
 const COALESCE_WINDOW: Duration = Duration::from_millis(120);
+
+/// How long a status watch waits on a quiet connection before checking whether
+/// it is still wanted.
+const WATCH_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(super) fn run_agent_feed(args: &[String]) -> std::io::Result<i32> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -134,6 +140,7 @@ fn spawn_heartbeat(tx: mpsc::Sender<Change>) {
 
 /// Global structure-event subscription. Any event on it signals a change.
 fn spawn_structure_watch(tx: mpsc::Sender<Change>) {
+    // Never stopped: the structure watch lives as long as the feed itself.
     let subscriptions = serde_json::json!([
         { "type": "workspace.created" },
         { "type": "workspace.closed" },
@@ -143,33 +150,54 @@ fn spawn_structure_watch(tx: mpsc::Sender<Change>) {
         { "type": "pane.exited" },
         { "type": "pane.agent_detected" },
     ]);
-    spawn_subscription_watch(subscriptions, tx);
+    spawn_subscription_watch(subscriptions, tx, Arc::new(AtomicBool::new(false)));
 }
 
 /// Per-agent-pane status subscriptions. Dropping this joins nothing — the
 /// watcher threads exit on their own when their connection is closed, which the
 /// server does when the client goes away; a stale thread just re-signals a
 /// change that produces an identical block, which is harmless.
-struct StatusWatch;
+/// The per-pane status subscriptions, which end when this is dropped.
+///
+/// One connection and one thread per agent pane, rebuilt whenever the set of
+/// agent panes changes -- which on a machine holding mirrors is often. Owning
+/// them is the whole point: when this held nothing, every rebuild left its
+/// threads and connections running for the life of the feed, and a host whose
+/// mirrors were churning reached the descriptor limit inside a quarter of an
+/// hour, taking the server it was watching along with it.
+struct StatusWatch {
+    stop: Arc<AtomicBool>,
+}
 
 impl StatusWatch {
     fn new(agent_pane_ids: &[String], tx: &mpsc::Sender<Change>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
         for pane_id in agent_pane_ids {
             let subscriptions = serde_json::json!([
                 { "type": "pane.agent_status_changed", "pane_id": pane_id }
             ]);
-            spawn_subscription_watch(subscriptions, tx.clone());
+            spawn_subscription_watch(subscriptions, tx.clone(), Arc::clone(&stop));
         }
-        Self
+        Self { stop }
+    }
+}
+
+impl Drop for StatusWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
     }
 }
 
 /// Opens a subscription connection and signals `tx` on every event line,
 /// reconnecting if the server was not ready yet or the stream drops.
-fn spawn_subscription_watch(subscriptions: serde_json::Value, tx: mpsc::Sender<Change>) {
+fn spawn_subscription_watch(
+    subscriptions: serde_json::Value,
+    tx: mpsc::Sender<Change>,
+    stop: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
-        loop {
-            if !watch_subscription_once(&subscriptions, &tx) {
+        while !stop.load(Ordering::Relaxed) {
+            if !watch_subscription_once(&subscriptions, &tx, &stop) {
                 // tx is closed — the feed is shutting down.
                 break;
             }
@@ -180,10 +208,21 @@ fn spawn_subscription_watch(subscriptions: serde_json::Value, tx: mpsc::Sender<C
 
 /// One subscription connection. Returns false only when `tx` is closed, so the
 /// caller stops; any connection error returns true so it retries.
-fn watch_subscription_once(subscriptions: &serde_json::Value, tx: &mpsc::Sender<Change>) -> bool {
+fn watch_subscription_once(
+    subscriptions: &serde_json::Value,
+    tx: &mpsc::Sender<Change>,
+    stop: &AtomicBool,
+) -> bool {
     let Ok(mut stream) = connect_local_stream(&crate::api::socket_path()) else {
         return true;
     };
+    // Read in short waits rather than blocking for ever, so a watch that is no
+    // longer wanted lets go of its connection promptly instead of when its pane
+    // next happens to do something.
+    {
+        use interprocess::local_socket::traits::Stream as _;
+        let _ = stream.set_recv_timeout(Some(WATCH_READ_TIMEOUT));
+    }
     let request = serde_json::json!({
         "id": "cli:agent:feed:sub",
         "method": "events.subscribe",
@@ -196,19 +235,70 @@ fn watch_subscription_once(subscriptions: &serde_json::Value, tx: &mpsc::Sender<
     {
         return true;
     }
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let Ok(line) = line else { return true };
-        if line.trim().is_empty() {
+    // Read a line at a time rather than through `lines()`, so a wait that times
+    // out is a quiet moment -- keep the connection, keep any half-read line, and
+    // go round again -- rather than a reason to reconnect every couple of
+    // seconds. The only thing a timeout is for is noticing `stop`.
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        match reader.read_line(&mut line) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => return true,
+        }
+        if !line.ends_with('\n') {
+            // A line still arriving; wait for the rest of it.
+            continue;
+        }
+        let complete = std::mem::take(&mut line);
+        let complete = complete.trim();
+        if complete.is_empty() {
             continue;
         }
         // The first line is the subscription_started ack, not an event.
-        if line.contains("subscription_started") {
+        if complete.contains("subscription_started") {
             continue;
         }
         if tx.send(Change).is_err() {
             return false;
         }
     }
-    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The watches are rebuilt whenever the set of agent panes changes, which
+    /// on a machine holding mirrors is constant. Dropping a generation has to
+    /// end it: when this struct owned nothing, every rebuild left its threads
+    /// and connections running for the life of the feed, and a host whose
+    /// mirrors were churning reached the descriptor limit within the quarter
+    /// hour -- with the server it was watching holding the other end of each.
+    #[test]
+    fn dropping_a_generation_of_watches_stops_them() {
+        let (tx, _rx) = mpsc::channel::<Change>();
+        let watch = StatusWatch::new(&[], &tx);
+        let stop = Arc::clone(&watch.stop);
+        assert!(!stop.load(Ordering::Relaxed));
+
+        drop(watch);
+
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "a replaced generation of watches should be told to stop"
+        );
+    }
 }

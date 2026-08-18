@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- `herdr agent feed` lets go of the status subscriptions it replaces. It watches one subscription per agent pane and rebuilds the set whenever the agent panes change, but the thing holding them owned nothing, so every rebuild left a thread and a connection running for the life of the feed. On a machine whose mirrors were churning that reached the 1024-descriptor limit in under a quarter of an hour -- with the server being watched holding the other end of all 1024 -- which is what made a busy host start refusing connections with `Resource temporarily unavailable`.
+
 - A host is only judged too old for a shared mirror connection by what it says, not by its silence. A build that lacks `terminal session observe-many` prints its usage and exits; so does a host that is asleep or whose server is mid-restart, and going by "no frames arrived" alone put a host back on the per-pane attach for an hour because it was being deployed to at that moment.
 
 - A mirrored host that stops answering is dialled again on a backoff that doubles from two seconds and caps at half a minute, per host, cleared the moment a frame arrives. Mirrors are reconciled on every snapshot a host sends rather than on a timer, so an unreachable host used to be retried as fast as events arrived — with an attach per pane behind it, a sleeping laptop once cost 672 pane exits in a few minutes.
