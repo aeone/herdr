@@ -181,6 +181,13 @@ pub struct App {
     /// so this is the normal state of affairs, not an error.
     #[cfg(unix)]
     pub(crate) mirror_multiplex_unsupported: std::collections::HashSet<String>,
+    /// When a host's connection may be opened again, and how many times in a
+    /// row it has failed. Reconcile runs on every snapshot a host sends, not
+    /// on a timer, so without this a host that is down is dialled as fast as
+    /// the events arrive -- which is how a sleeping laptop once cost 672 pane
+    /// exits in a few minutes.
+    #[cfg(unix)]
+    pub(crate) mirror_stream_retry: HashMap<String, (std::time::Instant, u32)>,
     /// Mirror renames sent to a host but not yet reflected in its snapshots,
     /// by mirror key. Reconcile leaves these alone so the name the user typed
     /// does not flicker back to the old one while the host is catching up.
@@ -884,6 +891,8 @@ impl App {
             mirror_remote_herdr: HashMap::new(),
             #[cfg(unix)]
             mirror_multiplex_unsupported: std::collections::HashSet::new(),
+            #[cfg(unix)]
+            mirror_stream_retry: HashMap::new(),
             #[cfg(unix)]
             pending_mirror_renames: HashMap::new(),
             #[cfg(unix)]

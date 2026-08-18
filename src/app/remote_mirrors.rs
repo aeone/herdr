@@ -924,6 +924,10 @@ impl App {
 
     /// Draws a frame that arrived over a host's shared connection.
     pub(crate) fn apply_mirror_frame(&mut self, target: &str, terminal_id: &str, bytes: &[u8]) {
+        // Hearing from the host at all is what proves it is answering, whether
+        // or not this particular frame still has a pane to land in, so the next
+        // failure starts counting from nothing again.
+        self.mirror_stream_retry.remove(target);
         let Some(ws_idx) = self.mirror_index_for_terminal(target, terminal_id) else {
             // A frame for a mirror that has since been closed. The host is told
             // the new set on the next reconcile, so this settles by itself.
@@ -1058,6 +1062,7 @@ impl App {
         if let Some(control) = self.mirror_controls.remove(target) {
             control.stop();
         }
+        self.defer_mirror_stream(target);
         if self.state.keeps_offline_mirrors() {
             for workspace in self.state.workspaces.iter_mut() {
                 if let Some(mirror) = workspace.remote_mirror.as_mut() {
@@ -1191,6 +1196,36 @@ impl App {
         Ok(())
     }
 
+    /// How long to wait before dialling a host again, after this many failures
+    /// in a row.
+    ///
+    /// Doubling from two seconds and capped at a minute: long enough that a
+    /// host which is simply away costs nothing, short enough that one which
+    /// blinked is back within a poll.
+    fn mirror_retry_delay(failures: u32) -> Duration {
+        Duration::from_secs(2u64.saturating_pow(failures.clamp(1, 5)))
+    }
+
+    /// Notes that a host's connection failed, and when to try it again.
+    fn defer_mirror_stream(&mut self, target: &str) {
+        let failures = self
+            .mirror_stream_retry
+            .get(target)
+            .map(|(_, failures)| failures.saturating_add(1))
+            .unwrap_or(1);
+        let delay = Self::mirror_retry_delay(failures);
+        self.mirror_stream_retry.insert(
+            target.to_owned(),
+            (std::time::Instant::now() + delay, failures),
+        );
+        tracing::debug!(
+            target,
+            failures,
+            seconds = delay.as_secs(),
+            "waiting before opening this host's mirror connection again"
+        );
+    }
+
     /// Whether this host's mirrors share one connection.
     ///
     /// Configured on, minus the hosts that have shown they cannot: the fleet
@@ -1237,6 +1272,11 @@ impl App {
             return;
         }
         if !self.mirror_streams.contains_key(&space.target) {
+            if let Some((retry_at, _)) = self.mirror_stream_retry.get(&space.target) {
+                if std::time::Instant::now() < *retry_at {
+                    return;
+                }
+            }
             match crate::remote::mirror_stream::MirrorStream::spawn(
                 space,
                 remote_herdr,
@@ -1248,6 +1288,7 @@ impl App {
                 }
                 Err(err) => {
                     tracing::warn!(target = %space.target, %err, "could not open a shared mirror connection");
+                    self.defer_mirror_stream(&space.target);
                     return;
                 }
             }
@@ -1264,6 +1305,7 @@ impl App {
             if let Some(stream) = self.mirror_streams.remove(&space.target) {
                 stream.stop();
             }
+            self.defer_mirror_stream(&space.target);
             return;
         }
         tracing::debug!(target = %space.target, count, "asked a host for its mirrored terminals");
@@ -1321,6 +1363,40 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reconcile runs on every snapshot a host sends rather than on a timer, so
+    /// a host that is down must cost less each time rather than the same every
+    /// time.
+    #[test]
+    fn dialling_a_host_that_is_down_backs_off_and_stops_growing() {
+        let delays: Vec<u64> = (1..=7)
+            .map(|failures| App::mirror_retry_delay(failures).as_secs())
+            .collect();
+        assert_eq!(delays, vec![2, 4, 8, 16, 32, 32, 32]);
+        assert_eq!(
+            App::mirror_retry_delay(0).as_secs(),
+            2,
+            "the first failure still waits"
+        );
+    }
+
+    /// A host that is answering must not be carrying a grudge from an earlier
+    /// blip: the next failure starts counting from nothing.
+    #[tokio::test]
+    async fn a_frame_clears_the_backoff_for_that_host() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.mirror_stream_retry.insert(
+            "workbox".to_string(),
+            (std::time::Instant::now() + Duration::from_secs(30), 4),
+        );
+
+        // No mirror of this terminal exists, which is enough: the point is that
+        // hearing from the host at all is what clears it.
+        app.apply_mirror_frame("workbox", "term-1", b"hello");
+
+        assert!(!app.mirror_stream_retry.contains_key("workbox"));
+    }
 
     /// The fleet runs mixed builds as a matter of course -- two of its machines
     /// sleep for days -- so a host that cannot stream many terminals at once
