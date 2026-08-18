@@ -30,6 +30,8 @@ const TERMINAL_SESSION_OBSERVE_USAGE: &str =
     "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
 const TERMINAL_SESSION_CONTROL_USAGE: &str =
     "usage: herdr terminal session control <target> [--takeover] [--cols N] [--rows N]";
+const TERMINAL_SESSION_OBSERVE_MANY_USAGE: &str =
+    "usage: herdr terminal session observe-many   (targets are given on stdin)";
 
 pub(crate) fn parse_token_assignment(raw: &str) -> Result<(String, Option<String>), String> {
     let Some((key, value)) = raw.split_once('=') else {
@@ -525,14 +527,17 @@ fn terminal_session(args: &[String]) -> std::io::Result<i32> {
     match args.first().map(|arg| arg.as_str()) {
         Some("control") => terminal_session_control(&args[1..]),
         Some("observe") => terminal_session_observe(&args[1..]),
+        Some("observe-many") => terminal_session_observe_many(&args[1..]),
         Some("help" | "--help" | "-h") => {
             eprintln!("{TERMINAL_SESSION_CONTROL_USAGE}");
             eprintln!("{TERMINAL_SESSION_OBSERVE_USAGE}");
+            eprintln!("{TERMINAL_SESSION_OBSERVE_MANY_USAGE}");
             Ok(0)
         }
         _ => {
             eprintln!("{TERMINAL_SESSION_CONTROL_USAGE}");
             eprintln!("{TERMINAL_SESSION_OBSERVE_USAGE}");
+            eprintln!("{TERMINAL_SESSION_OBSERVE_MANY_USAGE}");
             Ok(2)
         }
     }
@@ -570,6 +575,29 @@ fn terminal_session_observe(args: &[String]) -> std::io::Result<i32> {
     };
 
     crate::client::run_terminal_session_observe(options.target, options.cols, options.rows)?;
+    Ok(0)
+}
+
+/// Watches many terminals over one connection.
+///
+/// The terminals are named on stdin rather than in argv: a watcher's set
+/// changes as panes come and go on the host it is watching, and reopening the
+/// connection for each change would give back exactly what one connection per
+/// host is for.
+fn terminal_session_observe_many(args: &[String]) -> std::io::Result<i32> {
+    if matches!(
+        args.first().map(|arg| arg.as_str()),
+        Some("help" | "--help" | "-h")
+    ) {
+        eprintln!("{TERMINAL_SESSION_OBSERVE_MANY_USAGE}");
+        return Ok(0);
+    }
+    if let Some(unexpected) = args.first() {
+        eprintln!("unexpected argument: {unexpected}");
+        eprintln!("{TERMINAL_SESSION_OBSERVE_MANY_USAGE}");
+        return Ok(2);
+    }
+    crate::client::run_terminal_session_observe_many()?;
     Ok(0)
 }
 

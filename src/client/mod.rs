@@ -877,6 +877,158 @@ pub fn run_terminal_session_observe(target: String, cols: u16, rows: u16) -> io:
     write_terminal_session_output(stream)
 }
 
+/// Runs a read-only observer of several terminals over one connection.
+///
+/// The set of terminals is given on stdin rather than in argv, because a
+/// watcher's set changes as panes come and go on this host and the whole point
+/// is to keep one connection for the life of the host rather than one per pane.
+/// Each frame that comes back names its terminal.
+pub fn run_terminal_session_observe_many() -> io::Result<()> {
+    init_logging();
+
+    let socket_path = client_socket_path();
+    crate::logging::startup("client");
+    info!(path = %socket_path.display(), "observing terminal sessions");
+
+    let mut stream = match crate::ipc::connect_local_stream(&socket_path) {
+        Ok(stream) => stream,
+        Err(err) => {
+            eprintln!("herdr: {}", ClientError::ConnectionFailed(err));
+            std::process::exit(1);
+        }
+    };
+
+    // The connection's own size is never rendered at -- every observed terminal
+    // carries its own -- so this is only what the handshake insists on.
+    match do_handshake(
+        &mut stream,
+        80,
+        24,
+        0,
+        0,
+        RenderEncoding::TerminalAnsi,
+        true,
+    ) {
+        Ok(RenderEncoding::TerminalAnsi) => {}
+        Ok(encoding) => {
+            eprintln!("herdr: multiplexed observe negotiated unsupported encoding {encoding:?}");
+            std::process::exit(1);
+        }
+        Err(err) => {
+            eprintln!("herdr: {err}");
+            std::process::exit(1);
+        }
+    }
+    stream.set_nonblocking(false)?;
+
+    let mut write_stream = stream.try_clone()?;
+    let _input_thread = std::thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            if line.trim().is_empty() {
+                continue;
+            }
+            match observe_many_command_from_json(&line) {
+                Ok(message) => {
+                    if write_to_server(&mut write_stream, &message).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => eprintln!("herdr: multiplexed observe input ignored: {err}"),
+            }
+        }
+    });
+
+    write_observed_terminal_output(stream)
+}
+
+fn write_observed_terminal_output(mut stream: LocalStream) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    loop {
+        let line = match protocol::read_message(&mut stream, MAX_GRAPHICS_FRAME_SIZE) {
+            Ok(ServerMessage::ObservedTerminal(observed)) => serde_json::json!({
+                "type": "terminal.frame",
+                "terminal_id": observed.terminal_id,
+                "target": observed.target,
+                "seq": observed.frame.seq,
+                "encoding": "ansi",
+                "width": observed.frame.width,
+                "height": observed.frame.height,
+                "full": observed.frame.full,
+                "bytes": base64::engine::general_purpose::STANDARD.encode(&observed.frame.bytes),
+            }),
+            Ok(ServerMessage::ObservedTerminalEnded {
+                terminal_id,
+                target,
+                reason,
+            }) => serde_json::json!({
+                "type": "terminal.ended",
+                "terminal_id": terminal_id,
+                "target": target,
+                "reason": reason,
+            }),
+            Ok(ServerMessage::ServerShutdown { reason }) => {
+                let line = serde_json::json!({"type": "terminal.closed", "reason": reason});
+                serde_json::to_writer(&mut stdout, &line)?;
+                stdout.write_all(b"\n")?;
+                stdout.flush()?;
+                return Ok(());
+            }
+            Ok(_) => continue,
+            Err(protocol::FramingError::UnexpectedEof) => return Ok(()),
+            Err(err) => return Err(io::Error::other(err.to_string())),
+        };
+        serde_json::to_writer(&mut stdout, &line)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "type")]
+enum ObserveManyCommand {
+    #[serde(rename = "terminal.observe")]
+    Observe { targets: Vec<ObserveManyTarget> },
+}
+
+#[derive(serde::Deserialize)]
+struct ObserveManyTarget {
+    target: String,
+    cols: u16,
+    rows: u16,
+}
+
+fn observe_many_command_from_json(raw: &str) -> Result<ClientMessage, String> {
+    let command = serde_json::from_str::<ObserveManyCommand>(raw)
+        .map_err(|err| format!("invalid json command: {err}"))?;
+    match command {
+        ObserveManyCommand::Observe { targets } => {
+            if let Some(bad) = targets
+                .iter()
+                .find(|target| target.cols == 0 || target.rows == 0)
+            {
+                return Err(format!(
+                    "terminal.observe cols and rows must be greater than 0 (target {})",
+                    bad.target
+                ));
+            }
+            Ok(ClientMessage::ObserveTerminals {
+                targets: targets
+                    .into_iter()
+                    .map(|target| crate::protocol::ObservedTarget {
+                        target: target.target,
+                        cols: target.cols,
+                        rows: target.rows,
+                    })
+                    .collect(),
+            })
+        }
+    }
+}
+
 /// Runs a writable terminal session controller.
 pub fn run_terminal_session_control(
     target: String,
@@ -3014,6 +3166,37 @@ mod tests {
             panic!("expected input command");
         };
         assert_eq!(data, b"hello");
+    }
+
+    /// Every terminal carries its own size, since a watcher's panes are rarely
+    /// all the same shape.
+    #[test]
+    fn observe_many_command_keeps_a_size_per_terminal() {
+        let action = observe_many_command_from_json(
+            r#"{"type":"terminal.observe","targets":[{"target":"w1:p1","cols":40,"rows":8},{"target":"agent-two","cols":100,"rows":30}]}"#,
+        )
+        .unwrap();
+        let ClientMessage::ObserveTerminals { targets } = action else {
+            panic!("expected an observe command");
+        };
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| (target.target.as_str(), target.cols, target.rows))
+                .collect::<Vec<_>>(),
+            vec![("w1:p1", 40, 8), ("agent-two", 100, 30)]
+        );
+    }
+
+    /// A zero-sized terminal would render nothing at all, and the mistake is
+    /// worth naming rather than passing on to the host.
+    #[test]
+    fn observe_many_command_rejects_an_empty_size() {
+        let err = observe_many_command_from_json(
+            r#"{"type":"terminal.observe","targets":[{"target":"w1:p1","cols":0,"rows":8}]}"#,
+        )
+        .expect_err("a zero size should be refused");
+        assert!(err.contains("w1:p1"), "{err}");
     }
 
     #[test]

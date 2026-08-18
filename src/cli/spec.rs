@@ -697,6 +697,10 @@ fn terminal_command() -> Command {
                         .arg(required("target", "TARGET"))
                         .arg(option("cols", "N"))
                         .arg(option("rows", "N")),
+                )
+                .subcommand(
+                    Command::new("observe-many")
+                        .about("Observe many terminal streams, named on stdin"),
                 ),
         )
         .subcommand(
