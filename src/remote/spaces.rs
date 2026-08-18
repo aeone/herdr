@@ -166,6 +166,62 @@ pub(crate) fn attach_argv(
     argv
 }
 
+/// Argv for the one connection that carries every mirror of a host.
+///
+/// No `-t`: an attach needs a PTY because it forwards raw input, but this
+/// stream is line-oriented JSON in both directions and a PTY would only put a
+/// line discipline in the way.
+pub(crate) fn observe_many_argv(space: &RemoteSpaceConfig, remote_herdr: &str) -> Vec<String> {
+    if space.is_local() {
+        let mut argv = vec![
+            "env".to_string(),
+            "-u".to_string(),
+            "HERDR_SOCKET_PATH".to_string(),
+            "-u".to_string(),
+            "HERDR_CLIENT_SOCKET_PATH".to_string(),
+        ];
+        match space.session.as_deref() {
+            Some(session) => argv.push(format!("{}={session}", crate::session::SESSION_ENV_VAR)),
+            None => {
+                argv.push("-u".to_string());
+                argv.push(crate::session::SESSION_ENV_VAR.to_string());
+            }
+        }
+        argv.push(remote_herdr.to_string());
+        argv.push("terminal".to_string());
+        argv.push("session".to_string());
+        argv.push("observe-many".to_string());
+        return argv;
+    }
+    // Same liveness options as the attach path: a host that vanishes without
+    // closing would otherwise leave every mirror it carries showing stale
+    // output for ever, and now that is one connection carrying all of them.
+    let mut argv = vec![
+        "ssh".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=4".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=15".to_string(),
+        space.target.clone(),
+    ];
+    let mut remote = String::new();
+    if let Some(session) = space.session.as_deref() {
+        remote.push_str(&format!(
+            "{}={} ",
+            crate::session::SESSION_ENV_VAR,
+            shell_quote(session)
+        ));
+    }
+    remote.push_str(&format!(
+        "{} terminal session observe-many",
+        shell_quote(remote_herdr)
+    ));
+    argv.push(remote);
+    argv
+}
+
 /// Names for every mirrored pane in a snapshot, aligned with `panes`.
 ///
 /// Remote workspace labels are not unique — a host can easily have several

@@ -760,9 +760,12 @@ impl App {
                         Some(origin) => remote_mirror_record_for_origin(space, &key, origin),
                         None => remote_mirror_record(space, &key),
                     };
-                    if let Err(err) =
+                    let created = if self.multiplexed_mirrors {
+                        self.create_streamed_mirror(mirror, &label)
+                    } else {
                         self.create_remote_mirror(mirror, &label, &argv, agent.as_deref())
-                    {
+                    };
+                    if let Err(err) = created {
                         tracing::warn!(
                             target = %space.target,
                             %err,
@@ -774,6 +777,11 @@ impl App {
         }
         if closed > 0 {
             self.shutdown_detached_terminal_runtimes();
+        }
+        if self.multiplexed_mirrors {
+            // After the plan, so the set named to the host is the set that now
+            // exists here rather than the one that did a moment ago.
+            self.update_mirror_stream(space, &snapshot.remote_herdr);
         }
         // Always, even when the structure plan was empty: an agent changing
         // status (idle->working) is not a structure change, and its mirror must
@@ -900,6 +908,113 @@ impl App {
         }
     }
 
+    /// Finds the mirror of one remote terminal, by the host and the id that
+    /// host knows it by.
+    fn mirror_index_for_terminal(&self, target: &str, terminal_id: &str) -> Option<usize> {
+        self.state.workspaces.iter().position(|workspace| {
+            workspace.remote_mirror.as_ref().is_some_and(|mirror| {
+                mirror.target == target
+                    && crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)
+                        .is_some_and(|(_, remote_terminal)| remote_terminal == terminal_id)
+            })
+        })
+    }
+
+    /// Draws a frame that arrived over a host's shared connection.
+    pub(crate) fn apply_mirror_frame(&mut self, target: &str, terminal_id: &str, bytes: &[u8]) {
+        let Some(ws_idx) = self.mirror_index_for_terminal(target, terminal_id) else {
+            // A frame for a mirror that has since been closed. The host is told
+            // the new set on the next reconcile, so this settles by itself.
+            return;
+        };
+        let Some(local_terminal) = self.state.workspaces.get(ws_idx).and_then(|workspace| {
+            let pane_id = workspace.root_pane;
+            workspace.terminal_id(pane_id).cloned()
+        }) else {
+            return;
+        };
+        let Some(runtime) = self.terminal_runtimes.get(&local_terminal) else {
+            return;
+        };
+        if !runtime.apply_streamed_bytes(bytes) {
+            tracing::debug!(
+                target = %target,
+                terminal_id,
+                "dropped a mirror frame for a pane that is not streamed"
+            );
+        }
+    }
+
+    /// One mirrored terminal has gone on its host.
+    ///
+    /// The rest of that host's mirrors are unaffected: they share a connection,
+    /// not a fate.
+    pub(crate) fn handle_mirror_terminal_ended(
+        &mut self,
+        target: &str,
+        terminal_id: &str,
+        reason: Option<&str>,
+    ) {
+        let Some(ws_idx) = self.mirror_index_for_terminal(target, terminal_id) else {
+            return;
+        };
+        tracing::debug!(target = %target, terminal_id, reason, "a mirrored terminal ended");
+        if self.state.keeps_offline_mirrors() {
+            if let Some(mirror) = self
+                .state
+                .workspaces
+                .get_mut(ws_idx)
+                .and_then(|workspace| workspace.remote_mirror.as_mut())
+            {
+                mirror.disconnected = true;
+                return;
+            }
+        }
+        self.close_mirror_at(ws_idx);
+        self.shutdown_detached_terminal_runtimes();
+    }
+
+    /// The whole connection to a host has closed.
+    ///
+    /// Every mirror it carried is now stale, and the next reconcile opens the
+    /// connection again. Nothing is torn down here when offline mirrors are
+    /// kept, which is the point of keeping them.
+    pub(crate) fn handle_mirror_stream_closed(&mut self, target: &str, reason: Option<&str>) {
+        tracing::info!(target = %target, reason, "mirror stream closed");
+        self.mirror_streams.remove(target);
+        if self.state.keeps_offline_mirrors() {
+            for workspace in self.state.workspaces.iter_mut() {
+                if let Some(mirror) = workspace.remote_mirror.as_mut() {
+                    if mirror.target == target {
+                        mirror.disconnected = true;
+                    }
+                }
+            }
+            return;
+        }
+        let stale: Vec<usize> = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .filter(|(_, workspace)| {
+                workspace
+                    .remote_mirror
+                    .as_ref()
+                    .is_some_and(|mirror| mirror.target == target)
+            })
+            .map(|(ws_idx, _)| ws_idx)
+            .rev()
+            .collect();
+        let closed = !stale.is_empty();
+        for ws_idx in stale {
+            self.close_mirror_at(ws_idx);
+        }
+        if closed {
+            self.shutdown_detached_terminal_runtimes();
+        }
+    }
+
     fn close_mirror_at(&mut self, ws_idx: usize) {
         let pane_ids = self
             .state
@@ -935,6 +1050,115 @@ impl App {
             }
         }
         self.state.remove_plugin_pane_records(pane_ids);
+    }
+
+    /// Creates a mirror fed by the host's shared connection.
+    ///
+    /// Nothing is spawned: no ssh, no remote process, no claim on the remote
+    /// terminal. The pane is a terminal parser waiting for frames.
+    fn create_streamed_mirror(&mut self, mirror: RemoteMirror, label: &str) -> std::io::Result<()> {
+        let (rows, cols) = self.state.estimate_pane_size();
+        let cwd = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        // Input and resizes a mirror produces are the host's business, and
+        // until its control is claimed there is nothing to do with them. The
+        // receiver is drained rather than dropped so typing into a mirror is
+        // quietly ignored instead of reported as a broken pane.
+        let (requests, mut request_rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move { while request_rx.recv().await.is_some() {} });
+        let (mut workspace, terminal, runtime) = Workspace::new_streamed_mirror(
+            cwd,
+            rows,
+            cols,
+            self.state.pane_scrollback_limit_bytes,
+            self.state.host_terminal_theme,
+            self.event_tx.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+            requests,
+        )?;
+        workspace.custom_name = Some(label.to_string());
+        workspace.remote_mirror = Some(mirror);
+        // Which agent this is comes from the host, applied to every mirror by
+        // `report_remote_agent_states` right after this. The attach path needs
+        // `HERDR_AGENT` because its pane's foreground process is ssh and local
+        // detection would otherwise see nothing; a streamed pane runs no
+        // detection at all, so there is nothing to tell.
+
+        self.terminal_runtimes.insert(terminal.id.clone(), runtime);
+        self.state.terminals.insert(terminal.id.clone(), terminal);
+        self.state.workspaces.push(workspace);
+        Ok(())
+    }
+
+    /// Every terminal we currently mirror of one host, with the size to render
+    /// each at.
+    fn mirror_stream_targets(
+        &self,
+        target: &str,
+    ) -> Vec<crate::remote::mirror_stream::MirrorStreamTarget> {
+        let (rows, cols) = self.state.estimate_pane_size();
+        self.state
+            .workspaces
+            .iter()
+            .filter_map(|workspace| {
+                let mirror = workspace.remote_mirror.as_ref()?;
+                if mirror.target != target {
+                    return None;
+                }
+                let (_, terminal_id) =
+                    crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)?;
+                Some(crate::remote::mirror_stream::MirrorStreamTarget {
+                    terminal_id: terminal_id.to_owned(),
+                    cols,
+                    rows,
+                })
+            })
+            .collect()
+    }
+
+    /// Opens the host's connection if it is not open, and tells it which
+    /// terminals to send.
+    fn update_mirror_stream(&mut self, space: &RemoteSpaceConfig, remote_herdr: &str) {
+        let targets = self.mirror_stream_targets(&space.target);
+        if targets.is_empty() {
+            if let Some(stream) = self.mirror_streams.remove(&space.target) {
+                stream.stop();
+            }
+            return;
+        }
+        if !self.mirror_streams.contains_key(&space.target) {
+            match crate::remote::mirror_stream::MirrorStream::spawn(
+                space,
+                remote_herdr,
+                self.event_tx.clone(),
+            ) {
+                Ok(stream) => {
+                    tracing::info!(target = %space.target, "opened a shared mirror connection");
+                    self.mirror_streams.insert(space.target.clone(), stream);
+                }
+                Err(err) => {
+                    tracing::warn!(target = %space.target, %err, "could not open a shared mirror connection");
+                    return;
+                }
+            }
+        }
+        let Some(stream) = self.mirror_streams.get_mut(&space.target) else {
+            return;
+        };
+        if stream.is_watching(&targets) {
+            return;
+        }
+        let count = targets.len();
+        if let Err(err) = stream.set_targets(targets) {
+            tracing::warn!(target = %space.target, %err, "could not update a shared mirror connection");
+            if let Some(stream) = self.mirror_streams.remove(&space.target) {
+                stream.stop();
+            }
+            return;
+        }
+        tracing::debug!(target = %space.target, count, "asked a host for its mirrored terminals");
     }
 
     fn create_remote_mirror(

@@ -1,4 +1,6 @@
 #[cfg(unix)]
+pub(crate) mod mirror_stream;
+#[cfg(unix)]
 pub(crate) mod spaces;
 #[cfg(unix)]
 mod unix;

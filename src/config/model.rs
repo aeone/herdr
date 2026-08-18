@@ -920,6 +920,14 @@ pub struct RemoteConfig {
     /// go and wake. The `toggle_offline_mirrors` keybind still overrides this
     /// for the session once pressed. Default: false.
     pub keep_offline_mirrors: bool,
+    /// Whether mirrors of a host share one connection instead of taking an ssh,
+    /// a remote process and an exclusive claim on the terminal each.
+    ///
+    /// The shared connection only watches, so several machines can mirror the
+    /// same host at once, which the per-pane attach forbids. Needs a host new
+    /// enough to understand `terminal session observe-many`; hosts that are not
+    /// keep the per-pane attach. Default: false while this is being proven.
+    pub multiplexed_mirrors: bool,
 }
 
 impl Default for RemoteConfig {
@@ -928,6 +936,7 @@ impl Default for RemoteConfig {
             manage_ssh_config: true,
             spaces: Vec::new(),
             keep_offline_mirrors: false,
+            multiplexed_mirrors: false,
         }
     }
 }

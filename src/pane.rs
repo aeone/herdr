@@ -939,12 +939,95 @@ pub struct PaneRuntime {
     detect_reset_notify: Arc<Notify>,
     pending_release: Arc<Mutex<Option<PendingAgentRelease>>>,
     preserve_processes_on_drop: bool,
+    /// Present only for a streamed mirror: what to do with bytes that arrive
+    /// from the host holding the real terminal.
+    streamed_ingest: Option<StreamedIngest>,
     // Task handles for deterministic shutdown
     detect_handle: Option<tokio::task::AbortHandle>,
 }
 
+/// Everything a streamed pane needs to take another host's bytes.
+///
+/// This is what the PTY reader callback does for a local pane, minus the parts
+/// that only make sense with a process on the other end.
+struct StreamedIngest {
+    pane_id: PaneId,
+    terminal: Arc<PaneTerminal>,
+    response_writer: mpsc::Sender<Bytes>,
+    events: mpsc::Sender<AppEvent>,
+    reported_cwd: Arc<Mutex<Option<std::path::PathBuf>>>,
+    detection_content_seq: Arc<AtomicU64>,
+    render_notify: Arc<Notify>,
+    render_dirty: Arc<AtomicBool>,
+}
+
+impl StreamedIngest {
+    fn feed(&self, bytes: &[u8]) {
+        // No shell pid: the process is on the other machine, and nothing local
+        // may claim to be it.
+        let result = self
+            .terminal
+            .process_pty_bytes(self.pane_id, 0, bytes, &self.response_writer);
+        observe_detection_content_change(bytes, &self.detection_content_seq);
+        if result.request_render && !self.render_dirty.swap(true, Ordering::AcqRel) {
+            self.render_notify.notify_one();
+        }
+        if let Some(delay) = result.render_delay {
+            let render_notify = self.render_notify.clone();
+            let render_dirty = self.render_dirty.clone();
+            if let Ok(rt) = tokio::runtime::Handle::try_current() {
+                rt.spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if !render_dirty.swap(true, Ordering::AcqRel) {
+                        render_notify.notify_one();
+                    }
+                });
+            }
+        }
+        if let Some(cwd) = result.reported_cwd.clone() {
+            publish_reported_cwd(self.pane_id, cwd, &self.reported_cwd, &self.events);
+        }
+        // A remote pane copying to the clipboard should land in the clipboard
+        // of the machine being used, which is this one.
+        for content in result.clipboard_writes {
+            if let Err(err) = self.events.try_send(AppEvent::ClipboardWrite { content }) {
+                warn!(
+                    pane = self.pane_id.raw(),
+                    err = %err,
+                    "failed to send OSC 52 clipboard write from a mirror"
+                );
+            }
+        }
+        // `result.terminal_responses` are this parser answering queries it saw
+        // in the frame. The host answered them already, on its own terminal, so
+        // sending ours back would be a second answer to a question nobody here
+        // asked.
+    }
+}
+
+/// What a streamed pane sends back to the machine that owns it.
+///
+/// A mirrored pane has no process of its own here: the terminal it shows lives
+/// on another host, so input and size go up the host's connection rather than
+/// into a PTY. Whether they are acted on is the far end's business -- watching
+/// claims nothing, and only a pane whose control has been claimed may type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamedPaneRequest {
+    Input(Bytes),
+    Resize {
+        rows: u16,
+        cols: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    },
+}
+
 enum PaneRuntimeIo {
     Actor(PtyIoActorHandle),
+    /// A pane fed by another host's terminal over a shared connection.
+    Streamed {
+        requests: mpsc::Sender<StreamedPaneRequest>,
+    },
     #[cfg(test)]
     TestChannel {
         sender: mpsc::Sender<Bytes>,
@@ -956,6 +1039,9 @@ impl PaneRuntimeIo {
     fn shutdown(&self) {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.shutdown(),
+            // Dropping the sender is the whole shutdown: the host worker sees
+            // the channel close and stops sending this terminal's frames.
+            PaneRuntimeIo::Streamed { .. } => {}
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -965,6 +1051,9 @@ impl PaneRuntimeIo {
     fn duplicate_handoff_fd(&self) -> std::io::Result<std::os::fd::RawFd> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.duplicate_for_handoff(),
+            PaneRuntimeIo::Streamed { .. } => Err(std::io::Error::other(
+                "a streamed mirror has no PTY to hand over",
+            )),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {
                 Err(std::io::Error::other("test runtime has no PTY master fd"))
@@ -976,6 +1065,7 @@ impl PaneRuntimeIo {
     fn foreground_process_group_id(&self) -> Option<u32> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.foreground_process_group_id(),
+            PaneRuntimeIo::Streamed { .. } => None,
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => None,
         }
@@ -985,6 +1075,7 @@ impl PaneRuntimeIo {
     fn begin_handoff(&self, timeout: std::time::Duration) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.begin_handoff(timeout),
+            PaneRuntimeIo::Streamed { .. } => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -993,6 +1084,7 @@ impl PaneRuntimeIo {
     #[cfg(unix)]
     fn set_handoff_paused(&self, paused: bool) -> std::io::Result<()> {
         match self {
+            PaneRuntimeIo::Streamed { .. } => Ok(()),
             PaneRuntimeIo::Actor(actor) => {
                 if paused {
                     actor.begin_handoff(std::time::Duration::from_secs(1))
@@ -1009,6 +1101,7 @@ impl PaneRuntimeIo {
     fn release_after_commit(&self) -> std::io::Result<()> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.release_after_commit(),
+            PaneRuntimeIo::Streamed { .. } => Ok(()),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => Ok(()),
         }
@@ -1032,6 +1125,16 @@ impl PaneRuntimeIo {
                     terminal_responses,
                 );
             }
+            // Terminal responses are the local parser answering the local
+            // screen; the far end answers its own. Only the size travels.
+            PaneRuntimeIo::Streamed { requests } => {
+                let _ = requests.try_send(StreamedPaneRequest::Resize {
+                    rows,
+                    cols,
+                    cell_width_px,
+                    cell_height_px,
+                });
+            }
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { resize_tx, .. } => {
                 let _ = resize_tx.send((rows, cols, cell_width_px, cell_height_px));
@@ -1051,6 +1154,9 @@ impl PaneRuntimeIo {
             PaneRuntimeIo::Actor(actor) => {
                 actor.nudge_child_redraw_after_handoff(rows, cols, cell_width_px, cell_height_px);
             }
+            // Mirrors are rebuilt after a handoff rather than carried through
+            // it, so there is nothing here to nudge.
+            PaneRuntimeIo::Streamed { .. } => {}
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { .. } => {}
         }
@@ -1059,6 +1165,13 @@ impl PaneRuntimeIo {
     async fn send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::SendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.write_user_input(bytes).await,
+            PaneRuntimeIo::Streamed { requests } => requests
+                .send(StreamedPaneRequest::Input(bytes))
+                .await
+                .map_err(|err| match err.0 {
+                    StreamedPaneRequest::Input(bytes) => mpsc::error::SendError(bytes),
+                    StreamedPaneRequest::Resize { .. } => mpsc::error::SendError(Bytes::new()),
+                }),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
         }
@@ -1067,6 +1180,22 @@ impl PaneRuntimeIo {
     fn try_send_bytes(&self, bytes: Bytes) -> Result<(), mpsc::error::TrySendError<Bytes>> {
         match self {
             PaneRuntimeIo::Actor(actor) => actor.try_write_user_input(bytes),
+            PaneRuntimeIo::Streamed { requests } => requests
+                .try_send(StreamedPaneRequest::Input(bytes))
+                .map_err(|err| match err {
+                    mpsc::error::TrySendError::Full(StreamedPaneRequest::Input(bytes)) => {
+                        mpsc::error::TrySendError::Full(bytes)
+                    }
+                    mpsc::error::TrySendError::Closed(StreamedPaneRequest::Input(bytes)) => {
+                        mpsc::error::TrySendError::Closed(bytes)
+                    }
+                    mpsc::error::TrySendError::Full(_) => {
+                        mpsc::error::TrySendError::Full(Bytes::new())
+                    }
+                    mpsc::error::TrySendError::Closed(_) => {
+                        mpsc::error::TrySendError::Closed(Bytes::new())
+                    }
+                }),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.try_send(bytes),
         }
@@ -1843,8 +1972,92 @@ impl PaneRuntime {
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: true,
+            streamed_ingest: None,
             detect_handle: Some(detect_handle),
         })
+    }
+
+    /// Builds a pane with no process of its own, fed by another host.
+    ///
+    /// A mirror used to be an `ssh` running `herdr terminal attach` on a local
+    /// PTY, which costs a process, a PTY pair, a connection and an exclusive
+    /// claim on the remote terminal *per pane*. This pane is the same terminal
+    /// parser with the bytes arriving over a connection shared with every other
+    /// mirror of that host, and nothing to spawn.
+    ///
+    /// Agent detection is deliberately off: it reads a screen for signs of a
+    /// process it can probe, and the process is on another machine. The host
+    /// reports its own agents' state, which is the authority anyway.
+    #[allow(clippy::too_many_arguments)]
+    pub fn streamed(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        requests: mpsc::Sender<StreamedPaneRequest>,
+    ) -> std::io::Result<Self> {
+        let (response_tx, _response_rx) = mpsc::channel::<Bytes>(1);
+        let mut terminal = crate::ghostty::Terminal::new(cols, rows, scrollback_limit_bytes)
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        if crate::kitty_graphics::is_enabled() {
+            terminal
+                .enable_kitty_graphics()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        let pane_terminal = GhosttyPaneTerminal::new(terminal, response_tx.clone())?;
+        pane_terminal.apply_host_terminal_theme(host_terminal_theme);
+        let terminal = Arc::new(PaneTerminal::new(pane_terminal));
+        let reported_cwd = Arc::new(Mutex::new(None));
+        let detection_content_seq = Arc::new(AtomicU64::new(0));
+
+        Ok(Self {
+            pane_id,
+            terminal: terminal.clone(),
+            io: PaneRuntimeIo::Streamed { requests },
+            current_size: Cell::new((rows, cols, 0, 0)),
+            child_pid: Arc::new(AtomicU32::new(0)),
+            reported_cwd: reported_cwd.clone(),
+            child_wait_completed: None,
+            kitty_keyboard_flags: Arc::new(AtomicU16::new(0)),
+            detection_content_seq: detection_content_seq.clone(),
+            full_lifecycle_authority_active: Arc::new(AtomicBool::new(false)),
+            detect_reset_notify: Arc::new(Notify::new()),
+            pending_release: Arc::new(Mutex::new(None)),
+            preserve_processes_on_drop: false,
+            streamed_ingest: Some(StreamedIngest {
+                pane_id,
+                terminal,
+                response_writer: response_tx,
+                events,
+                reported_cwd,
+                detection_content_seq,
+                render_notify,
+                render_dirty,
+            }),
+            detect_handle: None,
+        })
+    }
+
+    /// Applies a frame from the host holding this pane's real terminal.
+    ///
+    /// Returns false for a pane that is not streamed, so a caller cannot feed
+    /// bytes to a local pane by mistake.
+    pub fn apply_streamed_bytes(&self, bytes: &[u8]) -> bool {
+        let Some(ingest) = self.streamed_ingest.as_ref() else {
+            return false;
+        };
+        ingest.feed(bytes);
+        true
+    }
+
+    /// Whether this pane is fed by another host rather than a process here.
+    #[cfg(test)]
+    pub fn is_streamed(&self) -> bool {
+        self.streamed_ingest.is_some()
     }
 
     // Runtime construction needs to thread PTY size, environment, theme, render hooks, and detection policy together.
@@ -2361,6 +2574,7 @@ impl PaneRuntime {
             detect_reset_notify,
             pending_release,
             preserve_processes_on_drop: false,
+            streamed_ingest: None,
             detect_handle,
         })
     }
@@ -2837,6 +3051,7 @@ impl PaneRuntime {
                 detect_reset_notify: Arc::new(Notify::new()),
                 pending_release: Arc::new(Mutex::new(None)),
                 preserve_processes_on_drop: true,
+                streamed_ingest: None,
                 detect_handle: Some(tokio::spawn(async {}).abort_handle()),
             },
             rx,
@@ -2847,6 +3062,88 @@ impl PaneRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn streamed_test_runtime(
+        cols: u16,
+        rows: u16,
+    ) -> (PaneRuntime, mpsc::Receiver<StreamedPaneRequest>) {
+        let (requests, request_rx) = mpsc::channel(8);
+        let (events, _event_rx) = mpsc::channel(8);
+        let runtime = PaneRuntime::streamed(
+            PaneId::from_raw(1),
+            rows,
+            cols,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(AtomicBool::new(false)),
+            requests,
+        )
+        .expect("streamed runtime");
+        (runtime, request_rx)
+    }
+
+    /// A mirrored pane shows what the host sends it, with nothing spawned here.
+    #[tokio::test]
+    async fn a_streamed_pane_shows_what_the_host_feeds_it() {
+        let (runtime, _requests) = streamed_test_runtime(40, 8);
+        assert!(runtime.is_streamed());
+
+        assert!(runtime.apply_streamed_bytes(b"agent output from another machine"));
+
+        assert!(
+            runtime
+                .visible_text()
+                .contains("agent output from another machine"),
+            "screen was {:?}",
+            runtime.visible_text()
+        );
+    }
+
+    /// Typing into a mirror has nowhere local to go: it belongs to the host,
+    /// and goes up the connection it came down.
+    #[tokio::test]
+    async fn typing_into_a_streamed_pane_goes_back_to_the_host() {
+        let (runtime, mut requests) = streamed_test_runtime(40, 8);
+
+        runtime
+            .try_send_bytes(Bytes::from_static(b"ls\r"))
+            .expect("input should be accepted");
+
+        assert_eq!(
+            requests.try_recv().expect("a request should be queued"),
+            StreamedPaneRequest::Input(Bytes::from_static(b"ls\r"))
+        );
+    }
+
+    /// Resizing a mirror is a request to the host, not something this machine
+    /// can do to a terminal it does not own.
+    #[tokio::test]
+    async fn resizing_a_streamed_pane_asks_the_host() {
+        let (runtime, mut requests) = streamed_test_runtime(40, 8);
+
+        runtime.resize(10, 60, 0, 0);
+
+        assert_eq!(
+            requests.try_recv().expect("a request should be queued"),
+            StreamedPaneRequest::Resize {
+                rows: 10,
+                cols: 60,
+                cell_width_px: 0,
+                cell_height_px: 0,
+            }
+        );
+    }
+
+    /// Feeding a local pane by mistake is refused rather than silently drawing
+    /// another machine's output onto a real terminal.
+    #[tokio::test]
+    async fn a_local_pane_refuses_streamed_bytes() {
+        let (runtime, _rx) = PaneRuntime::test_with_channel(80, 24);
+        assert!(!runtime.is_streamed());
+        assert!(!runtime.apply_streamed_bytes(b"not mine"));
+    }
 
     #[tokio::test]
     async fn cwd_returns_accepted_report_without_rechecking_filesystem() {
@@ -3335,6 +3632,7 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
+            streamed_ingest: None,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 
@@ -3366,6 +3664,7 @@ mod tests {
             detect_reset_notify: Arc::new(Notify::new()),
             pending_release: Arc::new(Mutex::new(None)),
             preserve_processes_on_drop: true,
+            streamed_ingest: None,
             detect_handle: Some(tokio::spawn(async {}).abort_handle()),
         };
 

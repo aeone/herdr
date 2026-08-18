@@ -172,6 +172,39 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    /// A terminal with no process here, fed by the host that owns it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn streamed(
+        pane_id: PaneId,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        requests: mpsc::Sender<crate::pane::StreamedPaneRequest>,
+    ) -> std::io::Result<Self> {
+        crate::pane::PaneRuntime::streamed(
+            pane_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events,
+            render_notify,
+            render_dirty,
+            requests,
+        )
+        .map(Self)
+    }
+
+    /// Applies a frame from the host holding this terminal, returning false if
+    /// this terminal is not a streamed one.
+    pub fn apply_streamed_bytes(&self, bytes: &[u8]) -> bool {
+        self.0.apply_streamed_bytes(bytes)
+    }
+
     // Wrapper mirrors pane runtime construction arguments, including detection policy.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_argv_command(

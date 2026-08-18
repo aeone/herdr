@@ -151,6 +151,29 @@ pub enum AppEvent {
         target: String,
         result: Result<crate::remote::spaces::RemoteSpaceSnapshot, String>,
     },
+    /// Terminal bytes for one mirrored pane, off the one connection this host
+    /// is watched over.
+    #[cfg(unix)]
+    MirrorFrame {
+        target: String,
+        terminal_id: String,
+        bytes: Vec<u8>,
+    },
+    /// One mirrored terminal has gone, which does not take the rest of that
+    /// host's mirrors with it.
+    #[cfg(unix)]
+    MirrorTerminalEnded {
+        target: String,
+        terminal_id: String,
+        reason: Option<String>,
+    },
+    /// The whole connection to a host has closed, so every mirror of it is
+    /// stale until it is opened again.
+    #[cfg(unix)]
+    MirrorStreamClosed {
+        target: String,
+        reason: Option<String>,
+    },
     /// A space the user asked for on a mirrored host was created, or failed to
     /// be. Creation runs off the event loop because it is an ssh round trip.
     #[cfg(unix)]

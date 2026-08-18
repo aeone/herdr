@@ -110,6 +110,56 @@ impl Tab {
         )
     }
 
+    /// A tab whose single pane is fed by another host rather than a process.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_streamed(
+        number: usize,
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        requests: mpsc::Sender<crate::pane::StreamedPaneRequest>,
+    ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+        let (layout, root_id) = TileLayout::new();
+        let runtime = TerminalRuntime::streamed(
+            root_id,
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events.clone(),
+            render_notify.clone(),
+            render_dirty.clone(),
+            requests,
+        )?;
+        let terminal_id = TerminalId::alloc();
+        let terminal = TerminalState::new(terminal_id.clone(), initial_cwd);
+        let mut panes = HashMap::new();
+        panes.insert(root_id, PaneState::new(terminal_id));
+
+        Ok((
+            Self {
+                custom_name: None,
+                number,
+                root_pane: root_id,
+                layout,
+                panes,
+                #[cfg(test)]
+                runtimes: HashMap::new(),
+                zoomed: false,
+                events,
+                render_notify,
+                render_dirty,
+            },
+            terminal,
+            runtime,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new_with_runtime(
         number: usize,

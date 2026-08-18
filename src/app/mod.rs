@@ -160,6 +160,13 @@ pub struct App {
     pub(crate) manage_ssh_config: bool,
     #[cfg(unix)]
     pub(crate) remote_space_workers: HashMap<String, remote_mirrors::RemoteSpaceWorker>,
+    /// Whether mirrors share one connection per host rather than taking an ssh
+    /// and an exclusive attach each.
+    #[cfg(unix)]
+    pub(crate) multiplexed_mirrors: bool,
+    /// One connection per mirrored host, carrying every mirror of it.
+    #[cfg(unix)]
+    pub(crate) mirror_streams: HashMap<String, crate::remote::mirror_stream::MirrorStream>,
     /// Mirror renames sent to a host but not yet reflected in its snapshots,
     /// by mirror key. Reconcile leaves these alone so the name the user typed
     /// does not flicker back to the old one while the host is catching up.
@@ -854,6 +861,10 @@ impl App {
             #[cfg(unix)]
             remote_space_workers: HashMap::new(),
             #[cfg(unix)]
+            multiplexed_mirrors: config.remote.multiplexed_mirrors,
+            #[cfg(unix)]
+            mirror_streams: HashMap::new(),
+            #[cfg(unix)]
             pending_mirror_renames: HashMap::new(),
             #[cfg(unix)]
             mirror_unseen_marks: HashMap::new(),
@@ -1544,6 +1555,10 @@ impl App {
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.remote_keep_offline_mirrors = config.remote.keep_offline_mirrors;
+                #[cfg(unix)]
+                {
+                    self.multiplexed_mirrors = config.remote.multiplexed_mirrors;
+                }
                 self.state.sidebar_section_split_auto = config.ui.sidebar_section_split_auto;
                 self.state.sidebar_mark_colors = crate::config::resolve_mark_colors(
                     &config.ui.sidebar_highlight_colors,

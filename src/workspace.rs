@@ -362,6 +362,62 @@ impl Workspace {
         )
     }
 
+    /// A workspace holding one pane that another host feeds.
+    ///
+    /// The cwd is only what the pane reports before the host says otherwise;
+    /// there is no local process for it to mean anything else to.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_streamed_mirror(
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        scrollback_limit_bytes: usize,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+        events: mpsc::Sender<AppEvent>,
+        render_notify: Arc<Notify>,
+        render_dirty: Arc<AtomicBool>,
+        requests: mpsc::Sender<crate::pane::StreamedPaneRequest>,
+    ) -> std::io::Result<(Self, TerminalState, TerminalRuntime)> {
+        let id = generate_workspace_id();
+        let (tab, terminal, runtime) = Tab::new_streamed(
+            1,
+            initial_cwd.clone(),
+            rows,
+            cols,
+            scrollback_limit_bytes,
+            host_terminal_theme,
+            events,
+            render_notify,
+            render_dirty,
+            requests,
+        )?;
+        let mut public_pane_numbers = HashMap::new();
+        public_pane_numbers.insert(tab.root_pane, 1);
+        Ok((
+            Self {
+                id,
+                custom_name: None,
+                identity_cwd: initial_cwd.clone(),
+                cached_git_branch: None,
+                cached_git_ahead_behind: None,
+                cached_git_space: None,
+                worktree_space: None,
+                metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
+                metadata_token_sequences: HashMap::new(),
+                public_pane_numbers,
+                next_public_pane_number: 2,
+                next_public_tab_number: 2,
+                tabs: vec![tab],
+                active_tab: 0,
+                remote_mirror: None,
+                #[cfg(test)]
+                test_runtimes: HashMap::new(),
+            },
+            terminal,
+            runtime,
+        ))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new_with_tab(
         initial_cwd: PathBuf,

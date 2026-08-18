@@ -1,0 +1,298 @@
+//! One connection per mirrored host, carrying every pane of it.
+//!
+//! A mirror used to be an `ssh` running `herdr terminal attach` per remote
+//! pane: a process, a PTY pair, a remote process, a connection and an
+//! *exclusive* claim on that terminal, all per pane. Thirty mirrors meant
+//! thirty of each, which is what put a 64 GB host against its descriptor
+//! ceiling and forced the whole fleet to mirror in a star, since two machines
+//! cannot both hold a pane.
+//!
+//! This is the other shape: one `ssh` per host running
+//! `herdr terminal session observe-many`, which takes the set of terminals to
+//! watch on stdin and streams back frames tagged with the terminal they belong
+//! to. Watching claims nothing, so any number of machines may watch the same
+//! host, and the set can change as panes come and go without reopening
+//! anything.
+
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Stdio};
+
+use base64::Engine as _;
+
+use crate::config::RemoteSpaceConfig;
+use crate::events::AppEvent;
+
+/// A terminal to watch, and the size to render it at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MirrorStreamTarget {
+    pub(crate) terminal_id: String,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+}
+
+/// The line asking the host to watch exactly this set of terminals.
+pub(crate) fn observe_request_line(targets: &[MirrorStreamTarget]) -> String {
+    let targets: Vec<serde_json::Value> = targets
+        .iter()
+        .map(|target| {
+            serde_json::json!({
+                "target": target.terminal_id,
+                "cols": target.cols.max(1),
+                "rows": target.rows.max(1),
+            })
+        })
+        .collect();
+    let mut line = serde_json::json!({"type": "terminal.observe", "targets": targets}).to_string();
+    line.push('\n');
+    line
+}
+
+/// What one line from the host means to us.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MirrorStreamLine {
+    Frame {
+        terminal_id: String,
+        bytes: Vec<u8>,
+    },
+    Ended {
+        terminal_id: String,
+        reason: Option<String>,
+    },
+    Closed {
+        reason: Option<String>,
+    },
+}
+
+/// Reads one line of the host's answer.
+///
+/// Anything unrecognised is dropped rather than ending the stream: a host one
+/// version ahead may say things this build has no name for, and the panes it
+/// does understand should keep drawing.
+pub(crate) fn parse_stream_line(line: &str) -> Option<MirrorStreamLine> {
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    match value.get("type")?.as_str()? {
+        "terminal.frame" => {
+            let terminal_id = value.get("terminal_id")?.as_str()?.to_owned();
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(value.get("bytes")?.as_str()?)
+                .ok()?;
+            Some(MirrorStreamLine::Frame { terminal_id, bytes })
+        }
+        "terminal.ended" => Some(MirrorStreamLine::Ended {
+            terminal_id: value.get("terminal_id")?.as_str()?.to_owned(),
+            reason: value
+                .get("reason")
+                .and_then(|reason| reason.as_str())
+                .map(str::to_owned),
+        }),
+        "terminal.closed" => Some(MirrorStreamLine::Closed {
+            reason: value
+                .get("reason")
+                .and_then(|reason| reason.as_str())
+                .map(str::to_owned),
+        }),
+        _ => None,
+    }
+}
+
+/// A live connection to one host.
+pub(crate) struct MirrorStream {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    watching: Vec<MirrorStreamTarget>,
+}
+
+impl MirrorStream {
+    /// Opens the connection and starts a thread reading its frames.
+    pub(crate) fn spawn(
+        space: &RemoteSpaceConfig,
+        remote_herdr: &str,
+        events: tokio::sync::mpsc::Sender<AppEvent>,
+    ) -> std::io::Result<Self> {
+        let argv = crate::remote::spaces::observe_many_argv(space, remote_herdr);
+        let (program, args) = argv
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("empty observe command"))?;
+        let mut command = std::process::Command::new(program);
+        command
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = command.spawn()?;
+        let stdin = child.stdin.take();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| std::io::Error::other("observe stream has no stdout"))?;
+
+        let target = space.target.clone();
+        let reader_target = target.clone();
+        std::thread::Builder::new()
+            .name(format!("herdr-mirror-{}", short_thread_name(&target)))
+            .spawn(move || {
+                let reader = BufReader::new(stdout);
+                for line in reader.lines() {
+                    let Ok(line) = line else {
+                        break;
+                    };
+                    let Some(parsed) = parse_stream_line(&line) else {
+                        continue;
+                    };
+                    let event = match parsed {
+                        MirrorStreamLine::Frame { terminal_id, bytes } => AppEvent::MirrorFrame {
+                            target: reader_target.clone(),
+                            terminal_id,
+                            bytes,
+                        },
+                        MirrorStreamLine::Ended {
+                            terminal_id,
+                            reason,
+                        } => AppEvent::MirrorTerminalEnded {
+                            target: reader_target.clone(),
+                            terminal_id,
+                            reason,
+                        },
+                        MirrorStreamLine::Closed { reason } => AppEvent::MirrorStreamClosed {
+                            target: reader_target.clone(),
+                            reason,
+                        },
+                    };
+                    if events.blocking_send(event).is_err() {
+                        return;
+                    }
+                }
+                let _ = events.blocking_send(AppEvent::MirrorStreamClosed {
+                    target: reader_target,
+                    reason: None,
+                });
+            })?;
+
+        let _ = target;
+        Ok(Self {
+            child,
+            stdin,
+            watching: Vec::new(),
+        })
+    }
+
+    /// Whether this stream is already watching exactly these terminals.
+    pub(crate) fn is_watching(&self, targets: &[MirrorStreamTarget]) -> bool {
+        self.watching == targets
+    }
+
+    /// Replaces the set of terminals this connection carries.
+    pub(crate) fn set_targets(&mut self, targets: Vec<MirrorStreamTarget>) -> std::io::Result<()> {
+        let line = observe_request_line(&targets);
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(std::io::Error::other("observe stream stdin is closed"));
+        };
+        stdin.write_all(line.as_bytes())?;
+        stdin.flush()?;
+        self.watching = targets;
+        Ok(())
+    }
+
+    /// Closes the connection, which ends every mirror it was carrying.
+    pub(crate) fn stop(mut self) {
+        // Closing stdin is the polite ask; the kill is for a host that has
+        // stopped listening, such as one that went to sleep mid-stream.
+        self.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn short_thread_name(target: &str) -> String {
+    target
+        .rsplit('@')
+        .next()
+        .unwrap_or(target)
+        .chars()
+        .take(8)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_observe_line_carries_a_size_per_terminal() {
+        let line = observe_request_line(&[
+            MirrorStreamTarget {
+                terminal_id: "term_a".into(),
+                cols: 100,
+                rows: 30,
+            },
+            MirrorStreamTarget {
+                terminal_id: "term_b".into(),
+                cols: 40,
+                rows: 8,
+            },
+        ]);
+        let value: serde_json::Value = serde_json::from_str(line.trim()).expect("valid json");
+        assert_eq!(value["type"], "terminal.observe");
+        assert_eq!(value["targets"][0]["target"], "term_a");
+        assert_eq!(value["targets"][0]["cols"], 100);
+        assert_eq!(value["targets"][1]["rows"], 8);
+        assert!(line.ends_with('\n'), "the host reads a line at a time");
+    }
+
+    /// A pane can be laid out at zero height mid-resize, and a terminal asked
+    /// for at zero rows renders nothing at all.
+    #[test]
+    fn an_empty_size_is_asked_for_as_one_cell() {
+        let line = observe_request_line(&[MirrorStreamTarget {
+            terminal_id: "term_a".into(),
+            cols: 0,
+            rows: 0,
+        }]);
+        let value: serde_json::Value = serde_json::from_str(line.trim()).expect("valid json");
+        assert_eq!(value["targets"][0]["cols"], 1);
+        assert_eq!(value["targets"][0]["rows"], 1);
+    }
+
+    #[test]
+    fn a_frame_line_decodes_to_its_terminal_and_bytes() {
+        let parsed = parse_stream_line(
+            r#"{"type":"terminal.frame","terminal_id":"term_a","target":"w1:p1","seq":3,"encoding":"ansi","width":40,"height":8,"full":false,"bytes":"aGVsbG8="}"#,
+        )
+        .expect("a frame");
+        assert_eq!(
+            parsed,
+            MirrorStreamLine::Frame {
+                terminal_id: "term_a".into(),
+                bytes: b"hello".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_ended_line_names_the_terminal_that_went() {
+        let parsed = parse_stream_line(
+            r#"{"type":"terminal.ended","terminal_id":"term_a","target":"w1:p1","reason":"terminal is gone"}"#,
+        )
+        .expect("an ended line");
+        assert_eq!(
+            parsed,
+            MirrorStreamLine::Ended {
+                terminal_id: "term_a".into(),
+                reason: Some("terminal is gone".into()),
+            }
+        );
+    }
+
+    /// A host one build ahead may say things this one has no name for, and the
+    /// panes it does understand should keep drawing.
+    #[test]
+    fn an_unknown_line_is_dropped_rather_than_ending_the_stream() {
+        assert_eq!(parse_stream_line(r#"{"type":"terminal.future"}"#), None);
+        assert_eq!(parse_stream_line("not json at all"), None);
+        assert_eq!(
+            parse_stream_line(r#"{"type":"terminal.frame","terminal_id":"a","bytes":"!!!"}"#),
+            None,
+            "a frame whose bytes will not decode is not a frame"
+        );
+    }
+}

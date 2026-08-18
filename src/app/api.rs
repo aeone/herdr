@@ -76,6 +76,34 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::MirrorFrame {
+            target,
+            terminal_id,
+            bytes,
+        } = ev
+        {
+            self.apply_mirror_frame(&target, &terminal_id, &bytes);
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::MirrorTerminalEnded {
+            target,
+            terminal_id,
+            reason,
+        } = ev
+        {
+            self.handle_mirror_terminal_ended(&target, &terminal_id, reason.as_deref());
+            return;
+        }
+
+        #[cfg(unix)]
+        if let AppEvent::MirrorStreamClosed { target, reason } = ev {
+            self.handle_mirror_stream_closed(&target, reason.as_deref());
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::RemoteSpaceCreated { target, result } = ev {
             self.handle_remote_space_created(target, result);
             return;

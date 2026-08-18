@@ -2843,6 +2843,31 @@ impl AppState {
                 let _ = result;
                 Vec::new()
             }
+            // The server applies these; the monolithic path has no mirrors of
+            // its own to feed.
+            #[cfg(unix)]
+            AppEvent::MirrorFrame {
+                target,
+                terminal_id,
+                bytes,
+            } => {
+                let _ = (target, terminal_id, bytes);
+                Vec::new()
+            }
+            #[cfg(unix)]
+            AppEvent::MirrorTerminalEnded {
+                target,
+                terminal_id,
+                reason,
+            } => {
+                let _ = (target, terminal_id, reason);
+                Vec::new()
+            }
+            #[cfg(unix)]
+            AppEvent::MirrorStreamClosed { target, reason } => {
+                let _ = (target, reason);
+                Vec::new()
+            }
             #[cfg(unix)]
             AppEvent::RemoteSpaceCreated { target, result } => {
                 let _ = target;
