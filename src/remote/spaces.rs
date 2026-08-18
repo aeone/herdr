@@ -23,6 +23,9 @@ pub(crate) struct MirrorOrigin {
     /// The ssh target as the *reporting* host spells it, which need not match
     /// how we spell the same machine.
     pub(crate) target: String,
+    /// The workspace id on the origin host, carried so a mirror keeps one
+    /// identity however many hosts it is passed through.
+    pub(crate) workspace_id: String,
     /// The terminal id on the origin host: the identity that survives a hop.
     pub(crate) terminal_id: String,
     /// How the reporting host displays that origin, when it knows.
@@ -76,11 +79,26 @@ pub(crate) struct RemoteAgentPane {
 impl RemoteAgentPane {
     /// Stable identity for a mirrored pane, so a poll that returns the same
     /// remote pane reuses its local workspace instead of recreating it.
+    /// The identity a mirror keeps, whoever is reporting it.
+    ///
+    /// Keyed on the machine that really runs the pane rather than on the host
+    /// we heard it from, so an agent reached through two hosts is the same
+    /// mirror as one reached directly, and a hop being handed off -- which
+    /// changes every workspace id that hop reports -- does not re-key
+    /// everything downstream of it and rebuild the lot.
     pub(crate) fn mirror_key(&self, target: &str) -> String {
-        format!(
-            "{target}\u{1f}{}\u{1f}{}",
-            self.workspace_id, self.terminal_id
-        )
+        match &self.origin {
+            Some(origin) => format!(
+                "{}\u{1f}{}\u{1f}{}",
+                MirrorOrigin::host_key(&origin.target),
+                origin.workspace_id,
+                origin.terminal_id
+            ),
+            None => format!(
+                "{target}\u{1f}{}\u{1f}{}",
+                self.workspace_id, self.terminal_id
+            ),
+        }
     }
 
     /// Splits a mirror key back into the origin's workspace and terminal ids.
@@ -658,6 +676,7 @@ fn parse_mirror_panes(
             agent: pane.display_agent.or(pane.agent),
             origin: pane.mirror_origin.map(|origin| MirrorOrigin {
                 target: origin.target,
+                workspace_id: origin.workspace_id,
                 terminal_id: origin.terminal_id,
                 label: origin.label,
                 color: origin.color,

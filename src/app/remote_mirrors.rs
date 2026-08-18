@@ -1125,6 +1125,17 @@ impl App {
             .get(self.state.selected)
             .map(|workspace| workspace.id.clone())
             .filter(|_| self.state.selected != ws_idx);
+        // And the same for the space actually being worked in. Closing leaves
+        // `active` pointing at whatever the selection became, which is right
+        // when someone closes the space they are in and wrong every time a
+        // mirror goes: it threw the focus out of the pane being typed in and
+        // into whichever space had taken the mirror's place.
+        let active_id = self
+            .state
+            .active
+            .filter(|active| *active != ws_idx)
+            .and_then(|active| self.state.workspaces.get(active))
+            .map(|workspace| workspace.id.clone());
         self.state.selected = ws_idx;
         self.state.close_selected_workspace();
         if let Some(selected_id) = selected_id {
@@ -1135,6 +1146,16 @@ impl App {
                 .position(|workspace| workspace.id == selected_id)
             {
                 self.state.selected = restored;
+            }
+        }
+        if let Some(active_id) = active_id {
+            if let Some(restored) = self
+                .state
+                .workspaces
+                .iter()
+                .position(|workspace| workspace.id == active_id)
+            {
+                self.state.active = Some(restored);
             }
         }
         self.state.remove_plugin_pane_records(pane_ids);
@@ -1507,6 +1528,47 @@ mod tests {
             "a dropped connection is not a host that cannot do this"
         );
     }
+    /// A mirror going must not move the person using the machine. Closing sets
+    /// `active` to whatever the selection became, which is right when someone
+    /// closes the space they are in -- and threw the focus out of the pane
+    /// being typed in every time a mirror was rebuilt.
+    #[tokio::test]
+    async fn a_mirror_closing_leaves_the_pane_being_worked_in_alone() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces.clear();
+        let doomed = crate::workspace::Workspace::test_new("a mirror");
+        let decoy = crate::workspace::Workspace::test_new("someone else");
+        let mine = crate::workspace::Workspace::test_new("mine");
+        let mine_id = mine.id.clone();
+        // The mirror sits before the space being used, so closing it shifts
+        // every index after it -- and a decoy sits in between, so an index that
+        // merely stayed put would land somewhere wrong rather than by luck.
+        app.state.workspaces.push(doomed);
+        app.state.workspaces.push(decoy);
+        app.state.workspaces.push(mine);
+        app.state.active = Some(2);
+        app.state.selected = 2;
+
+        app.close_mirror_at(0);
+
+        let active_id = app
+            .state
+            .active
+            .and_then(|active| app.state.workspaces.get(active))
+            .map(|workspace| workspace.id.clone());
+        assert_eq!(
+            active_id,
+            Some(mine_id.clone()),
+            "the space being worked in should still be the active one"
+        );
+        let selected_id = app
+            .state
+            .workspaces
+            .get(app.state.selected)
+            .map(|workspace| workspace.id.clone());
+        assert_eq!(selected_id, Some(mine_id), "and still the selected one");
+    }
+
     /// Mirrors reconcile on what a host pushes. A host that has stopped pushing
     /// still needs its connection dialled, or its mirrors stay blank for as
     /// long as it stays quiet -- which is how one wedged feed blanked a whole
@@ -1786,12 +1848,39 @@ mod tests {
         RemoteAgentPane {
             origin: Some(crate::remote::spaces::MirrorOrigin {
                 target: origin_target.into(),
+                workspace_id: format!("{origin_terminal}-ws"),
                 terminal_id: origin_terminal.into(),
                 label: None,
                 color: None,
             }),
             ..agent_pane(workspace_id, label, terminal_id)
         }
+    }
+
+    /// An agent is one agent however far away it is heard from. Keying a
+    /// mirror on the host that reported it meant the same pane reached through
+    /// two hosts was a different mirror from the same pane reached directly --
+    /// and worse, that handing off a hop re-keyed everything behind it, since
+    /// every workspace id that hop reports changes. Two machines mirroring each
+    /// other then showed each other their own panes, frozen and mangled, once
+    /// the chain was two hops deep.
+    #[test]
+    fn a_mirror_keeps_one_identity_however_many_hosts_it_came_through() {
+        let direct = agent_pane("w9", "notes", "term-far");
+        let through_a_hop = mirrored_pane("w2", "notes", "term-hop", "ryi@sera", "term-far");
+        let through_another_hop =
+            mirrored_pane("w77", "notes", "term-other-hop", "sera", "term-far");
+
+        assert_eq!(
+            through_a_hop.mirror_key("workbox"),
+            through_another_hop.mirror_key("elsewhere"),
+            "the same agent heard from two different hops is one mirror"
+        );
+        assert_ne!(
+            direct.mirror_key("ryi@sera"),
+            through_a_hop.mirror_key("workbox"),
+            "the direct key still names the workspace the origin reported"
+        );
     }
 
     /// Mirroring two hosts that also mirror each other must not show their
@@ -1923,10 +2012,14 @@ mod tests {
             &Default::default(),
         );
 
+        // Keyed on sera, the machine that really runs it, rather than on the
+        // hop we heard about it from.
         assert!(
             plan.iter().any(|action| matches!(
                 action,
-                MirrorAction::Create { key, .. } if key == &key_for("workbox", "w2", "term-hop")
+                MirrorAction::Create { key, .. }
+                    if key == &mirrored_pane("w2", "notes", "term-hop", "ryi@sera", "term-far")
+                        .mirror_key("workbox")
             )),
             "{plan:?}"
         );

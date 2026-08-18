@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Added
+- A mirror going no longer moves the person using the machine. Closing a workspace leaves the active one following the selection, which is what someone closing the space they are in wants and the opposite of what a mirror disappearing should do: the focus left the pane being typed in and landed in whichever space had taken the mirror's place.
+
+- A mirror keeps one identity however many hosts it is passed through. It was keyed on the host that reported it, so the same agent reached through two hosts was a different mirror from the same agent reached directly -- and handing off an intermediate host re-keyed everything behind it, since every workspace id that host reports changes. Two machines mirroring each other ended up showing each other their own panes, frozen on an old status with a mangled screen, once the chain was two hops deep.
+
 - `herdr agent feed` lets go of the status subscriptions it replaces. It watches one subscription per agent pane and rebuilds the set whenever the agent panes change, but the thing holding them owned nothing, so every rebuild left a thread and a connection running for the life of the feed. On a machine whose mirrors were churning that reached the 1024-descriptor limit in under a quarter of an hour -- with the server being watched holding the other end of all 1024 -- which is what made a busy host start refusing connections with `Resource temporarily unavailable`.
 
 - A host is only judged too old for a shared mirror connection by what it says, not by its silence. A build that lacks `terminal session observe-many` prints its usage and exits; so does a host that is asleep or whose server is mid-restart, and going by "no frames arrived" alone put a host back on the per-pane attach for an hour because it was being deployed to at that moment.
