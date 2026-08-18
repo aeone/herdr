@@ -95,6 +95,21 @@ pub(crate) fn parse_stream_line(line: &str) -> Option<MirrorStreamLine> {
     }
 }
 
+/// Whether what the far side said is a build that does not know the command.
+///
+/// A host too old prints the usage for the commands it does have. Anything
+/// else -- ssh failing, a host asleep, a server mid-restart -- says nothing
+/// about what that host can do once it is back, and must not cost it the
+/// shared connection.
+pub(crate) fn complaint_means_too_old(complaint: Option<&str>) -> bool {
+    complaint.is_some_and(|complaint| {
+        let complaint = complaint.to_ascii_lowercase();
+        complaint.contains("usage:")
+            || complaint.contains("unexpected argument")
+            || complaint.contains("unknown command")
+    })
+}
+
 /// A live connection to one host.
 pub(crate) struct MirrorStream {
     child: Child,
@@ -370,6 +385,24 @@ fn short_thread_name(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The difference between a host that cannot do this and one that is
+    /// merely away is what it said, not that it said nothing.
+    #[test]
+    fn only_a_usage_complaint_means_the_host_is_too_old() {
+        assert!(complaint_means_too_old(Some(
+            "usage: herdr terminal session observe <target> [--cols N] [--rows N]"
+        )));
+        assert!(complaint_means_too_old(Some("unexpected argument: observe-many")));
+
+        assert!(!complaint_means_too_old(None));
+        assert!(!complaint_means_too_old(Some(
+            "ssh: connect to host lute port 22: Connection refused"
+        )));
+        assert!(!complaint_means_too_old(Some(
+            "Connection to lute closed by remote host."
+        )));
+    }
 
     #[test]
     fn the_observe_line_carries_a_size_per_terminal() {

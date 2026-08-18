@@ -1045,15 +1045,19 @@ impl App {
     pub(crate) fn handle_mirror_stream_closed(&mut self, target: &str, reason: Option<&str>) {
         tracing::info!(target = %target, reason, "mirror stream closed");
         if let Some(stream) = self.mirror_streams.get(target) {
-            // A host too old for this prints its usage and exits, which from
-            // here looks like a connection that dropped -- except that nothing
-            // ever came down it. Mirrors of that host go back to an attach per
-            // pane, which is what it does understand.
-            if !stream.carried_a_frame() {
+            // A host too old for this prints its usage and exits. So does a
+            // host that is asleep, or one whose server is restarting -- with a
+            // different complaint, and that is the whole difference. Going by
+            // "no frames arrived" alone put a host on the per-pane attach for
+            // an hour because it was being deployed to at the time.
+            let complaint = stream.complaint();
+            if !stream.carried_a_frame()
+                && crate::remote::mirror_stream::complaint_means_too_old(complaint.as_deref())
+            {
                 tracing::warn!(
                     target,
-                    complaint = stream.complaint(),
-                    "host did not stream any mirrors; falling back to one attach per pane"
+                    complaint,
+                    "host is too old to stream its mirrors; falling back to one attach per pane"
                 );
                 self.mirror_multiplex_unsupported.insert(
                     target.to_owned(),
@@ -1467,6 +1471,33 @@ mod tests {
             "a dropped connection is not a host that cannot do this"
         );
     }
+    /// Deploying to a host means restarting its server, and a connection
+    /// opened in that window carries no frames either. This cost lute an hour
+    /// on the per-pane attach for the crime of being deployed to.
+    #[tokio::test]
+    async fn a_host_that_was_only_restarting_keeps_the_shared_one() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.mirror_streams.insert(
+            "lute".to_string(),
+            crate::remote::mirror_stream::MirrorStream::test_without_a_host(
+                0,
+                Some("Connection to lute closed by remote host."),
+            ),
+        );
+
+        app.handle_mirror_stream_closed("lute", None);
+
+        assert!(
+            app.mirrors_are_multiplexed("lute"),
+            "a host that was mid-handoff is asked again, not written off"
+        );
+        assert!(
+            app.mirror_stream_retry.contains_key("lute"),
+            "and it waits before dialling back"
+        );
+    }
+
     use crate::remote::spaces::RemoteAgentPane;
 
     /// Planning with nothing pinned, which is the case for every test that is
