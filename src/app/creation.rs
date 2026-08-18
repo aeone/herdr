@@ -551,7 +551,15 @@ impl App {
                 let (workspace_id, terminal_id) =
                     crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)?;
                 Some(crate::api::schema::MirrorOriginInfo {
-                    target: mirror.target.clone(),
+                    // The machine that really runs the pane, which is the hop
+                    // only when we heard about it first-hand. Reporting the hop
+                    // beside the origin's terminal id describes no machine at
+                    // all, and the guard that drops a reflection of a host you
+                    // already mirror matches on exactly these two.
+                    target: mirror
+                        .origin_target
+                        .clone()
+                        .unwrap_or_else(|| mirror.target.clone()),
                     workspace_id: workspace_id.to_string(),
                     terminal_id: terminal_id.to_string(),
                     // Passed on so a host mirroring this one can show the pane

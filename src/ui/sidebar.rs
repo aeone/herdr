@@ -2700,6 +2700,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
     fn mark_mirror(app: &mut AppState, ws_idx: usize, target: &str) {
         app.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
             disconnected: false,
+            origin_target: None,
             target: target.into(),
             host_label: target.into(),
             host_color: None,
@@ -2771,6 +2772,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.ensure_test_terminals();
         app.workspaces[0].remote_mirror = Some(crate::workspace::RemoteMirror {
             disconnected: false,
+            origin_target: None,
             target: "box".into(),
             host_label: "box".into(),
             host_color: None,

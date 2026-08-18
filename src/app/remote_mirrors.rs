@@ -207,6 +207,7 @@ pub(crate) fn remote_mirror_record(space: &RemoteSpaceConfig, key: &str) -> Remo
     RemoteMirror {
         disconnected: false,
         target: space.target.clone(),
+        origin_target: None,
         host_label: space.display_label().to_string(),
         host_color: space.color.clone(),
         key: key.to_string(),
@@ -230,6 +231,7 @@ pub(crate) fn remote_mirror_record_for_origin(
     origin: &crate::remote::spaces::MirrorOrigin,
 ) -> RemoteMirror {
     RemoteMirror {
+        origin_target: Some(origin.target.clone()),
         host_label: origin
             .label
             .clone()
@@ -1528,6 +1530,36 @@ mod tests {
             "a dropped connection is not a host that cannot do this"
         );
     }
+    /// The guard that drops a reflection of a host you already mirror matches
+    /// the origin's name and its terminal id, so both have to describe the same
+    /// machine. Naming the hop beside the origin's terminal id described no
+    /// machine at all, and every hop then added another copy of the same agent
+    /// -- fourteen more valkyrie panes on each machine every thirty seconds.
+    #[test]
+    fn a_mirror_reached_through_a_hop_reports_the_machine_that_runs_it() {
+        let space = space("workbox");
+        let origin = crate::remote::spaces::MirrorOrigin {
+            target: "ryielle@valkyrie".to_string(),
+            workspace_id: "w3".to_string(),
+            terminal_id: "term-far".to_string(),
+            label: Some("val".to_string()),
+            color: None,
+        };
+
+        let record = super::remote_mirror_record_for_origin(&space, "key", &origin);
+
+        assert_eq!(
+            record.origin_target.as_deref(),
+            Some("ryielle@valkyrie"),
+            "the origin is the machine running the pane, not the host we asked"
+        );
+        assert_eq!(record.target, "workbox", "which is still the host we poll");
+
+        // Heard first-hand, there is no hop and the two are the same machine.
+        let direct = super::remote_mirror_record(&space, "key");
+        assert_eq!(direct.origin_target, None);
+    }
+
     /// A mirror going must not move the person using the machine. Closing sets
     /// `active` to whatever the selection became, which is right when someone
     /// closes the space they are in -- and threw the focus out of the pane

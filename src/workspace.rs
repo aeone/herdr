@@ -179,8 +179,18 @@ pub struct RemoteMirror {
     /// Set when the mirror's ssh has died and the workspace was kept anyway, so
     /// the sidebar can grey it and reconcile knows to rebuild the pane.
     pub disconnected: bool,
-    /// Configured SSH target this mirror came from.
+    /// Configured SSH target this mirror came from -- the host we asked, which
+    /// is not always the host running the pane.
     pub target: String,
+    /// The machine that really runs the pane, as the host we asked spells it,
+    /// when this mirror was reached through another host.
+    ///
+    /// Reported as the origin so a third machine can tell whose pane it is
+    /// looking at. Naming the hop instead left the origin half-described --
+    /// the terminal id of one machine beside the name of another -- and the
+    /// guard that drops a reflection of a host you already mirror could match
+    /// neither half, so every hop added another copy of it.
+    pub origin_target: Option<String>,
     /// Display prefix for the host, from `label` or the target.
     pub host_label: String,
     /// Configured colour for the host prefix, if any (raw config string).
