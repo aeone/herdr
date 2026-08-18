@@ -26,7 +26,31 @@ pub(crate) struct SocketFileIdentity {
     marker: Vec<u8>,
 }
 
+/// How many times to try a connection the kernel asked us to try again.
+const CONNECT_RETRIES: usize = 12;
+/// How long to wait between those tries.
+const CONNECT_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(25);
+
 pub(crate) fn connect_local_stream(path: &Path) -> io::Result<LocalStream> {
+    // A full accept queue on a unix socket is reported as `WouldBlock`, not as
+    // a refused connection: the server is there and listening, it just has not
+    // accepted yet. Every mirror of a busy host dials at once, so this happens
+    // in bursts and surfaced as `herdr: lost connection to server: Resource
+    // temporarily unavailable`. Waiting a moment is the whole fix; a server
+    // that is genuinely gone fails with a different error immediately.
+    let mut attempt = 0;
+    loop {
+        match connect_local_stream_once(path) {
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock && attempt < CONNECT_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(CONNECT_RETRY_PAUSE);
+            }
+            result => return result,
+        }
+    }
+}
+
+fn connect_local_stream_once(path: &Path) -> io::Result<LocalStream> {
     #[cfg(unix)]
     {
         use interprocess::local_socket::{prelude::*, GenericFilePath};

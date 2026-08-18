@@ -1145,6 +1145,7 @@ impl App {
     /// Nothing is spawned: no ssh, no remote process, no claim on the remote
     /// terminal. The pane is a terminal parser waiting for frames.
     fn create_streamed_mirror(&mut self, mirror: RemoteMirror, label: &str) -> std::io::Result<()> {
+        let host = mirror.target.clone();
         let (rows, cols) = self.state.estimate_pane_size();
         let cwd = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
@@ -1200,7 +1201,42 @@ impl App {
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(workspace);
+        // This pane is empty, and the host is sending differences against the
+        // last frame it sent -- so it has to be asked for the set again, even
+        // when the set has not changed, or an idle terminal never repaints and
+        // the mirror stays blank.
+        if let Some(stream) = self.mirror_streams.get_mut(&host) {
+            stream.forget_targets();
+        }
         Ok(())
+    }
+
+    /// Dials any host whose shared mirror connection is down but wanted.
+    ///
+    /// Runs on a clock of this machine's own, because everything else about a
+    /// mirror is driven by what the host pushes. A host whose feed has wedged
+    /// pushes nothing, and used to be left with a dead connection and blank
+    /// mirrors for as long as it stayed wedged.
+    pub(crate) fn retry_mirror_streams(&mut self) {
+        if self.mirror_streams.is_empty() && self.mirror_remote_herdr.is_empty() {
+            return;
+        }
+        for space in self.config_remote_spaces() {
+            if !self.mirrors_are_multiplexed(&space.target) {
+                continue;
+            }
+            // Hosts holding a live connection are not skipped: this also
+            // catches a set that was forgotten because a pane was rebuilt, so
+            // the frame a blank pane needs does not wait for the host to say
+            // something first.
+            if self.mirror_stream_targets(&space.target).is_empty() {
+                continue;
+            }
+            let Some(remote_herdr) = self.mirror_remote_herdr.get(&space.target).cloned() else {
+                continue;
+            };
+            self.update_mirror_stream(&space, &remote_herdr);
+        }
     }
 
     /// How long to wait before dialling a host again, after this many failures
@@ -1471,6 +1507,32 @@ mod tests {
             "a dropped connection is not a host that cannot do this"
         );
     }
+    /// Mirrors reconcile on what a host pushes. A host that has stopped pushing
+    /// still needs its connection dialled, or its mirrors stay blank for as
+    /// long as it stays quiet -- which is how one wedged feed blanked a whole
+    /// machine's view of another.
+    #[tokio::test]
+    async fn a_host_that_has_stopped_pushing_is_still_dialled() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.mirror_remote_herdr
+            .insert("quiet".to_string(), "/usr/bin/herdr".to_string());
+
+        // Nothing mirrored, so there is nothing to dial for and no ssh is spawned.
+        app.retry_mirror_streams();
+        assert!(app.mirror_streams.is_empty());
+
+        // A host that has fallen back to an attach per pane is not dialled on
+        // the shared connection at all.
+        app.mirror_streams.remove("quiet");
+        app.mirror_multiplex_unsupported.insert(
+            "quiet".to_string(),
+            std::time::Instant::now() + std::time::Duration::from_secs(3600),
+        );
+        app.retry_mirror_streams();
+        assert!(app.mirror_streams.is_empty());
+    }
+
     /// Deploying to a host means restarting its server, and a connection
     /// opened in that window carries no frames either. This cost lute an hour
     /// on the per-pane attach for the crime of being deployed to.

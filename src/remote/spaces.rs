@@ -357,6 +357,13 @@ pub(crate) enum FeedOutcome {
     Unavailable,
 }
 
+/// How long a feed may say nothing before it is treated as dead.
+///
+/// `herdr agent feed` re-emits on a five second heartbeat as well as on every
+/// change, so this is six missed heartbeats rather than a guess about how idle
+/// a host might be.
+const FEED_SILENCE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Runs `herdr agent feed` on the host and calls `on_snapshot` for each pushed
 /// block, parsing it exactly as a poll response.
 ///
@@ -378,19 +385,50 @@ pub(crate) fn run_feed(
 
     let mut streamed = false;
     if let Some(stdout) = child.stdout.take() {
-        let reader = std::io::BufReader::new(stdout);
-        let mut block = Vec::new();
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            if !line.trim().is_empty() {
-                block.push(line);
-                // A block is the same three lines a poll returns: binary path,
-                // workspace list, pane list.
-                if block.len() == 3 {
-                    streamed = true;
-                    on_snapshot(parse_discovery_output(&block.join("\n"), space.mirror_all));
-                    block.clear();
+        // Read on a thread so silence can be noticed. The feed emits a block on
+        // its own heartbeat as well as on changes, so a feed that says nothing
+        // for several heartbeats is not an idle host -- it is a feed that has
+        // stopped, with the ssh still open and no end-of-file to notice. That
+        // wedged one machine's view of another for as long as it was left,
+        // because nothing else redials a mirror connection.
+        let (lines_tx, lines_rx) = std::sync::mpsc::channel::<String>();
+        let reader_thread = std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines() {
+                let Ok(line) = line else { break };
+                if lines_tx.send(line).is_err() {
+                    break;
                 }
+            }
+        });
+
+        let mut block = Vec::new();
+        loop {
+            match lines_rx.recv_timeout(FEED_SILENCE_LIMIT) {
+                Ok(line) => {
+                    if !line.trim().is_empty() {
+                        block.push(line);
+                        // A block is the same three lines a poll returns: binary
+                        // path, workspace list, pane list.
+                        if block.len() == 3 {
+                            streamed = true;
+                            on_snapshot(parse_discovery_output(
+                                &block.join("\n"),
+                                space.mirror_all,
+                            ));
+                            block.clear();
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    tracing::warn!(
+                        target = %space.target,
+                        seconds = FEED_SILENCE_LIMIT.as_secs(),
+                        "remote feed went quiet; dropping it so it is dialled again"
+                    );
+                    break;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             }
             // Checked after the line is consumed, not before: the read has
             // already blocked, so discarding what it returned only loses a
@@ -399,6 +437,9 @@ pub(crate) fn run_feed(
                 break;
             }
         }
+        drop(lines_rx);
+        let _ = child.kill();
+        let _ = reader_thread.join();
     }
     let _ = child.kill();
     let _ = child.wait();
@@ -976,6 +1017,21 @@ mod tests {
     /// shells and agent panes carry a nested `agent_session` object. The live
     /// host reported 26 panes across 23 workspaces with only 4 agents, which is
     /// the ratio that makes the agent-only filter worth having.
+    /// A feed that says nothing is not an idle host: it heartbeats every five
+    /// seconds, so silence means it has stopped without closing, and the read
+    /// has to give up rather than wait for an end that never comes.
+    #[test]
+    fn the_silence_limit_allows_for_several_missed_heartbeats() {
+        assert!(
+            FEED_SILENCE_LIMIT >= std::time::Duration::from_secs(20),
+            "a limit this side of a few heartbeats would drop healthy feeds"
+        );
+        assert!(
+            FEED_SILENCE_LIMIT <= std::time::Duration::from_secs(60),
+            "a limit much beyond that leaves mirrors blank while it waits"
+        );
+    }
+
     #[test]
     fn discovery_ignores_shell_panes_and_tolerates_agent_session_metadata() {
         let workspaces = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"active_tab_id":"w1:t1","agent_status":"unknown","focused":false,"label":"lifestream","number":1,"pane_count":1,"tab_count":1,"workspace_id":"w1"},{"active_tab_id":"wK:t1","agent_status":"idle","focused":false,"label":"baby-names","number":17,"pane_count":1,"tab_count":1,"workspace_id":"wK"},{"active_tab_id":"wV:t1","agent_status":"blocked","focused":true,"label":"save-reddit","number":22,"pane_count":1,"tab_count":1,"workspace_id":"wV"}]}}"#;

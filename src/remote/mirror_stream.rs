@@ -252,6 +252,19 @@ impl MirrorStream {
     }
 
     /// Replaces the set of terminals this connection carries.
+    /// Forgets what this connection was last told to watch, so the next
+    /// reconcile names the set again even though it has not changed.
+    ///
+    /// The host sends only what changed since the frame it last sent each
+    /// watcher. A mirror pane rebuilt on this side -- which every handoff of
+    /// the host causes, because mirror identity carries the host's workspace id
+    /// -- starts empty and would receive those differences against a frame it
+    /// never saw, leaving an idle terminal blank for as long as it stays idle.
+    /// Naming the set again is what makes the host start from a whole frame.
+    pub(crate) fn forget_targets(&mut self) {
+        self.watching.clear();
+    }
+
     pub(crate) fn set_targets(&mut self, targets: Vec<MirrorStreamTarget>) -> std::io::Result<()> {
         let line = observe_request_line(&targets);
         let Some(stdin) = self.stdin.as_mut() else {
@@ -385,6 +398,30 @@ fn short_thread_name(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rebuilt pane needs a whole frame, and the host only sends one when it
+    /// is asked for the set again -- so an unchanged set must still be askable.
+    #[test]
+    fn forgetting_the_set_makes_an_unchanged_one_worth_naming_again() {
+        let mut stream = MirrorStream::test_without_a_host(1, None);
+        let targets = vec![MirrorStreamTarget {
+            terminal_id: "term_1".to_owned(),
+            cols: 80,
+            rows: 24,
+        }];
+        stream.watching = targets.clone();
+        assert!(
+            stream.is_watching(&targets),
+            "an unchanged set is normally left alone"
+        );
+
+        stream.forget_targets();
+
+        assert!(
+            !stream.is_watching(&targets),
+            "after a pane is rebuilt the same set has to be named again"
+        );
+    }
 
     /// The difference between a host that cannot do this and one that is
     /// merely away is what it said, not that it said nothing.

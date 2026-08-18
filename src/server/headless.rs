@@ -1763,6 +1763,40 @@ impl HeadlessServer {
         true
     }
 
+    /// Whether this connection is allowed to name terminals, closing it if not.
+    ///
+    /// Two connections may name a terminal after they have already named one: a
+    /// multiplexed observer whose set has changed, because panes come and go on
+    /// the host it watches, and a controller following the pane being used.
+    /// Reopening the connection for either is a round trip -- a process and a
+    /// handshake, over ssh -- in front of the next keystroke, which is what one
+    /// connection per host exists to avoid.
+    ///
+    /// Naming again is only ever *the same kind* of naming: a watcher may
+    /// change what it watches and a controller may move, but neither may become
+    /// the other. An attach that could downgrade itself to a read-only observer
+    /// would keep its connection while quietly giving up the terminal it holds.
+    fn client_may_name_terminals(&mut self, client_id: u64, action: &str) -> bool {
+        let renaming_same_mode = match self.clients.get(&client_id).map(|client| &client.mode) {
+            Some(ClientConnectionMode::TerminalObserveMany) => action == "observe",
+            Some(ClientConnectionMode::TerminalAttach { .. }) => action == "control",
+            _ => false,
+        };
+        if renaming_same_mode || self.client_is_pending_terminal_mode(client_id) {
+            return true;
+        }
+        self.send_to_client(
+            client_id,
+            ServerMessage::ServerShutdown {
+                reason: Some(format!(
+                    "terminal session {action} failed: connection is not pending terminal session"
+                )),
+            },
+        );
+        self.remove_client_and_resize_if_needed(client_id);
+        false
+    }
+
     fn resolve_terminal_session_target(
         &mut self,
         client_id: u64,
@@ -1781,23 +1815,7 @@ impl HeadlessServer {
         // become the other. An attach that could downgrade itself to a
         // read-only observer would keep its connection while quietly giving up
         // the terminal it holds.
-        let renaming_same_mode = match self.clients.get(&client_id).map(|client| &client.mode) {
-            Some(ClientConnectionMode::TerminalObserveMany) => action == "observe",
-            Some(ClientConnectionMode::TerminalAttach { .. }) => action == "control",
-            _ => false,
-        };
-        if !renaming_same_mode && !self.client_is_pending_terminal_mode(client_id) {
-            self.send_to_client(
-                client_id,
-                ServerMessage::ServerShutdown {
-                    reason: Some(
-                        format!(
-                            "terminal session {action} failed: connection is not pending terminal session"
-                        ),
-                    ),
-                },
-            );
-            self.remove_client_and_resize_if_needed(client_id);
+        if !self.client_may_name_terminals(client_id, action) {
             return None;
         }
 
@@ -1832,13 +1850,21 @@ impl HeadlessServer {
         // Observed frames carry terminal bytes whatever the connection
         // negotiated for its own screen: a watcher of many panes has no single
         // screen to render semantically.
+        if !self.client_may_name_terminals(client_id, "observe") {
+            return false;
+        }
         let encoding = crate::protocol::RenderEncoding::TerminalAnsi;
         let mut resolved = Vec::with_capacity(targets.len());
+        // A target that does not resolve is answered, not fatal. One terminal
+        // that ended between the watcher's last look and this request used to
+        // reject the whole set, which on a shared connection meant every mirror
+        // of that host went dark at once -- and stayed dark, because the set was
+        // retried unchanged. An attach per pane only ever lost the one pane.
+        let mut missing: Vec<String> = Vec::new();
         for target in targets {
-            let Some(terminal_id) =
-                self.resolve_terminal_session_target(client_id, &target.target, "observe")
-            else {
+            let Some(terminal_id) = self.resolve_terminal_target_id_string(&target.target) else {
                 debug!(client_id, target = %target.target, "observe target did not resolve");
+                missing.push(target.target);
                 continue;
             };
             resolved.push(crate::server::clients::ObservedTerminal {
@@ -1866,8 +1892,23 @@ impl HeadlessServer {
 
         info!(
             client_id,
-            count, "multiplexed terminal observe client connected"
+            count,
+            missing = missing.len(),
+            "multiplexed terminal observe client connected"
         );
+
+        // Told after the set is installed, so the watcher drops those mirrors
+        // rather than asking for them again on every change.
+        for target in missing {
+            self.send_to_client(
+                client_id,
+                ServerMessage::ObservedTerminalEnded {
+                    terminal_id: target.clone(),
+                    target,
+                    reason: Some("terminal target not found".to_owned()),
+                },
+            );
+        }
         true
     }
 
@@ -4359,6 +4400,15 @@ impl HeadlessServer {
         // No resize polling needed — server has no terminal.
         // Client resize messages drive size changes instead.
 
+        // Mirrors do belong here, though: this is the loop that holds them, and
+        // a host whose feed has gone quiet is only ever redialled by a clock of
+        // our own.
+        #[cfg(unix)]
+        if now >= self.app.next_mirror_stream_poll {
+            self.app.retry_mirror_streams();
+            self.app.next_mirror_stream_poll = now + crate::app::MIRROR_STREAM_POLL_INTERVAL;
+        }
+
         if self
             .app
             .config_diagnostic_deadline
@@ -5893,6 +5943,62 @@ next_tab = ""
             ];
             expected.sort();
             assert_eq!(sizes, expected);
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
+    /// A terminal that ended before the watcher asked for it is one mirror
+    /// lost, not all of them. Rejecting the whole set took every mirror of a
+    /// host down at once, and kept them down: the set was retried unchanged.
+    #[test]
+    fn one_target_that_has_gone_does_not_cost_the_watcher_the_others() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
+            let control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![
+                        crate::protocol::ObservedTarget {
+                            target: "term_gone_before_we_asked".to_owned(),
+                            cols: 40,
+                            rows: 10,
+                        },
+                        crate::protocol::ObservedTarget {
+                            target: terminal_id_string.clone(),
+                            cols: 40,
+                            rows: 10,
+                        },
+                    ],
+                })
+            );
+
+            let client = server.clients.get(&7).expect("the connection should be live");
+            assert!(
+                matches!(client.mode, ClientConnectionMode::TerminalObserveMany),
+                "the watcher should still be watching"
+            );
+            assert_eq!(
+                client
+                    .observed
+                    .iter()
+                    .map(|observed| observed.terminal_id.clone())
+                    .collect::<Vec<_>>(),
+                vec![terminal_id_string],
+                "the terminal that does exist should still be watched"
+            );
+
+            let ended = std::iter::from_fn(|| control_rx.try_recv().ok())
+                .map(read_server_message)
+                .find(|message| matches!(message, ServerMessage::ObservedTerminalEnded { .. }));
+            assert!(
+                matches!(
+                    ended,
+                    Some(ServerMessage::ObservedTerminalEnded { ref terminal_id, .. })
+                        if terminal_id == "term_gone_before_we_asked"
+                ),
+                "and the one that does not should be reported as gone"
+            );
 
             shutdown_test_runtimes(server);
         });

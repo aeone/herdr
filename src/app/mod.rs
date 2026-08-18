@@ -41,6 +41,14 @@ pub(crate) const HEADLESS_ANIMATION_INTERVAL: Duration = Duration::from_millis(1
 pub(crate) const HEADLESS_ANIMATION_TICK_STEP: u32 = 8;
 pub(crate) const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(30);
 const RESIZE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How often to see whether a host's shared mirror connection wants dialling.
+///
+/// Reconciling mirrors happens on what a host pushes, which is the right clock
+/// for the mirrors themselves. It is the wrong clock for the connection that
+/// carries them: when a host's feed wedges, nothing is pushed, so nothing
+/// reconciles, so the connection is never redialled and every mirror of that
+/// host sits blank. This is the clock that does not depend on the host.
+pub(crate) const MIRROR_STREAM_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const GIT_REMOTE_STATUS_REFRESH_INTERVAL: Duration = Duration::from_millis(1500);
 const AUTO_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const PENDING_AGENT_RESUME_THEME_WAIT: Duration = Duration::from_millis(750);
@@ -125,6 +133,7 @@ pub struct App {
     pub(crate) last_sidebar_divider_click: Option<Instant>,
     pub(crate) last_pane_click: Option<PaneClickState>,
     pub(crate) next_resize_poll: Instant,
+    pub(crate) next_mirror_stream_poll: Instant,
     pub(crate) next_animation_tick: Option<Instant>,
     pub(crate) next_auto_update_check: Option<Instant>,
     pub(crate) next_agent_manifest_update_check: Option<Instant>,
@@ -845,6 +854,7 @@ impl App {
             last_sidebar_divider_click: None,
             last_pane_click: None,
             next_resize_poll: Instant::now() + RESIZE_POLL_INTERVAL,
+            next_mirror_stream_poll: Instant::now() + MIRROR_STREAM_POLL_INTERVAL,
             next_animation_tick: None,
             next_auto_update_check: version_check_enabled
                 .then_some(Instant::now() + AUTO_UPDATE_CHECK_INTERVAL),

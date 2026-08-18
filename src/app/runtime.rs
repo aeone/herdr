@@ -258,6 +258,12 @@ impl App {
             self.next_resize_poll = now + RESIZE_POLL_INTERVAL;
         }
 
+        #[cfg(unix)]
+        if now >= self.next_mirror_stream_poll {
+            self.retry_mirror_streams();
+            self.next_mirror_stream_poll = now + crate::app::MIRROR_STREAM_POLL_INTERVAL;
+        }
+
         if self
             .config_diagnostic_deadline
             .is_some_and(|deadline| now >= deadline)
@@ -606,6 +612,19 @@ impl App {
             .then_some(self.last_git_remote_status_refresh + GIT_REMOTE_STATUS_REFRESH_INTERVAL)
     }
 
+    /// When to next see whether a host wants dialling, if any host might.
+    ///
+    /// Deliberately not tied to the resize poll, which is a terminal's business
+    /// and which the headless server skips -- and the headless server is
+    /// exactly where mirrors live. Equally, a machine mirroring nothing keeps a
+    /// loop with no deadline at all rather than waking every few seconds to
+    /// decide there was nothing to do.
+    pub(crate) fn mirror_stream_poll_deadline(&self) -> Option<Instant> {
+        let mirrors_anything =
+            !self.mirror_remote_herdr.is_empty() || !self.mirror_streams.is_empty();
+        mirrors_anything.then_some(self.next_mirror_stream_poll)
+    }
+
     pub(crate) fn next_loop_deadline(&self, now: Instant, needs_render: bool) -> Option<Instant> {
         self.next_loop_deadline_with_resize_poll(now, needs_render, true, true)
     }
@@ -636,6 +655,7 @@ impl App {
 
         [
             include_resize_poll.then_some(self.next_resize_poll),
+            self.mirror_stream_poll_deadline(),
             self.config_diagnostic_deadline,
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
@@ -765,6 +785,25 @@ mod tests {
     use crate::app::state;
     use crate::workspace::Workspace;
     use std::path::PathBuf;
+
+    /// The loop that holds mirrors has to wake on its own to redial them, but a
+    /// machine mirroring nothing should still sleep until something happens.
+    #[test]
+    fn only_a_machine_holding_mirrors_wakes_to_redial_them() {
+        let mut app = crate::app::tests::test_app();
+        assert!(
+            app.mirror_stream_poll_deadline().is_none(),
+            "mirroring nothing, there is nothing to wake for"
+        );
+
+        app.mirror_remote_herdr
+            .insert("lute".to_string(), "/usr/bin/herdr".to_string());
+        assert_eq!(
+            app.mirror_stream_poll_deadline(),
+            Some(app.next_mirror_stream_poll),
+            "once a host is mirrored the loop wakes to check on its connection"
+        );
+    }
 
     #[test]
     fn interrupted_custom_command_wait_keeps_child_for_retry() {
