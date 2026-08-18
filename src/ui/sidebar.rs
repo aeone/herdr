@@ -2701,6 +2701,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
             disconnected: false,
             origin_target: None,
+            remote_terminal: "term-remote".to_string(),
             target: target.into(),
             host_label: target.into(),
             host_color: None,
@@ -2773,6 +2774,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         app.workspaces[0].remote_mirror = Some(crate::workspace::RemoteMirror {
             disconnected: false,
             origin_target: None,
+            remote_terminal: "term-remote".to_string(),
             target: "box".into(),
             host_label: "box".into(),
             host_color: None,

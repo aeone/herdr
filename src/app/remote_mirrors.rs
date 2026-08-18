@@ -19,9 +19,17 @@ use super::App;
 
 /// One change reconcile wants to make to the local workspace list.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Creating carries everything needed to build a mirror and the other two carry
+// an index, so the variants are lopsided by nature. The plan is a short-lived
+// list built once per reconcile, so boxing would cost an allocation per mirror
+// to save nothing that matters.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum MirrorAction {
     Create {
         key: String,
+        /// The terminal id the polled host knows this pane by, which is not the
+        /// key when the pane reached us through another host.
+        remote_terminal: String,
         label: String,
         argv: Vec<String>,
         /// Agent the remote reported, passed to the mirror pane as the
@@ -188,6 +196,7 @@ pub(crate) fn plan_remote_mirrors(
                 };
                 plan.push(MirrorAction::Create {
                     key: key.clone(),
+                    remote_terminal: pane.terminal_id.clone(),
                     label: label.clone(),
                     argv: attach_argv(space, pane, &snapshot.remote_herdr),
                     agent: pane.agent.clone(),
@@ -203,11 +212,16 @@ pub(crate) fn plan_remote_mirrors(
 ///
 /// Production and tests share this so a mirror's stored identity can never
 /// drift from the identity `plan_remote_mirrors` looks it up by.
-pub(crate) fn remote_mirror_record(space: &RemoteSpaceConfig, key: &str) -> RemoteMirror {
+pub(crate) fn remote_mirror_record(
+    space: &RemoteSpaceConfig,
+    key: &str,
+    remote_terminal: &str,
+) -> RemoteMirror {
     RemoteMirror {
         disconnected: false,
         target: space.target.clone(),
         origin_target: None,
+        remote_terminal: remote_terminal.to_string(),
         host_label: space.display_label().to_string(),
         host_color: space.color.clone(),
         key: key.to_string(),
@@ -228,6 +242,7 @@ pub(crate) fn remote_mirror_record(space: &RemoteSpaceConfig, key: &str) -> Remo
 pub(crate) fn remote_mirror_record_for_origin(
     space: &RemoteSpaceConfig,
     key: &str,
+    remote_terminal: &str,
     origin: &crate::remote::spaces::MirrorOrigin,
 ) -> RemoteMirror {
     RemoteMirror {
@@ -237,7 +252,7 @@ pub(crate) fn remote_mirror_record_for_origin(
             .clone()
             .unwrap_or_else(|| crate::remote::spaces::MirrorOrigin::host_key(&origin.target)),
         host_color: origin.color.clone(),
-        ..remote_mirror_record(space, key)
+        ..remote_mirror_record(space, key, remote_terminal)
     }
 }
 
@@ -648,7 +663,7 @@ impl App {
         let key = created.pane.mirror_key(&target);
         let label = created.pane.mirror_label();
         let argv = attach_argv(&space, &created.pane, &created.remote_herdr);
-        let mirror = remote_mirror_record(&space, &key);
+        let mirror = remote_mirror_record(&space, &key, &created.pane.terminal_id);
         if let Err(err) = self.create_remote_mirror(mirror, &label, &argv, None) {
             tracing::warn!(target = %target, %err, "mirroring a new remote space failed");
             return;
@@ -753,14 +768,17 @@ impl App {
                 }
                 MirrorAction::Create {
                     key,
+                    remote_terminal,
                     label,
                     argv,
                     agent,
                     origin,
                 } => {
                     let mirror = match &origin {
-                        Some(origin) => remote_mirror_record_for_origin(space, &key, origin),
-                        None => remote_mirror_record(space, &key),
+                        Some(origin) => {
+                            remote_mirror_record_for_origin(space, &key, &remote_terminal, origin)
+                        }
+                        None => remote_mirror_record(space, &key, &remote_terminal),
                     };
                     let created = if self.mirrors_are_multiplexed(&space.target) {
                         self.create_streamed_mirror(mirror, &label)
@@ -917,9 +935,7 @@ impl App {
     fn mirror_index_for_terminal(&self, target: &str, terminal_id: &str) -> Option<usize> {
         self.state.workspaces.iter().position(|workspace| {
             workspace.remote_mirror.as_ref().is_some_and(|mirror| {
-                mirror.target == target
-                    && crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)
-                        .is_some_and(|(_, remote_terminal)| remote_terminal == terminal_id)
+                mirror.target == target && mirror.remote_terminal == terminal_id
             })
         })
     }
@@ -1180,12 +1196,7 @@ impl App {
         {
             let events = self.event_tx.clone();
             let target = mirror.target.clone();
-            let Some((_, remote_terminal)) =
-                crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)
-            else {
-                return Err(std::io::Error::other("mirror key has no terminal id"));
-            };
-            let terminal_id = remote_terminal.to_owned();
+            let terminal_id = mirror.remote_terminal.clone();
             tokio::spawn(async move {
                 while let Some(request) = request_rx.recv().await {
                     if events
@@ -1330,10 +1341,8 @@ impl App {
                 if mirror.target != target {
                     return None;
                 }
-                let (_, terminal_id) =
-                    crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)?;
                 Some(crate::remote::mirror_stream::MirrorStreamTarget {
-                    terminal_id: terminal_id.to_owned(),
+                    terminal_id: mirror.remote_terminal.clone(),
                     cols,
                     rows,
                 })
@@ -1530,6 +1539,33 @@ mod tests {
             "a dropped connection is not a host that cannot do this"
         );
     }
+    /// The key names the machine running the pane; the host we poll has to be
+    /// asked for the terminal *it* knows. Keying by origin without separating
+    /// the two asked lute for alleria's terminal id, which lute does not have,
+    /// so every mirror reached through another host came up blank.
+    #[test]
+    fn a_mirror_through_a_hop_is_asked_of_the_hop_by_the_hop_s_own_terminal() {
+        let space = space("lute");
+        let pane = mirrored_pane("w2", "notes", "term-on-lute", "ryielle@alleria", "term-far");
+        let origin = pane.origin.clone().expect("origin");
+
+        let record = super::remote_mirror_record_for_origin(
+            &space,
+            &pane.mirror_key(&space.target),
+            &pane.terminal_id,
+            &origin,
+        );
+
+        assert_eq!(
+            record.remote_terminal, "term-on-lute",
+            "lute is asked for the terminal lute knows"
+        );
+        assert!(
+            record.key.contains("term-far"),
+            "while the mirror is still identified by the pane alleria runs"
+        );
+    }
+
     /// The guard that drops a reflection of a host you already mirror matches
     /// the origin's name and its terminal id, so both have to describe the same
     /// machine. Naming the hop beside the origin's terminal id described no
@@ -1546,7 +1582,7 @@ mod tests {
             color: None,
         };
 
-        let record = super::remote_mirror_record_for_origin(&space, "key", &origin);
+        let record = super::remote_mirror_record_for_origin(&space, "key", "term-hop", &origin);
 
         assert_eq!(
             record.origin_target.as_deref(),
@@ -1556,7 +1592,7 @@ mod tests {
         assert_eq!(record.target, "workbox", "which is still the host we poll");
 
         // Heard first-hand, there is no hop and the two are the same machine.
-        let direct = super::remote_mirror_record(&space, "key");
+        let direct = super::remote_mirror_record(&space, "key", "term-hop");
         assert_eq!(direct.origin_target, None);
     }
 
@@ -1754,7 +1790,7 @@ mod tests {
     fn mirror(target: &str, key: &str, label: &str) -> Workspace {
         let mut workspace = Workspace::test_new(label);
         workspace.custom_name = Some(label.to_string());
-        workspace.remote_mirror = Some(remote_mirror_record(&space(target), key));
+        workspace.remote_mirror = Some(remote_mirror_record(&space(target), key, "term-remote"));
         workspace
     }
 
@@ -1769,7 +1805,7 @@ mod tests {
             if let MirrorAction::Create { key, label, .. } = action {
                 let mut workspace = Workspace::test_new(label);
                 workspace.custom_name = Some(label.clone());
-                workspace.remote_mirror = Some(remote_mirror_record(space, key));
+                workspace.remote_mirror = Some(remote_mirror_record(space, key, "term-remote"));
                 workspaces.push(workspace);
             }
         }
@@ -1789,7 +1825,7 @@ mod tests {
             pane.mirror_key(&space.target)
         };
         let mut workspace = Workspace::test_new("api");
-        workspace.remote_mirror = Some(remote_mirror_record(&space, &key));
+        workspace.remote_mirror = Some(remote_mirror_record(&space, &key, "term-remote"));
         let pane_id = workspace.tabs[0].root_pane;
         app.state.workspaces.push(workspace);
 
@@ -1845,7 +1881,7 @@ mod tests {
         let space = space("workbox");
         let pane = agent_pane("w1", "api", "term-1");
 
-        let record = remote_mirror_record(&space, &pane.mirror_key(&space.target));
+        let record = remote_mirror_record(&space, &pane.mirror_key(&space.target), &pane.terminal_id);
 
         assert_eq!(record.key, pane.mirror_key("workbox"));
         assert_eq!(record.target, "workbox");
@@ -1859,7 +1895,7 @@ mod tests {
         let pane = agent_pane("w1", "api", "term-1");
         let key = pane.mirror_key(&space.target);
 
-        let record = remote_mirror_record(&space, &key);
+        let record = remote_mirror_record(&space, &key, "term-remote");
 
         assert_eq!(record.host_label, "box");
         assert_eq!(record.key, key);
@@ -1965,6 +2001,7 @@ mod tests {
         let record = remote_mirror_record_for_origin(
             &space("pandora"),
             &key_for("pandora", "w2", "term-hop"),
+            "term-hop",
             &origin,
         );
 
@@ -1983,7 +2020,7 @@ mod tests {
         let pane = mirrored_pane("w2", "notes", "term-hop", "ryielle@valkyrie", "term-far");
         let origin = pane.origin.clone().expect("origin");
 
-        let record = remote_mirror_record_for_origin(&space("pandora"), "k", &origin);
+        let record = remote_mirror_record_for_origin(&space("pandora"), "k", "term-remote", &origin);
 
         assert_eq!(record.host_label, "valkyrie");
         // Left unset so the sidebar derives its usual per-host colour.
@@ -2098,6 +2135,7 @@ mod tests {
                 },
                 MirrorAction::Create {
                     key: key_for("workbox", "w1", "term-2"),
+                    remote_terminal: "term-2".into(),
                     label: "api 2".into(),
                     argv: attach_argv(
                         &space("workbox"),
@@ -2181,6 +2219,7 @@ mod tests {
             plan,
             vec![MirrorAction::Create {
                 key: key_for("workbox", "w7", "term-7"),
+                remote_terminal: "term-7".into(),
                 label: "notes".into(),
                 argv: attach_argv(
                     &space("workbox"),
@@ -2460,6 +2499,7 @@ mod tests {
                 },
                 MirrorAction::Create {
                     key: key_for("workbox", "w2", "term-2"),
+                    remote_terminal: "term-2".into(),
                     label: "lifestream 2".into(),
                     argv: attach_argv(
                         &space("workbox"),

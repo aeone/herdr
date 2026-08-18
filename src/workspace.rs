@@ -195,8 +195,13 @@ pub struct RemoteMirror {
     pub host_label: String,
     /// Configured colour for the host prefix, if any (raw config string).
     pub host_color: Option<String>,
-    /// Stable per-host key, so repeated polls reuse the mirror.
+    /// Stable per-host key, so repeated polls reuse the mirror. Names the
+    /// machine that really runs the pane, so identity survives a hop.
     pub key: String,
+    /// The terminal id on the host we poll, which is what that host answers to
+    /// -- distinct from the key, which names the origin. Asking a host for the
+    /// origin's terminal id gets nothing: it does not have one.
+    pub remote_terminal: String,
 }
 
 impl Deref for Workspace {

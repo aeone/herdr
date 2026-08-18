@@ -1212,6 +1212,7 @@ mod tests {
         state.workspaces[ws_idx].remote_mirror = Some(crate::workspace::RemoteMirror {
             disconnected: false,
             origin_target: None,
+            remote_terminal: "term-remote".to_string(),
             target: "workbox".into(),
             host_label: "workbox".into(),
             host_color: None,
