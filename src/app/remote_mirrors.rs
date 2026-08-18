@@ -760,7 +760,7 @@ impl App {
                         Some(origin) => remote_mirror_record_for_origin(space, &key, origin),
                         None => remote_mirror_record(space, &key),
                     };
-                    let created = if self.multiplexed_mirrors {
+                    let created = if self.mirrors_are_multiplexed(&space.target) {
                         self.create_streamed_mirror(mirror, &label)
                     } else {
                         self.create_remote_mirror(mirror, &label, &argv, agent.as_deref())
@@ -778,7 +778,9 @@ impl App {
         if closed > 0 {
             self.shutdown_detached_terminal_runtimes();
         }
-        if self.multiplexed_mirrors {
+        if self.mirrors_are_multiplexed(&space.target) {
+            self.mirror_remote_herdr
+                .insert(space.target.clone(), snapshot.remote_herdr.clone());
             // After the plan, so the set named to the host is the set that now
             // exists here rather than the one that did a moment ago.
             self.update_mirror_stream(space, &snapshot.remote_herdr);
@@ -974,6 +976,63 @@ impl App {
         self.shutdown_detached_terminal_runtimes();
     }
 
+    /// Sends something typed into a mirror back to the host that owns it.
+    ///
+    /// The writable connection is opened on the first keystroke rather than
+    /// with the mirror: most mirrored panes are watched and never typed into,
+    /// and a claim held for one of those is a claim nobody else can have.
+    pub(crate) fn send_mirror_request(
+        &mut self,
+        target: &str,
+        terminal_id: &str,
+        request: &crate::pane::StreamedPaneRequest,
+    ) {
+        // Watching claims nothing: a size is only worth sending once this
+        // machine already holds the terminal, and claiming one because a pane
+        // was laid out would take it from whoever is actually typing.
+        if !self.mirror_controls.contains_key(target)
+            && matches!(request, crate::pane::StreamedPaneRequest::Resize { .. })
+        {
+            return;
+        }
+        if !self.mirror_controls.contains_key(target) {
+            let Some(space) = self
+                .config_remote_spaces()
+                .into_iter()
+                .find(|space| space.target == target)
+            else {
+                return;
+            };
+            let Some(remote_herdr) = self.mirror_remote_herdr.get(target).cloned() else {
+                tracing::debug!(target, "no host binary known yet; dropping mirror input");
+                return;
+            };
+            match crate::remote::mirror_stream::MirrorControl::spawn(
+                &space,
+                terminal_id,
+                &remote_herdr,
+            ) {
+                Ok(control) => {
+                    tracing::info!(target, terminal_id, "claimed a mirrored terminal");
+                    self.mirror_controls.insert(target.to_owned(), control);
+                }
+                Err(err) => {
+                    tracing::warn!(target, %err, "could not open a writable mirror connection");
+                    return;
+                }
+            }
+        }
+        let Some(control) = self.mirror_controls.get_mut(target) else {
+            return;
+        };
+        if let Err(err) = control.send(terminal_id, request) {
+            tracing::warn!(target, terminal_id, %err, "mirror input failed; reopening on the next one");
+            if let Some(control) = self.mirror_controls.remove(target) {
+                control.stop();
+            }
+        }
+    }
+
     /// The whole connection to a host has closed.
     ///
     /// Every mirror it carried is now stale, and the next reconcile opens the
@@ -981,7 +1040,24 @@ impl App {
     /// kept, which is the point of keeping them.
     pub(crate) fn handle_mirror_stream_closed(&mut self, target: &str, reason: Option<&str>) {
         tracing::info!(target = %target, reason, "mirror stream closed");
+        if let Some(stream) = self.mirror_streams.get(target) {
+            // A host too old for this prints its usage and exits, which from
+            // here looks like a connection that dropped -- except that nothing
+            // ever came down it. Mirrors of that host go back to an attach per
+            // pane, which is what it does understand.
+            if !stream.carried_a_frame() {
+                tracing::warn!(
+                    target,
+                    complaint = stream.complaint(),
+                    "host did not stream any mirrors; falling back to one attach per pane"
+                );
+                self.mirror_multiplex_unsupported.insert(target.to_owned());
+            }
+        }
         self.mirror_streams.remove(target);
+        if let Some(control) = self.mirror_controls.remove(target) {
+            control.stop();
+        }
         if self.state.keeps_offline_mirrors() {
             for workspace in self.state.workspaces.iter_mut() {
                 if let Some(mirror) = workspace.remote_mirror.as_mut() {
@@ -1061,12 +1137,35 @@ impl App {
         let cwd = std::env::var_os("HOME")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
-        // Input and resizes a mirror produces are the host's business, and
-        // until its control is claimed there is nothing to do with them. The
-        // receiver is drained rather than dropped so typing into a mirror is
-        // quietly ignored instead of reported as a broken pane.
+        // Input and resizes a mirror produces belong to the host. They are
+        // tagged with the terminal they came from here, since the pane itself
+        // only knows it is a pane.
         let (requests, mut request_rx) = tokio::sync::mpsc::channel(16);
-        tokio::spawn(async move { while request_rx.recv().await.is_some() {} });
+        {
+            let events = self.event_tx.clone();
+            let target = mirror.target.clone();
+            let Some((_, remote_terminal)) =
+                crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)
+            else {
+                return Err(std::io::Error::other("mirror key has no terminal id"));
+            };
+            let terminal_id = remote_terminal.to_owned();
+            tokio::spawn(async move {
+                while let Some(request) = request_rx.recv().await {
+                    if events
+                        .send(crate::events::AppEvent::MirrorRequest {
+                            target: target.clone(),
+                            terminal_id: terminal_id.clone(),
+                            request,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
         let (mut workspace, terminal, runtime) = Workspace::new_streamed_mirror(
             cwd,
             rows,
@@ -1090,6 +1189,15 @@ impl App {
         self.state.terminals.insert(terminal.id.clone(), terminal);
         self.state.workspaces.push(workspace);
         Ok(())
+    }
+
+    /// Whether this host's mirrors share one connection.
+    ///
+    /// Configured on, minus the hosts that have shown they cannot: the fleet
+    /// runs mixed builds as a matter of course, so falling back per host is the
+    /// normal case rather than a failure.
+    fn mirrors_are_multiplexed(&self, target: &str) -> bool {
+        self.multiplexed_mirrors && !self.mirror_multiplex_unsupported.contains(target)
     }
 
     /// Every terminal we currently mirror of one host, with the size to render
@@ -1213,6 +1321,50 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fleet runs mixed builds as a matter of course -- two of its machines
+    /// sleep for days -- so a host that cannot stream many terminals at once
+    /// must go back to an attach per pane rather than lose its mirrors.
+    #[tokio::test]
+    async fn a_host_that_streams_nothing_goes_back_to_one_attach_per_pane() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.mirror_streams.insert(
+            "sleepy".to_string(),
+            crate::remote::mirror_stream::MirrorStream::test_without_a_host(
+                0,
+                Some("usage: herdr terminal session observe <target>"),
+            ),
+        );
+        assert!(app.mirrors_are_multiplexed("sleepy"));
+
+        app.handle_mirror_stream_closed("sleepy", None);
+
+        assert!(
+            !app.mirrors_are_multiplexed("sleepy"),
+            "a host that said nothing should be mirrored the old way"
+        );
+        assert!(app.mirror_streams.is_empty());
+    }
+
+    /// A connection that was working and then dropped says nothing about what
+    /// the host can do, and must not cost it the shared connection for ever.
+    #[tokio::test]
+    async fn a_host_whose_connection_merely_dropped_keeps_the_shared_one() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.mirror_streams.insert(
+            "flaky".to_string(),
+            crate::remote::mirror_stream::MirrorStream::test_without_a_host(42, None),
+        );
+
+        app.handle_mirror_stream_closed("flaky", Some("connection reset"));
+
+        assert!(
+            app.mirrors_are_multiplexed("flaky"),
+            "a dropped connection is not a host that cannot do this"
+        );
+    }
     use crate::remote::spaces::RemoteAgentPane;
 
     /// Planning with nothing pinned, which is the case for every test that is

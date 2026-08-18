@@ -1162,6 +1162,17 @@ fn write_terminal_session_output(mut stream: LocalStream) -> io::Result<()> {
 #[derive(serde::Deserialize)]
 #[serde(tag = "type")]
 enum TerminalControlCommand {
+    /// Move this connection to another terminal.
+    ///
+    /// A watcher follows whichever pane is being used, and reopening the
+    /// connection each time is a round trip -- over ssh, a process and a
+    /// handshake -- in front of the first keystroke.
+    #[serde(rename = "terminal.control")]
+    Control {
+        target: String,
+        #[serde(default)]
+        takeover: bool,
+    },
     #[serde(rename = "terminal.input")]
     Input {
         text: Option<String>,
@@ -1212,6 +1223,12 @@ fn terminal_control_command_from_json(raw: &str) -> Result<ClientMessage, String
     let command = serde_json::from_str::<TerminalControlCommand>(raw)
         .map_err(|err| format!("invalid json command: {err}"))?;
     match command {
+        TerminalControlCommand::Control { target, takeover } => {
+            if target.trim().is_empty() {
+                return Err("terminal.control needs a target".into());
+            }
+            Ok(ClientMessage::ControlTerminal { target, takeover })
+        }
         TerminalControlCommand::Input { text, bytes } => {
             let data = match (text, bytes) {
                 (Some(_), Some(_)) => {
@@ -3166,6 +3183,28 @@ mod tests {
             panic!("expected input command");
         };
         assert_eq!(data, b"hello");
+    }
+
+    /// A controller is moved from pane to pane over the connection it already
+    /// has, rather than by opening another.
+    #[test]
+    fn a_control_command_moves_the_connection_to_another_terminal() {
+        let action = terminal_control_command_from_json(
+            r#"{"type":"terminal.control","target":"term_b","takeover":true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            action,
+            ClientMessage::ControlTerminal { ref target, takeover: true } if target == "term_b"
+        ));
+    }
+
+    #[test]
+    fn a_control_command_without_a_target_is_refused() {
+        let err =
+            terminal_control_command_from_json(r#"{"type":"terminal.control","target":"  "}"#)
+                .expect_err("an empty target should be refused");
+        assert!(err.contains("target"), "{err}");
     }
 
     /// Every terminal carries its own size, since a watcher's panes are rarely

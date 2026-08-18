@@ -1769,7 +1769,24 @@ impl HeadlessServer {
         target: &str,
         action: &str,
     ) -> Option<String> {
-        if !self.client_is_pending_terminal_mode(client_id) {
+        // Two connections may name a terminal after they have already named
+        // one: a multiplexed observer whose set has changed, because panes come
+        // and go on the host it watches, and a controller following the pane
+        // being used. Reopening the connection for either is a round trip -- a
+        // process and a handshake, over ssh -- in front of the next keystroke,
+        // which is what one connection per host exists to avoid.
+        //
+        // Naming again is only ever *the same kind* of naming: a watcher may
+        // change what it watches and a controller may move, but neither may
+        // become the other. An attach that could downgrade itself to a
+        // read-only observer would keep its connection while quietly giving up
+        // the terminal it holds.
+        let renaming_same_mode = match self.clients.get(&client_id).map(|client| &client.mode) {
+            Some(ClientConnectionMode::TerminalObserveMany) => action == "observe",
+            Some(ClientConnectionMode::TerminalAttach { .. }) => action == "control",
+            _ => false,
+        };
+        if !renaming_same_mode && !self.client_is_pending_terminal_mode(client_id) {
             self.send_to_client(
                 client_id,
                 ServerMessage::ServerShutdown {
@@ -2667,13 +2684,38 @@ impl HeadlessServer {
         self.resize_shared_runtime_to_effective_size();
     }
 
+    /// Gives up this connection's claim on a terminal without closing it.
+    ///
+    /// Used when a controller moves to another pane: the terminal it leaves
+    /// must be free for anyone else, and must stop being sized by a window that
+    /// is no longer looking at it.
+    fn release_terminal_attach_claim(&mut self, client_id: u64, terminal_id: &str) {
+        if self.terminal_attach_owners.get(terminal_id) == Some(&client_id) {
+            self.terminal_attach_owners.remove(terminal_id);
+        }
+        if let Some(real_terminal_id) = self.terminal_id_by_string(terminal_id) {
+            self.app
+                .state
+                .direct_attach_resize_locks
+                .remove(&real_terminal_id);
+        }
+    }
+
     fn attach_terminal_client(
         &mut self,
         client_id: u64,
         terminal_id: String,
         takeover: bool,
     ) -> bool {
-        if !self.client_is_pending_terminal_mode(client_id) {
+        // A connection that already controls a terminal may move to another
+        // one. A watcher of a whole host follows the pane being used, and
+        // opening a connection per pane switched to is both a round trip in the
+        // way and, over ssh, a process and a handshake.
+        let previous = match self.clients.get(&client_id).map(|client| &client.mode) {
+            Some(ClientConnectionMode::TerminalAttach { terminal_id }) => Some(terminal_id.clone()),
+            _ => None,
+        };
+        if previous.is_none() && !self.client_is_pending_terminal_mode(client_id) {
             self.send_to_client(
                 client_id,
                 ServerMessage::ServerShutdown {
@@ -2685,6 +2727,12 @@ impl HeadlessServer {
             );
             self.remove_client_and_resize_if_needed(client_id);
             return false;
+        }
+        if let Some(previous) = previous.as_deref() {
+            if previous == terminal_id {
+                return true;
+            }
+            self.release_terminal_attach_claim(client_id, previous);
         }
 
         let Some(real_terminal_id) = self.terminal_id_by_string(&terminal_id) else {
@@ -5661,6 +5709,117 @@ next_tab = ""
             writer,
         }));
         control_rx
+    }
+
+    /// A controller follows the pane being used rather than opening a
+    /// connection per pane: over ssh that is a process and a handshake in front
+    /// of the next keystroke.
+    #[test]
+    fn a_controller_can_move_to_another_terminal_and_lets_the_first_one_go() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
+            let second = crate::workspace::Workspace::test_new("second");
+            let second_pane = second.tabs[0].root_pane;
+            let second_terminal = second
+                .terminal_id(second_pane)
+                .expect("terminal id")
+                .clone();
+            let second_terminal_string = second_terminal.to_string();
+            server.app.state.workspaces.push(second);
+            server.app.state.ensure_test_terminals();
+            server.app.terminal_runtimes.insert(
+                second_terminal,
+                crate::terminal::TerminalRuntime::test_with_screen_bytes(80, 24, b""),
+            );
+
+            connect_pending_terminal_client(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientControlTerminal {
+                    client_id: 7,
+                    target: terminal_id_string.clone(),
+                    takeover: false,
+                })
+            );
+            assert_eq!(
+                server.terminal_attach_owners.get(&terminal_id_string),
+                Some(&7)
+            );
+
+            assert!(
+                server.handle_server_event(ServerEvent::ClientControlTerminal {
+                    client_id: 7,
+                    target: second_terminal_string.clone(),
+                    takeover: false,
+                }),
+                "a controller should be able to move to another terminal"
+            );
+
+            assert!(
+                !server
+                    .terminal_attach_owners
+                    .contains_key(&terminal_id_string),
+                "the terminal it left must be free for anyone else"
+            );
+            assert_eq!(
+                server.terminal_attach_owners.get(&second_terminal_string),
+                Some(&7)
+            );
+            assert!(matches!(
+                server.clients.get(&7).map(|client| &client.mode),
+                Some(ClientConnectionMode::TerminalAttach { terminal_id })
+                    if terminal_id == &second_terminal_string
+            ));
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
+    /// The set a watcher names changes as panes come and go on the host, and
+    /// having to reopen the connection for that gives back what one connection
+    /// per host is for.
+    #[test]
+    fn an_observer_can_name_a_new_set_without_being_disconnected() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
+            connect_pending_terminal_client(server, 7);
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 40,
+                        rows: 10,
+                    }],
+                })
+            );
+
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 80,
+                        rows: 24,
+                    }],
+                }),
+                "naming the set again should be allowed"
+            );
+
+            let client = server.clients.get(&7).expect("client should still be here");
+            assert!(matches!(
+                client.mode,
+                ClientConnectionMode::TerminalObserveMany
+            ));
+            assert_eq!(
+                client
+                    .observed
+                    .iter()
+                    .map(|observed| observed.size)
+                    .collect::<Vec<_>>(),
+                vec![(80, 24)],
+                "the new set replaces the old one, sizes and all"
+            );
+
+            shutdown_test_runtimes(server);
+        });
     }
 
     /// A watcher of many terminals gets one frame per terminal, each rendered

@@ -159,6 +159,14 @@ pub enum AppEvent {
         terminal_id: String,
         bytes: Vec<u8>,
     },
+    /// Something typed into a mirror, or a size it was given, on its way back
+    /// to the host that owns the terminal.
+    #[cfg(unix)]
+    MirrorRequest {
+        target: String,
+        terminal_id: String,
+        request: crate::pane::StreamedPaneRequest,
+    },
     /// One mirrored terminal has gone, which does not take the rest of that
     /// host's mirrors with it.
     #[cfg(unix)]

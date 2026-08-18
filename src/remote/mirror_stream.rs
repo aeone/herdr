@@ -100,6 +100,12 @@ pub(crate) struct MirrorStream {
     child: Child,
     stdin: Option<ChildStdin>,
     watching: Vec<MirrorStreamTarget>,
+    /// Frames this connection has carried, which is how a host that cannot do
+    /// this at all is told from one whose link dropped.
+    frames: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The last thing the far side said on stderr, which is where a host too
+    /// old for this command prints its usage.
+    complaint: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl MirrorStream {
@@ -118,13 +124,29 @@ impl MirrorStream {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = command.spawn()?;
         let stdin = child.stdin.take();
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| std::io::Error::other("observe stream has no stdout"))?;
+
+        let frames = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let reader_frames = frames.clone();
+        let complaint = std::sync::Arc::new(std::sync::Mutex::new(None));
+        if let Some(stderr) = child.stderr.take() {
+            let complaint = complaint.clone();
+            std::thread::Builder::new()
+                .name("herdr-mirror-err".to_string())
+                .spawn(move || {
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        if let Ok(mut last) = complaint.lock() {
+                            *last = Some(line);
+                        }
+                    }
+                })?;
+        }
 
         let target = space.target.clone();
         let reader_target = target.clone();
@@ -140,11 +162,14 @@ impl MirrorStream {
                         continue;
                     };
                     let event = match parsed {
-                        MirrorStreamLine::Frame { terminal_id, bytes } => AppEvent::MirrorFrame {
-                            target: reader_target.clone(),
-                            terminal_id,
-                            bytes,
-                        },
+                        MirrorStreamLine::Frame { terminal_id, bytes } => {
+                            reader_frames.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            AppEvent::MirrorFrame {
+                                target: reader_target.clone(),
+                                terminal_id,
+                                bytes,
+                            }
+                        }
                         MirrorStreamLine::Ended {
                             terminal_id,
                             reason,
@@ -173,7 +198,37 @@ impl MirrorStream {
             child,
             stdin,
             watching: Vec::new(),
+            frames,
+            complaint,
         })
+    }
+
+    /// A stream with no host behind it, for testing what happens when one says
+    /// nothing.
+    #[cfg(test)]
+    pub(crate) fn test_without_a_host(frames: u64, complaint: Option<&str>) -> Self {
+        Self {
+            child: std::process::Command::new("true")
+                .spawn()
+                .expect("spawning `true` should work"),
+            stdin: None,
+            watching: Vec::new(),
+            frames: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(frames)),
+            complaint: std::sync::Arc::new(std::sync::Mutex::new(complaint.map(str::to_owned))),
+        }
+    }
+
+    /// Whether this connection ever carried a frame.
+    ///
+    /// A host too old to know `observe-many` prints its usage and exits, which
+    /// looks like a dropped connection except that nothing ever came down it.
+    pub(crate) fn carried_a_frame(&self) -> bool {
+        self.frames.load(std::sync::atomic::Ordering::Relaxed) > 0
+    }
+
+    /// The last thing the far side complained about, if anything.
+    pub(crate) fn complaint(&self) -> Option<String> {
+        self.complaint.lock().ok().and_then(|last| last.clone())
     }
 
     /// Whether this stream is already watching exactly these terminals.
@@ -197,6 +252,105 @@ impl MirrorStream {
     pub(crate) fn stop(mut self) {
         // Closing stdin is the polite ask; the kill is for a host that has
         // stopped listening, such as one that went to sleep mid-stream.
+        self.stdin.take();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The one writable connection a host gets, moved from pane to pane.
+///
+/// A terminal takes one controller at a time, so this is claimed when a mirror
+/// is typed into and moved when another is. Watching is unaffected: the frames
+/// keep arriving on the shared connection whatever this is pointed at.
+pub(crate) struct MirrorControl {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    controlling: String,
+}
+
+impl MirrorControl {
+    pub(crate) fn spawn(
+        space: &RemoteSpaceConfig,
+        terminal_id: &str,
+        remote_herdr: &str,
+    ) -> std::io::Result<Self> {
+        let argv = crate::remote::spaces::control_argv(space, terminal_id, remote_herdr);
+        let (program, args) = argv
+            .split_first()
+            .ok_or_else(|| std::io::Error::other("empty control command"))?;
+        let mut child = std::process::Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdin = child.stdin.take();
+        // A refused claim is reported on stderr and nowhere else, and losing it
+        // leaves a mirror that silently will not take typing.
+        if let Some(stderr) = child.stderr.take() {
+            std::thread::Builder::new()
+                .name("herdr-mirror-ctl".to_string())
+                .spawn(move || {
+                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                        tracing::warn!(line = %line, "writable mirror connection said");
+                    }
+                })?;
+        }
+        Ok(Self {
+            child,
+            stdin,
+            controlling: terminal_id.to_owned(),
+        })
+    }
+
+    /// Sends one request, moving the claim first if it is for another terminal.
+    pub(crate) fn send(
+        &mut self,
+        terminal_id: &str,
+        request: &crate::pane::StreamedPaneRequest,
+    ) -> std::io::Result<()> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(std::io::Error::other("control stream stdin is closed"));
+        };
+        if self.controlling != terminal_id {
+            // Takeover: what is usually holding a mirrored pane is an older
+            // mirror of ours, and the machine being typed at should win.
+            let line = serde_json::json!({
+                "type": "terminal.control",
+                "target": terminal_id,
+                "takeover": true,
+            })
+            .to_string();
+            stdin.write_all(line.as_bytes())?;
+            stdin.write_all(b"\n")?;
+            self.controlling = terminal_id.to_owned();
+        }
+        let line = match request {
+            crate::pane::StreamedPaneRequest::Input(bytes) => serde_json::json!({
+                "type": "terminal.input",
+                "bytes": base64::engine::general_purpose::STANDARD.encode(bytes),
+            }),
+            crate::pane::StreamedPaneRequest::Resize {
+                rows,
+                cols,
+                cell_width_px,
+                cell_height_px,
+            } => serde_json::json!({
+                "type": "terminal.resize",
+                "cols": cols.max(&1),
+                "rows": rows.max(&1),
+                "cell_width_px": cell_width_px,
+                "cell_height_px": cell_height_px,
+            }),
+        }
+        .to_string();
+        stdin.write_all(line.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()
+    }
+
+    pub(crate) fn stop(mut self) {
         self.stdin.take();
         let _ = self.child.kill();
         let _ = self.child.wait();

@@ -87,6 +87,17 @@ impl App {
         }
 
         #[cfg(unix)]
+        if let AppEvent::MirrorRequest {
+            target,
+            terminal_id,
+            request,
+        } = ev
+        {
+            self.send_mirror_request(&target, &terminal_id, &request);
+            return;
+        }
+
+        #[cfg(unix)]
         if let AppEvent::MirrorTerminalEnded {
             target,
             terminal_id,

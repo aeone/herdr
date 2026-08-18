@@ -167,6 +167,20 @@ pub struct App {
     /// One connection per mirrored host, carrying every mirror of it.
     #[cfg(unix)]
     pub(crate) mirror_streams: HashMap<String, crate::remote::mirror_stream::MirrorStream>,
+    /// The one writable connection per host, opened when a mirror of it is
+    /// first typed into and moved from pane to pane after that.
+    #[cfg(unix)]
+    pub(crate) mirror_controls: HashMap<String, crate::remote::mirror_stream::MirrorControl>,
+    /// Where each host's binary lives, learned from its last snapshot, so a
+    /// control connection can be opened without waiting for the next poll.
+    #[cfg(unix)]
+    pub(crate) mirror_remote_herdr: HashMap<String, String>,
+    /// Hosts whose build does not know how to stream many terminals at once,
+    /// which go back to an attach per mirrored pane. The fleet runs mixed
+    /// builds as a matter of course -- two of its machines sleep for days --
+    /// so this is the normal state of affairs, not an error.
+    #[cfg(unix)]
+    pub(crate) mirror_multiplex_unsupported: std::collections::HashSet<String>,
     /// Mirror renames sent to a host but not yet reflected in its snapshots,
     /// by mirror key. Reconcile leaves these alone so the name the user typed
     /// does not flicker back to the old one while the host is catching up.
@@ -864,6 +878,12 @@ impl App {
             multiplexed_mirrors: config.remote.multiplexed_mirrors,
             #[cfg(unix)]
             mirror_streams: HashMap::new(),
+            #[cfg(unix)]
+            mirror_controls: HashMap::new(),
+            #[cfg(unix)]
+            mirror_remote_herdr: HashMap::new(),
+            #[cfg(unix)]
+            mirror_multiplex_unsupported: std::collections::HashSet::new(),
             #[cfg(unix)]
             pending_mirror_renames: HashMap::new(),
             #[cfg(unix)]

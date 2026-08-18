@@ -2855,6 +2855,15 @@ impl AppState {
                 Vec::new()
             }
             #[cfg(unix)]
+            AppEvent::MirrorRequest {
+                target,
+                terminal_id,
+                request,
+            } => {
+                let _ = (target, terminal_id, request);
+                Vec::new()
+            }
+            #[cfg(unix)]
             AppEvent::MirrorTerminalEnded {
                 target,
                 terminal_id,

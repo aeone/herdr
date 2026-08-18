@@ -222,6 +222,33 @@ pub(crate) fn observe_many_argv(space: &RemoteSpaceConfig, remote_herdr: &str) -
     argv
 }
 
+/// Argv for the one writable connection a host gets.
+///
+/// Watching is free and claims nothing, but typing has to be claimed, and a
+/// terminal takes one controller at a time. This connection is opened when a
+/// mirror is first typed into and moved from pane to pane after that, so a host
+/// costs one of these however many of its panes are mirrored.
+pub(crate) fn control_argv(
+    space: &RemoteSpaceConfig,
+    terminal_id: &str,
+    remote_herdr: &str,
+) -> Vec<String> {
+    let mut argv = observe_many_argv(space, remote_herdr);
+    let last = argv.len() - 1;
+    if space.is_local() {
+        // The local form ends with the subcommand as its own argument.
+        argv[last] = "control".to_string();
+        argv.push(terminal_id.to_string());
+        return argv;
+    }
+    // Over ssh the whole remote command is one argument.
+    argv[last] = argv[last].replace(
+        "terminal session observe-many",
+        &format!("terminal session control {}", shell_quote(terminal_id)),
+    );
+    argv
+}
+
 /// Names for every mirrored pane in a snapshot, aligned with `panes`.
 ///
 /// Remote workspace labels are not unique — a host can easily have several
