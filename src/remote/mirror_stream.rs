@@ -28,6 +28,9 @@ pub(crate) struct MirrorStreamTarget {
     pub(crate) terminal_id: String,
     pub(crate) cols: u16,
     pub(crate) rows: u16,
+    /// Whether someone is looking at the pane this lands in, and so whether the
+    /// host may size its terminal to match.
+    pub(crate) resize: bool,
 }
 
 /// The line asking the host to watch exactly this set of terminals.
@@ -39,6 +42,7 @@ pub(crate) fn observe_request_line(targets: &[MirrorStreamTarget]) -> String {
                 "target": target.terminal_id,
                 "cols": target.cols.max(1),
                 "rows": target.rows.max(1),
+                "resize": target.resize,
             })
         })
         .collect();
@@ -414,6 +418,7 @@ mod tests {
             terminal_id: "term_1".to_owned(),
             cols: 80,
             rows: 24,
+            resize: false,
         }];
         stream.watching = targets.clone();
         assert!(
@@ -456,11 +461,13 @@ mod tests {
                 terminal_id: "term_a".into(),
                 cols: 100,
                 rows: 30,
+                resize: false,
             },
             MirrorStreamTarget {
                 terminal_id: "term_b".into(),
                 cols: 40,
                 rows: 8,
+                resize: false,
             },
         ]);
         let value: serde_json::Value = serde_json::from_str(line.trim()).expect("valid json");
@@ -479,6 +486,7 @@ mod tests {
             terminal_id: "term_a".into(),
             cols: 0,
             rows: 0,
+            resize: false,
         }]);
         let value: serde_json::Value = serde_json::from_str(line.trim()).expect("valid json");
         assert_eq!(value["targets"][0]["cols"], 1);

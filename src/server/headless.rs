@@ -1902,20 +1902,26 @@ impl HeadlessServer {
                 continue;
             };
             let size = (target.cols.max(1), target.rows.max(1));
-            // The size a watcher asks for is the size the terminal becomes.
+            // The size a watcher showing this to someone asks for is the size
+            // the terminal becomes.
             //
             // A terminal is rendered at its own size, so without this a watcher
             // with a taller pane gets the remote's shorter screen painted into
-            // the top of it and blank below -- alleria's 23 rows in a 70 row
-            // pane. Asking is what sizes it, as it was when a mirror was a
-            // whole attach: the machine being used wins, and stops winning when
-            // it stops asking. Only a set being named resizes anything, not
-            // every render, so two watchers of one terminal take turns rather
-            // than fight -- whoever moved last has it.
-            if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
-                let (rows, cols) = runtime.current_size();
-                if (cols, rows) != size {
-                    runtime.resize(size.1, size.0, 0, 0);
+            // the top of it and blank below -- 23 rows in a 70 row pane. Asking
+            // is what sizes it, as it was when a mirror was a whole attach: the
+            // machine being used wins, and stops winning when it stops asking.
+            //
+            // Only a watcher with someone at it asks, which matters more than
+            // it sounds: a hub holding mirrors nobody is looking at has no pane
+            // to measure and would otherwise impose its fallback guess on every
+            // terminal it watches. Only a set being named resizes anything,
+            // never a render, so two watchers take turns rather than fight.
+            if target.resize {
+                if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
+                    let (rows, cols) = runtime.current_size();
+                    if (cols, rows) != size {
+                        runtime.resize(size.1, size.0, 0, 0);
+                    }
                 }
             }
             let (render_state, last_output_seq) = carried
@@ -1930,6 +1936,7 @@ impl HeadlessServer {
                 target: target.target,
                 terminal_id,
                 size,
+                resize: target.resize,
                 render_state,
                 last_output_seq,
             });
@@ -4182,7 +4189,37 @@ impl HeadlessServer {
         (false, deferred)
     }
 
+    /// Records which terminals here someone is looking at, which is what lets a
+    /// mirror of one size it.
+    ///
+    /// Two ways to count: this machine has a client of its own showing them, or
+    /// a watcher said it is showing them to someone. The second is what carries
+    /// the answer down a chain of hosts -- a hub is nobody on its own, but a
+    /// hub being watched by a machine with someone at it is.
+    fn refresh_watched_for_someone(&mut self) {
+        let mut watched: std::collections::HashSet<String> = self
+            .clients
+            .values()
+            .flat_map(|client| client.observed.iter())
+            .filter(|observed| observed.resize)
+            .map(|observed| observed.terminal_id.clone())
+            .collect();
+        // A client of our own is someone looking at everything it renders.
+        if self.foreground_client_id.is_some() {
+            watched.extend(
+                self.app
+                    .terminal_runtimes
+                    .iter()
+                    .map(|(terminal_id, _)| terminal_id.to_string()),
+            );
+        }
+        if self.app.state.watched_for_someone != watched {
+            self.app.state.watched_for_someone = watched;
+        }
+    }
+
     fn render_and_stream(&mut self) {
+        self.refresh_watched_for_someone();
         self.render_and_stream_frames();
         // After, not before: the layout pass inside is what resizes a mirror's
         // terminal, and a pane that has just been activated or zoomed has to
@@ -5931,6 +5968,7 @@ next_tab = ""
                         target: terminal_id_string.clone(),
                         cols: 40,
                         rows: 10,
+                        resize: false,
                     }],
                 })
             );
@@ -5942,6 +5980,7 @@ next_tab = ""
                         target: terminal_id_string.clone(),
                         cols: 80,
                         rows: 24,
+                        resize: false,
                     }],
                 }),
                 "naming the set again should be allowed"
@@ -6006,11 +6045,13 @@ next_tab = ""
                             target: terminal_id_string.clone(),
                             cols: 40,
                             rows: 10,
+                            resize: false,
                         },
                         crate::protocol::ObservedTarget {
                             target: second_terminal_string.clone(),
                             cols: 20,
                             rows: 5,
+                            resize: false,
                         },
                     ],
                 })
@@ -6068,6 +6109,7 @@ next_tab = ""
                         target: terminal_id_string.clone(),
                         cols: 40,
                         rows: 10,
+                        resize: false,
                     }],
                 })
             );
@@ -6149,6 +6191,7 @@ next_tab = ""
                         target: terminal_id_string.clone(),
                         cols: 100,
                         rows: 40,
+                        resize: true,
                     }],
                 })
             );
@@ -6167,10 +6210,31 @@ next_tab = ""
                         target: terminal_id_string.clone(),
                         cols: 80,
                         rows: 24,
+                        resize: true,
                     }],
                 })
             );
             assert_eq!(size_now!(), (24, 80));
+
+            // And a watcher with nobody at it leaves the terminal alone: a hub
+            // holding mirrors nobody is looking at has no pane to measure, and
+            // once shrank every terminal on a machine to its fallback guess.
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 20,
+                        rows: 5,
+                        resize: false,
+                    }],
+                })
+            );
+            assert_eq!(
+                size_now!(),
+                (24, 80),
+                "a watcher showing this to nobody must not resize it"
+            );
 
             shutdown_test_runtimes(server);
         });
@@ -6192,6 +6256,7 @@ next_tab = ""
                             target: terminal_id_string.clone(),
                             cols: $cols,
                             rows: 10,
+                            resize: false,
                         }],
                     })
                 };
@@ -6243,11 +6308,13 @@ next_tab = ""
                             target: "term_gone_before_we_asked".to_owned(),
                             cols: 40,
                             rows: 10,
+                            resize: false,
                         },
                         crate::protocol::ObservedTarget {
                             target: terminal_id_string.clone(),
                             cols: 40,
                             rows: 10,
+                            resize: false,
                         },
                     ],
                 })
@@ -6300,6 +6367,7 @@ next_tab = ""
                         target: terminal_id_string.clone(),
                         cols: 40,
                         rows: 10,
+                        resize: false,
                     }],
                 })
             );

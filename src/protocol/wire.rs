@@ -620,6 +620,15 @@ pub struct ObservedTarget {
     pub cols: u16,
     /// Rows to render this terminal at.
     pub rows: u16,
+    /// Whether the terminal should be resized to that size rather than merely
+    /// rendered into it.
+    ///
+    /// Only a watcher showing the terminal to someone asks for this, so a
+    /// machine holding a mirror nobody is looking at does not reshape a
+    /// terminal under whoever is. Absent on an older watcher, which never
+    /// resized anything.
+    #[serde(default)]
+    pub resize: bool,
 }
 
 /// A frame for one of several terminals observed over a single connection.

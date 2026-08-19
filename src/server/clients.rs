@@ -37,6 +37,10 @@ pub(crate) struct ObservedTerminal {
     /// Where this terminal's screen had got to when we last rendered it for
     /// this watcher, so a terminal that has not moved is not rendered again.
     pub(crate) last_output_seq: Option<u64>,
+    /// Whether this watcher is showing the terminal to someone, and so may size
+    /// it. Passed on to the hosts behind this one, so a chain of mirrors all
+    /// know whether anyone is at the end of it.
+    pub(crate) resize: bool,
 }
 
 pub(crate) type RenderTarget = (

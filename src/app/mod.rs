@@ -761,6 +761,7 @@ impl App {
             remote_keep_offline_mirrors: config.remote.keep_offline_mirrors,
             mirror_hosts: mirror_hosts_from_config(config),
             mirrors_off: std::collections::BTreeSet::new(),
+            watched_for_someone: std::collections::HashSet::new(),
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,

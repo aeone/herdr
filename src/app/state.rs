@@ -1703,6 +1703,14 @@ pub struct AppState {
     /// so a machine can be dropped from the overlay and put back without
     /// editing a file.
     pub mirrors_off: std::collections::BTreeSet<String>,
+    /// Terminals here that someone is looking at: shown to a client attached to
+    /// this machine, or watched by a machine that says the same of it.
+    ///
+    /// This is what decides whether a mirror may size the terminal behind it.
+    /// It has to travel, because a mirror reached through another host is
+    /// watched in that host's own pane -- without passing it on, the hop would
+    /// look like a machine with nobody at it and the size would stop there.
+    pub watched_for_someone: std::collections::HashSet<String>,
     /// Keys typed so far in jump mode, empty on entry. Only meaningful while
     /// the mode is `Jump`; the labels themselves are derived, not stored.
     pub jump_input: String,
@@ -2173,6 +2181,7 @@ impl AppState {
             remote_keep_offline_mirrors: false,
             mirror_hosts: Vec::new(),
             mirrors_off: std::collections::BTreeSet::new(),
+            watched_for_someone: std::collections::HashSet::new(),
             jump_input: String::new(),
             hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),

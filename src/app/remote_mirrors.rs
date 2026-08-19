@@ -1420,10 +1420,22 @@ impl App {
                 let (rows, cols) = self
                     .mirror_pane_size(workspace)
                     .unwrap_or((estimated_rows, estimated_cols));
+                // Whether this machine may size the terminal behind the mirror:
+                // only if someone is looking at the pane it lands in, here or
+                // through us. A hub with nobody at it has no pane to measure
+                // and must not impose its guess.
+                let resize = workspace
+                    .terminal_id(workspace.root_pane)
+                    .is_some_and(|local| {
+                        self.state
+                            .watched_for_someone
+                            .contains(local.to_string().as_str())
+                    });
                 Some(crate::remote::mirror_stream::MirrorStreamTarget {
                     terminal_id: mirror.remote_terminal.clone(),
                     cols,
                     rows,
+                    resize,
                 })
             })
             .collect()

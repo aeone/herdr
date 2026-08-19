@@ -999,6 +999,10 @@ struct ObserveManyTarget {
     target: String,
     cols: u16,
     rows: u16,
+    /// Whether the watcher is showing this terminal to someone, and so may
+    /// size it. Absent from an older watcher, which never resized anything.
+    #[serde(default)]
+    resize: bool,
 }
 
 fn observe_many_command_from_json(raw: &str) -> Result<ClientMessage, String> {
@@ -1022,6 +1026,7 @@ fn observe_many_command_from_json(raw: &str) -> Result<ClientMessage, String> {
                         target: target.target,
                         cols: target.cols,
                         rows: target.rows,
+                        resize: target.resize,
                     })
                     .collect(),
             })
