@@ -24,6 +24,12 @@ use super::App;
 /// beyond the one vector.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct MirrorLayoutStamp {
+    /// Whether anything has been laid out, since nothing laid out means every
+    /// size is still a guess and none of them may be asked for as a resize.
+    laid_out: bool,
+    /// How many terminals someone is looking at. A count is enough: what
+    /// matters is noticing the answer moved, so the hosts are told again.
+    watched: usize,
     sizes: Vec<(u16, u16)>,
 }
 
@@ -1447,6 +1453,13 @@ impl App {
         target: &str,
     ) -> Vec<crate::remote::mirror_stream::MirrorStreamTarget> {
         let (estimated_rows, estimated_cols) = self.state.estimate_pane_size();
+        // Nothing laid out yet means every size here is still the guess a pane
+        // is created with, and a guess must never be asked for as a resize:
+        // after a handoff, mirrors are rebuilt before the first render, and
+        // asking then shrank real terminals on the other machine and reflowed
+        // their output before the layout arrived a moment later and corrected
+        // it.
+        let laid_out = !self.state.view.pane_infos.is_empty();
         self.state
             .workspaces
             .iter()
@@ -1462,13 +1475,14 @@ impl App {
                 // only if someone is looking at the pane it lands in, here or
                 // through us. A hub with nobody at it has no pane to measure
                 // and must not impose its guess.
-                let resize = workspace
-                    .terminal_id(workspace.root_pane)
-                    .is_some_and(|local| {
-                        self.state
-                            .watched_for_someone
-                            .contains(local.to_string().as_str())
-                    });
+                let resize = laid_out
+                    && workspace
+                        .terminal_id(workspace.root_pane)
+                        .is_some_and(|local| {
+                            self.state
+                                .watched_for_someone
+                                .contains(local.to_string().as_str())
+                        });
                 Some(crate::remote::mirror_stream::MirrorStreamTarget {
                     terminal_id: mirror.remote_terminal.clone(),
                     cols,
@@ -1511,6 +1525,8 @@ impl App {
         // moved: one walk collecting sizes, no allocation per mirror, and the
         // work below only when that differs from what the hosts were told.
         let stamp = MirrorLayoutStamp {
+            laid_out: !self.state.view.pane_infos.is_empty(),
+            watched: self.state.watched_for_someone.len(),
             sizes: self
                 .state
                 .workspaces
@@ -1952,6 +1968,8 @@ mod tests {
 
         app.refresh_mirror_stream_sizes();
         let settled = MirrorLayoutStamp {
+            laid_out: false,
+            watched: 0,
             sizes: vec![(24, 80)],
         };
         assert_eq!(app.mirror_layout_stamp, settled);
@@ -1970,6 +1988,8 @@ mod tests {
         assert_eq!(
             app.mirror_layout_stamp,
             MirrorLayoutStamp {
+                laid_out: false,
+                watched: 0,
                 sizes: vec![(50, 120)],
             }
         );
@@ -2010,6 +2030,53 @@ mod tests {
             app.mirror_pane_size_for("workbox", "some-other-terminal"),
             None,
             "and nothing is claimed for a terminal this host does not mirror"
+        );
+    }
+
+    /// A mirror is created at a guessed size, and after a handoff every mirror
+    /// is rebuilt before the first render. Asking a host to resize to a guess
+    /// shrank real terminals on the other machine and reflowed their output for
+    /// the moment it took the layout to arrive.
+    #[tokio::test]
+    async fn a_size_that_is_still_a_guess_is_never_asked_for_as_a_resize() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces.clear();
+        let mirrored = mirror("workbox", "workbox\u{1f}w1\u{1f}term-1", "remote");
+        let terminal_id = mirrored
+            .terminal_id(mirrored.root_pane)
+            .expect("a mirror pane has a terminal")
+            .clone();
+        app.state.workspaces.push(mirrored);
+        app.state.active = Some(0);
+        app.terminal_runtimes.insert(
+            terminal_id.clone(),
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(100, 70, 1 << 16, b""),
+        );
+        // Someone is looking, so the only thing standing between this and a
+        // resize is whether the size has been laid out or merely guessed.
+        app.state
+            .watched_for_someone
+            .insert(terminal_id.to_string());
+
+        let targets = app.mirror_stream_targets("workbox");
+        assert_eq!(targets.len(), 1);
+        assert!(
+            !targets[0].resize,
+            "nothing laid out yet, so the size is a guess and must not resize a host"
+        );
+
+        app.state.view.pane_infos = vec![crate::layout::PaneInfo {
+            id: crate::layout::PaneId::from_raw(1),
+            rect: ratatui::layout::Rect::new(0, 0, 102, 72),
+            inner_rect: ratatui::layout::Rect::new(1, 1, 100, 70),
+            scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::ALL,
+            is_focused: true,
+        }];
+        let targets = app.mirror_stream_targets("workbox");
+        assert!(
+            targets[0].resize,
+            "once panes are laid out the size is real and may size the host"
         );
     }
 
