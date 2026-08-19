@@ -227,6 +227,83 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     groups
 }
 
+/// How many body lines the mirrors section takes: a heading, a row per host,
+/// and the blank line that separates it from the keybinds.
+///
+/// Drawing and hit-testing both count from this, so a row cannot be drawn in
+/// one place and clicked in another.
+pub(crate) fn keybind_help_mirror_rows(app: &AppState) -> usize {
+    if app.mirror_hosts.is_empty() {
+        0
+    } else {
+        app.mirror_hosts.len() + 2
+    }
+}
+
+/// Which host a body line switches, if it switches one.
+pub(crate) fn keybind_help_mirror_host_at_line(app: &AppState, line: usize) -> Option<&str> {
+    if app.mirror_hosts.is_empty() || line == 0 {
+        return None;
+    }
+    app.mirror_hosts
+        .get(line - 1)
+        .map(|host| host.target.as_str())
+}
+
+fn mirror_switch_lines(app: &AppState) -> Vec<(usize, Line<'static>)> {
+    if app.mirror_hosts.is_empty() {
+        return Vec::new();
+    }
+    let heading_style = Style::default()
+        .fg(app.palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let key_style = Style::default()
+        .fg(app.palette.mauve)
+        .add_modifier(Modifier::BOLD);
+    let label_width = app
+        .mirror_hosts
+        .iter()
+        .map(|host| host.label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+
+    let mut lines = vec![(8, Line::from(vec![Span::styled(" mirrors", heading_style)]))];
+    for (index, host) in app.mirror_hosts.iter().enumerate() {
+        let on = app.mirrors_host(&host.target);
+        // Only the first nine get a key. The rest are still clickable, and a
+        // fleet large enough to need more wants a different control anyway.
+        let key = match index {
+            0..=8 => format!(" {:<8} ", index + 1),
+            _ => " ".repeat(10),
+        };
+        let label = format!("{:<width$}  ", host.label, width = label_width);
+        let (state, state_style) = if on {
+            ("on", Style::default().fg(app.palette.green))
+        } else {
+            ("off", Style::default().fg(app.palette.overlay0))
+        };
+        let width = key.chars().count() + label.chars().count() + state.len();
+        lines.push((
+            width,
+            Line::from(vec![
+                Span::styled(key, key_style),
+                Span::styled(
+                    label,
+                    Style::default().fg(if on {
+                        app.palette.text
+                    } else {
+                        app.palette.overlay1
+                    }),
+                ),
+                Span::styled(state, state_style),
+            ]),
+        ));
+    }
+    lines.push((0, Line::raw("")));
+    lines
+}
+
 pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> {
     let heading_style = Style::default()
         .fg(app.palette.accent)
@@ -243,7 +320,7 @@ pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> 
         .max()
         .unwrap_or(8);
 
-    let mut lines = Vec::new();
+    let mut lines = mirror_switch_lines(app);
 
     for (group, entries) in groups {
         lines.push((
@@ -297,18 +374,18 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
             .style(Style::default().fg(app.palette.overlay1)),
         header_rows[1],
     );
-    if app.mirror_hosts_configured {
-        let label = mirrors_button_label(app.mirrors_enabled);
-        let background = if app.mirrors_enabled {
+    if !app.mirror_hosts.is_empty() {
+        let label = mirrors_button_label(app);
+        let background = if app.mirrors_any_host() {
             app.palette.green
         } else {
             app.palette.overlay0
         };
         render_action_button(
             frame,
-            keybind_help_mirrors_button_rect(header_rows[1], app.mirrors_enabled),
+            keybind_help_mirrors_button_rect(header_rows[1], app),
             Some(&MIRRORS_TOGGLE_KEY.to_string()),
-            label,
+            &label,
             Style::default()
                 .fg(panel_contrast_fg(&app.palette))
                 .bg(background)
@@ -366,7 +443,7 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         Span::styled("close", Style::default().fg(app.palette.overlay0)),
         Span::styled(" esc / enter ", Style::default().fg(app.palette.text)),
     ];
-    if app.mirror_hosts_configured {
+    if !app.mirror_hosts.is_empty() {
         footer.push(Span::styled(
             "  ·  ",
             Style::default().fg(app.palette.overlay0),
@@ -376,7 +453,10 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
             Style::default().fg(app.palette.overlay0),
         ));
         footer.push(Span::styled(
-            format!(" {MIRRORS_TOGGLE_KEY} "),
+            format!(
+                " 1-{} / {MIRRORS_TOGGLE_KEY} ",
+                app.mirror_hosts.len().min(9)
+            ),
             Style::default().fg(app.palette.text),
         ));
     }
@@ -391,21 +471,31 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
 /// control.
 pub(crate) const MIRRORS_TOGGLE_KEY: char = 'm';
 
-fn mirrors_button_label(enabled: bool) -> &'static str {
-    if enabled {
-        "mirrors on"
+/// The all-hosts switch's label, which has to carry three states: every host
+/// mirrored, none, and some. "on" for a machine with two of four hosts switched
+/// off would be a lie in the one place someone looks to check.
+fn mirrors_button_label(app: &AppState) -> String {
+    let on = app
+        .mirror_hosts
+        .iter()
+        .filter(|host| app.mirrors_host(&host.target))
+        .count();
+    if on == 0 {
+        "mirrors off".to_string()
+    } else if on == app.mirror_hosts.len() {
+        "mirrors on".to_string()
     } else {
-        "mirrors off"
+        format!("mirrors {on}/{}", app.mirror_hosts.len())
     }
 }
 
 /// Where the mirrors switch sits: the right of the overlay's description row,
 /// under the close button. Width follows the label, which changes with the
 /// state, so the hit test must be told which label is showing.
-pub(crate) fn keybind_help_mirrors_button_rect(area: Rect, enabled: bool) -> Rect {
+pub(crate) fn keybind_help_mirrors_button_rect(area: Rect, app: &AppState) -> Rect {
     let width = action_button_width(
         Some(&MIRRORS_TOGGLE_KEY.to_string()),
-        mirrors_button_label(enabled),
+        &mirrors_button_label(app),
     );
     Rect::new(
         area.x + area.width.saturating_sub(width),

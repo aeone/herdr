@@ -1228,7 +1228,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
-            mirrors_enabled: None,
+            mirrors_off: None,
             hide_spaces_in_agents: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1330,7 +1330,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
-            mirrors_enabled: None,
+            mirrors_off: None,
             hide_spaces_in_agents: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1446,7 +1446,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
-            mirrors_enabled: None,
+            mirrors_off: None,
             hide_spaces_in_agents: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1564,7 +1564,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
-            mirrors_enabled: None,
+            mirrors_off: None,
             hide_spaces_in_agents: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
@@ -1765,7 +1765,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
-            mirrors_enabled: None,
+            mirrors_off: None,
             hide_spaces_in_agents: None,
         };
         (snapshot, history)

@@ -55,7 +55,7 @@ impl App {
                     space_marks: self.state.space_marks.clone(),
                     agent_marks: self.state.agent_marks.clone(),
                     keep_offline_mirrors: self.state.keep_offline_mirrors,
-                    mirrors_enabled: Some(self.state.mirrors_enabled),
+                    mirrors_off: Some(self.state.mirrors_off.clone()),
                     hide_spaces_in_agents: self.state.hide_spaces_in_agents,
                 },
             );

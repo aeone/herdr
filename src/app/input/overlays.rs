@@ -18,18 +18,41 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
+/// What a key means to the mirrors switches in the keybind overlay.
+pub(crate) enum MirrorsKey {
+    /// Every configured host at once.
+    AllHosts,
+    /// One host, named by how it is reached.
+    Host(String),
+}
+
 impl App {
-    /// Flips mirroring from the keybind overlay, by click or by key. Turning it
-    /// off closes every mirror and stops dialling out; turning it back on
-    /// repopulates from the configured hosts. Windows has no mirroring, so
-    /// there the switch is never offered and this does nothing.
-    pub(crate) fn toggle_mirrors_from_overlay(&mut self) {
+    /// Flips one host's mirrors from the keybind overlay, by click or by key.
+    ///
+    /// Off closes that host's mirrors and lets go of its connections; on
+    /// repopulates from it. Windows has no mirroring, so there no switch is
+    /// offered and this does nothing.
+    pub(crate) fn toggle_host_mirrors_from_overlay(&mut self, target: &str) {
         #[cfg(unix)]
         {
-            let wanted = !self.state.mirrors_enabled;
-            if self.set_mirrors_enabled(wanted) {
+            let wanted = !self.state.mirrors_host(target);
+            if self.set_host_mirrors_enabled(target, wanted) {
                 // The answer is kept with the session, so a live handoff does
-                // not quietly put mirroring back.
+                // not quietly put a host back.
+                self.state.mark_session_dirty();
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = target;
+    }
+
+    /// Flips every configured host at once: all off while any is on, otherwise
+    /// all back on. The one lever for taking a machine out of the fleet.
+    pub(crate) fn toggle_all_mirrors_from_overlay(&mut self) {
+        #[cfg(unix)]
+        {
+            let wanted = !self.state.mirrors_any_host();
+            if self.set_all_mirrors_enabled(wanted) {
                 self.state.mark_session_dirty();
             }
         }
@@ -220,7 +243,20 @@ impl App {
                         .state
                         .keybind_help_mirrors_button_at(mouse.column, mouse.row) =>
                 {
-                    self.toggle_mirrors_from_overlay();
+                    self.toggle_all_mirrors_from_overlay();
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .state
+                        .keybind_help_mirror_host_at(mouse.column, mouse.row)
+                        .is_some() =>
+                {
+                    if let Some(target) = self
+                        .state
+                        .keybind_help_mirror_host_at(mouse.column, mouse.row)
+                    {
+                        self.toggle_host_mirrors_from_overlay(&target);
+                    }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(target) = self
@@ -632,7 +668,7 @@ impl AppState {
         }
     }
 
-    pub(super) fn keybind_help_popup_rect(&self) -> Rect {
+    pub(crate) fn keybind_help_popup_rect(&self) -> Rect {
         crate::ui::centered_popup_rect(self.screen_rect(), 76, 22).unwrap_or_default()
     }
 
@@ -655,18 +691,34 @@ impl AppState {
             && row < button.y + button.height
     }
 
-    /// Whether a key pressed with the keybind overlay open means the mirrors
-    /// switch. It answers to a bare letter, which is safe here and nowhere
-    /// else: the overlay takes no text, and it is the only mode this is asked
-    /// in. A machine with nothing to mirror does not claim the key.
-    pub(crate) fn keybind_help_mirrors_key(&self, key: crossterm::event::KeyEvent) -> bool {
-        self.mirror_hosts_configured
-            && key.modifiers.is_empty()
-            && key.code == crossterm::event::KeyCode::Char(crate::ui::MIRRORS_TOGGLE_KEY)
+    /// What a key pressed with the keybind overlay open means for the mirrors
+    /// switches, if anything.
+    ///
+    /// These answer to bare characters, which is safe here and nowhere else:
+    /// the overlay takes no text and it is the only mode they are asked in. A
+    /// machine with nothing to mirror claims neither.
+    pub(crate) fn keybind_help_mirrors_key(
+        &self,
+        key: crossterm::event::KeyEvent,
+    ) -> Option<MirrorsKey> {
+        if self.mirror_hosts.is_empty() || !key.modifiers.is_empty() {
+            return None;
+        }
+        let crossterm::event::KeyCode::Char(typed) = key.code else {
+            return None;
+        };
+        if typed == crate::ui::MIRRORS_TOGGLE_KEY {
+            return Some(MirrorsKey::AllHosts);
+        }
+        // '1' through '9' pick a host by its position in the list, which is
+        // config order and is what the overlay prints beside each one.
+        let index = typed.to_digit(10)?.checked_sub(1)? as usize;
+        let host = self.mirror_hosts.get(index)?;
+        Some(MirrorsKey::Host(host.target.clone()))
     }
 
     pub(crate) fn keybind_help_mirrors_button_at(&self, col: u16, row: u16) -> bool {
-        if !self.mirror_hosts_configured {
+        if self.mirror_hosts.is_empty() {
             return false;
         }
         let Some(inner) = self.keybind_help_modal_inner() else {
@@ -677,12 +729,36 @@ impl AppState {
         }
         let button = crate::ui::keybind_help_mirrors_button_rect(
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
-            self.mirrors_enabled,
+            self,
         );
         col >= button.x
             && col < button.x + button.width
             && row >= button.y
             && row < button.y + button.height
+    }
+
+    /// The host whose switch is under this point, if one is.
+    ///
+    /// The switches live in the scrolling body, so the row has to be read back
+    /// through the scroll offset -- clicking what is on screen must reach the
+    /// host that is drawn there, not the one that would be there unscrolled.
+    pub(crate) fn keybind_help_mirror_host_at(&self, col: u16, row: u16) -> Option<String> {
+        if self.mirror_hosts.is_empty() {
+            return None;
+        }
+        let body = self.keybind_help_body_rect()?;
+        if col < body.x || col >= body.x + body.width || row < body.y {
+            return None;
+        }
+        let offset = row.checked_sub(body.y)? as usize;
+        if offset >= body.height as usize {
+            return None;
+        }
+        let line = offset + self.keybind_help.scroll as usize;
+        if line >= crate::ui::keybind_help_mirror_rows(self) {
+            return None;
+        }
+        crate::ui::keybind_help_mirror_host_at_line(self, line).map(str::to_owned)
     }
 
     fn keybind_help_body_rect(&self) -> Option<Rect> {

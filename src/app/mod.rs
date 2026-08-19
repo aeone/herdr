@@ -14,7 +14,7 @@ pub(crate) use api_helpers::{pane_agent_status, pane_state_and_seen};
 mod config_io;
 mod creation;
 mod ids;
-mod input;
+pub(crate) mod input;
 mod jump;
 mod popup;
 #[cfg(unix)]
@@ -305,6 +305,25 @@ fn load_plugin_registry(no_session: bool) -> crate::app::state::InstalledPluginR
     entries
         .into_iter()
         .map(|plugin| (plugin.plugin_id.clone(), plugin))
+        .collect()
+}
+
+/// The hosts the mirrors switch offers, in config order.
+///
+/// Empty where mirroring does not apply, so a machine that cannot mirror is not
+/// offered a switch for it.
+fn mirror_hosts_from_config(config: &crate::config::Config) -> Vec<state::MirrorHost> {
+    if !cfg!(unix) {
+        return Vec::new();
+    }
+    config
+        .remote
+        .spaces
+        .iter()
+        .map(|space| state::MirrorHost {
+            target: space.target.clone(),
+            label: space.display_label().to_owned(),
+        })
         .collect()
 }
 
@@ -740,9 +759,8 @@ impl App {
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
             remote_keep_offline_mirrors: config.remote.keep_offline_mirrors,
-            mirrors_enabled: true,
-            // Mirroring is a unix feature, so nothing to switch elsewhere.
-            mirror_hosts_configured: cfg!(unix) && !config.remote.spaces.is_empty(),
+            mirror_hosts: mirror_hosts_from_config(config),
+            mirrors_off: std::collections::BTreeSet::new(),
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -981,7 +999,7 @@ impl App {
         app.state.space_marks = snapshot.space_marks.clone();
         app.state.agent_marks = snapshot.agent_marks.clone();
         app.state.keep_offline_mirrors = snapshot.keep_offline_mirrors;
-        app.state.mirrors_enabled = snapshot.mirrors_enabled.unwrap_or(true);
+        app.state.mirrors_off = snapshot.mirrors_off.clone().unwrap_or_default();
         app.state.hide_spaces_in_agents = snapshot.hide_spaces_in_agents;
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
@@ -1605,7 +1623,7 @@ impl App {
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.remote_keep_offline_mirrors = config.remote.keep_offline_mirrors;
-                self.state.mirror_hosts_configured = cfg!(unix) && !config.remote.spaces.is_empty();
+                self.state.mirror_hosts = mirror_hosts_from_config(config);
                 #[cfg(unix)]
                 {
                     self.multiplexed_mirrors = config.remote.multiplexed_mirrors;
@@ -1940,13 +1958,13 @@ impl App {
             Mode::ContextMenu => {
                 self.handle_context_menu_key_via_api(key_event);
             }
-            Mode::KeybindHelp => {
-                if self.state.keybind_help_mirrors_key(key_event) {
-                    self.toggle_mirrors_from_overlay();
-                } else {
-                    input::handle_keybind_help_key(&mut self.state, key_event);
+            Mode::KeybindHelp => match self.state.keybind_help_mirrors_key(key_event) {
+                Some(input::MirrorsKey::AllHosts) => self.toggle_all_mirrors_from_overlay(),
+                Some(input::MirrorsKey::Host(target)) => {
+                    self.toggle_host_mirrors_from_overlay(&target)
                 }
-            }
+                None => input::handle_keybind_help_key(&mut self.state, key_event),
+            },
             Mode::GlobalMenu => {
                 input::handle_global_menu_key(&mut self.state, key_event);
             }

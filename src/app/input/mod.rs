@@ -55,6 +55,7 @@ pub(crate) use self::{
     navigate::{
         terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
     },
+    overlays::MirrorsKey,
     settings::open_settings_at,
 };
 use self::{
@@ -770,7 +771,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
             space_marks: state.space_marks.clone(),
             agent_marks: state.agent_marks.clone(),
             keep_offline_mirrors: state.keep_offline_mirrors,
-            mirrors_enabled: Some(state.mirrors_enabled),
+            mirrors_off: Some(state.mirrors_off.clone()),
             hide_spaces_in_agents: state.hide_spaces_in_agents,
         },
     )

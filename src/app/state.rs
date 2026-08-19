@@ -185,6 +185,15 @@ pub(crate) fn cycle_mark_entry<K: std::hash::Hash + Eq>(
 // Theme palette — all UI colors in one place, ready for theming
 // ---------------------------------------------------------------------------
 
+/// A host `remote.spaces` names, as the mirrors switch needs to show it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorHost {
+    /// How the host is reached, which is also how it is keyed everywhere else.
+    pub target: String,
+    /// What to call it on screen: the configured label, or the target.
+    pub label: String,
+}
+
 /// All colors used by the UI. Derived from a base accent color for now,
 /// but structured so a full theme system can replace it later.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1682,15 +1691,18 @@ pub struct AppState {
     pub keep_offline_mirrors: Option<bool>,
     /// `remote.keep_offline_mirrors`, refreshed on every config reload.
     pub remote_keep_offline_mirrors: bool,
-    /// Whether configured hosts are mirrored at all. Off means the session
-    /// behaves as though no host were configured: no feed, no mirror panes.
-    /// Kept in state rather than config so it can be turned off from the
-    /// keybind overlay and put back without editing a file.
-    pub mirrors_enabled: bool,
-    /// Whether `remote.spaces` names any host, refreshed on every config
-    /// reload. The switch above is only worth offering on a machine that has
-    /// something to mirror.
-    pub mirror_hosts_configured: bool,
+    /// The hosts `remote.spaces` names, in config order, refreshed on every
+    /// config reload. Held here so the keybind overlay can offer a switch per
+    /// machine without reaching for config, and empty where mirroring does not
+    /// apply at all.
+    pub mirror_hosts: Vec<MirrorHost>,
+    /// The hosts this session is not mirroring. Empty means all of them are.
+    ///
+    /// Kept as the exception rather than the rule so a host added to config is
+    /// mirrored without being named here, and kept in state rather than config
+    /// so a machine can be dropped from the overlay and put back without
+    /// editing a file.
+    pub mirrors_off: std::collections::BTreeSet<String>,
     /// Keys typed so far in jump mode, empty on entry. Only meaningful while
     /// the mode is `Jump`; the labels themselves are derived, not stored.
     pub jump_input: String,
@@ -1970,6 +1982,19 @@ impl AppState {
 
     /// Whether a mirror whose host went away is kept in the sidebar, greyed.
     /// The keybind's answer wins once given; until then the config decides.
+    /// Whether this machine mirrors the given host right now.
+    pub fn mirrors_host(&self, target: &str) -> bool {
+        !self.mirrors_off.contains(target)
+    }
+
+    /// Whether any configured host is being mirrored. False on a machine with
+    /// nothing configured as well as one that has switched every host off.
+    pub fn mirrors_any_host(&self) -> bool {
+        self.mirror_hosts
+            .iter()
+            .any(|host| self.mirrors_host(&host.target))
+    }
+
     pub fn keeps_offline_mirrors(&self) -> bool {
         self.keep_offline_mirrors
             .unwrap_or(self.remote_keep_offline_mirrors)
@@ -2146,8 +2171,8 @@ impl AppState {
             agent_marks: std::collections::HashMap::new(),
             keep_offline_mirrors: None,
             remote_keep_offline_mirrors: false,
-            mirrors_enabled: true,
-            mirror_hosts_configured: false,
+            mirror_hosts: Vec::new(),
+            mirrors_off: std::collections::BTreeSet::new(),
             jump_input: String::new(),
             hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),

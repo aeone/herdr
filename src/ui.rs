@@ -85,7 +85,10 @@ pub(crate) use self::{
     },
 };
 pub(crate) use self::{
-    keybind_help::{keybind_help_lines, keybind_help_mirrors_button_rect, MIRRORS_TOGGLE_KEY},
+    keybind_help::{
+        keybind_help_lines, keybind_help_mirror_host_at_line, keybind_help_mirror_rows,
+        keybind_help_mirrors_button_rect, MIRRORS_TOGGLE_KEY,
+    },
     mobile::{
         mobile_switcher_areas, mobile_switcher_max_scroll, mobile_switcher_target_at,
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
@@ -653,51 +656,103 @@ mod tests {
         assert!(screen.contains("project"), "{screen}");
     }
 
-    /// The mirrors switch is only useful if the place it is drawn is the place
-    /// a click lands, so this asserts the drawing and the hit test against each
-    /// other rather than against a hardcoded column.
+    /// The switch is only useful if the place it is drawn is the place a click
+    /// lands, so this asserts the drawing and the hit test against each other
+    /// rather than against a hardcoded row.
     #[test]
-    fn the_keybind_overlay_draws_a_mirrors_switch_where_a_click_finds_it() {
+    fn the_keybind_overlay_draws_a_mirror_switch_per_host_where_a_click_finds_it() {
         let area = Rect::new(0, 0, 100, 30);
+        let mut app = crate::app::state::AppState::test_new();
+        app.mode = Mode::KeybindHelp;
+        app.mirror_hosts = vec![
+            crate::app::state::MirrorHost {
+                target: "ryi@lute".to_string(),
+                label: "lut".to_string(),
+            },
+            crate::app::state::MirrorHost {
+                target: "ryi@sera".to_string(),
+                label: "ser".to_string(),
+            },
+        ];
+        app.mirrors_off = ["ryi@sera".to_string()].into_iter().collect();
 
-        for (enabled, label) in [(true, "mirrors on"), (false, "mirrors off")] {
-            let mut app = crate::app::state::AppState::test_new();
-            app.mode = Mode::KeybindHelp;
-            app.mirror_hosts_configured = true;
-            app.mirrors_enabled = enabled;
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let rows = (0..area.height)
+            .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
+            .collect::<Vec<_>>();
+        let screen = rows.join("\n");
 
-            compute_view(&mut app, area);
-            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
-            terminal.draw(|frame| render(&app, frame)).unwrap();
+        // Mixed: the all-hosts button must not claim everything is on.
+        assert!(screen.contains("mirrors 1/2"), "{screen}");
 
-            let rows = (0..area.height)
-                .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
-                .collect::<Vec<_>>();
-            let screen = rows.join("\n");
+        for (label, target) in [("lut", "ryi@lute"), ("ser", "ryi@sera")] {
             let (row, col) = rows
                 .iter()
                 .enumerate()
                 .find_map(|(row, text)| text.find(label).map(|col| (row as u16, col as u16)))
                 .unwrap_or_else(|| panic!("{label} should be on screen\n{screen}"));
-
-            assert!(
-                app.keybind_help_mirrors_button_at(col, row),
-                "a click on {label} at {col},{row} should reach the switch\n{screen}"
-            );
-            assert!(
-                !app.keybind_help_mirrors_button_at(col, row.saturating_sub(1)),
-                "the row above is the close button, not the switch\n{screen}"
+            assert_eq!(
+                app.keybind_help_mirror_host_at(col, row).as_deref(),
+                Some(target),
+                "a click on {label} at {col},{row} should reach {target}\n{screen}"
             );
         }
+
+        // The heading directly above the first host is not a switch.
+        let (first_host_row, col) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(row, text)| text.find("lut").map(|col| (row as u16, col as u16)))
+            .expect("the first host should be on screen");
+        assert_eq!(
+            app.keybind_help_mirror_host_at(col, first_host_row - 1),
+            None,
+            "the heading is not a switch\n{screen}"
+        );
     }
 
-    /// A machine with no host to mirror is not offered the switch, and does not
-    /// take the key it answers to either.
+    /// The switches live in the scrolling body, so a click has to be read back
+    /// through the scroll offset or it reaches whichever host would have been
+    /// drawn there unscrolled.
+    #[test]
+    fn a_scrolled_keybind_overlay_switches_the_host_actually_drawn_there() {
+        let area = Rect::new(0, 0, 100, 30);
+        let mut app = crate::app::state::AppState::test_new();
+        app.mode = Mode::KeybindHelp;
+        app.mirror_hosts = (0..4)
+            .map(|index| crate::app::state::MirrorHost {
+                target: format!("host{index}"),
+                label: format!("h{index}"),
+            })
+            .collect();
+        compute_view(&mut app, area);
+        // Inside the modal, which is centred rather than at the screen edge.
+        let col = app.keybind_help_popup_rect().x + 4;
+
+        let unscrolled = (0..area.height)
+            .filter_map(|row| app.keybind_help_mirror_host_at(col, row))
+            .collect::<Vec<_>>();
+        assert_eq!(unscrolled, vec!["host0", "host1", "host2", "host3"]);
+
+        app.keybind_help.scroll = 2;
+        let scrolled = (0..area.height)
+            .filter_map(|row| app.keybind_help_mirror_host_at(col, row))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            scrolled,
+            vec!["host1", "host2", "host3"],
+            "two lines scrolled away takes the heading and the first host with it"
+        );
+    }
+
+    /// A machine with no host to mirror is offered no switch, and does not take
+    /// the keys they answer to either.
     #[test]
     fn the_keybind_overlay_offers_no_mirrors_switch_without_a_host_to_mirror() {
         let mut app = crate::app::state::AppState::test_new();
         app.mode = Mode::KeybindHelp;
-        app.mirror_hosts_configured = false;
 
         let area = Rect::new(0, 0, 100, 30);
         compute_view(&mut app, area);
@@ -708,30 +763,41 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
+        let key =
+            |code| crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE);
         assert!(!screen.contains("mirrors on"), "{screen}");
         assert!(!screen.contains("mirrors off"), "{screen}");
-        assert!(
-            !app.keybind_help_mirrors_key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(MIRRORS_TOGGLE_KEY),
-                crossterm::event::KeyModifiers::NONE,
-            ))
-        );
+        assert!(app
+            .keybind_help_mirrors_key(key(crossterm::event::KeyCode::Char(MIRRORS_TOGGLE_KEY)))
+            .is_none());
+        assert!(app
+            .keybind_help_mirrors_key(key(crossterm::event::KeyCode::Char('1')))
+            .is_none());
 
-        app.mirror_hosts_configured = true;
-        assert!(
-            app.keybind_help_mirrors_key(crossterm::event::KeyEvent::new(
-                crossterm::event::KeyCode::Char(MIRRORS_TOGGLE_KEY),
-                crossterm::event::KeyModifiers::NONE,
-            ))
-        );
-        // The overlay scrolls with j/k, so the switch must not answer to a key
-        // the overlay already uses, nor to the letter with a modifier held.
-        assert!(
-            !app.keybind_help_mirrors_key(crossterm::event::KeyEvent::new(
+        app.mirror_hosts = vec![crate::app::state::MirrorHost {
+            target: "ryi@lute".to_string(),
+            label: "lut".to_string(),
+        }];
+        assert!(matches!(
+            app.keybind_help_mirrors_key(key(crossterm::event::KeyCode::Char(MIRRORS_TOGGLE_KEY))),
+            Some(crate::app::input::MirrorsKey::AllHosts)
+        ));
+        assert!(matches!(
+            app.keybind_help_mirrors_key(key(crossterm::event::KeyCode::Char('1'))),
+            Some(crate::app::input::MirrorsKey::Host(ref target)) if target == "ryi@lute"
+        ));
+        // Only as many digits as there are hosts, so an unrelated key still
+        // reaches the overlay itself.
+        assert!(app
+            .keybind_help_mirrors_key(key(crossterm::event::KeyCode::Char('2')))
+            .is_none());
+        // And not with a modifier held.
+        assert!(app
+            .keybind_help_mirrors_key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Char(MIRRORS_TOGGLE_KEY),
                 crossterm::event::KeyModifiers::CONTROL,
             ))
-        );
+            .is_none());
     }
 
     /// The headings must actually reach the screen, not just the layout.

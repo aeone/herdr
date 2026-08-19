@@ -374,19 +374,24 @@ impl App {
     /// same event as config dropping every host -- workers stop, mirrors close,
     /// and nothing dials out again until it is turned back on.
     pub(super) fn config_remote_spaces(&self) -> Vec<RemoteSpaceConfig> {
-        if !self.state.mirrors_enabled {
-            return Vec::new();
-        }
-        self.remote_spaces.clone()
+        self.remote_spaces
+            .iter()
+            .filter(|space| self.state.mirrors_host(&space.target))
+            .cloned()
+            .collect()
     }
 
-    /// Switches mirroring on or off for this session, tearing down or
-    /// restarting everything the change implies. Returns whether it moved.
-    pub(crate) fn set_mirrors_enabled(&mut self, enabled: bool) -> bool {
-        if self.state.mirrors_enabled == enabled {
+    /// Switches one host's mirrors on or off, tearing down or restarting
+    /// everything that implies. Returns whether it moved.
+    pub(crate) fn set_host_mirrors_enabled(&mut self, target: &str, enabled: bool) -> bool {
+        if self.state.mirrors_host(target) == enabled {
             return false;
         }
-        self.state.mirrors_enabled = enabled;
+        if enabled {
+            self.state.mirrors_off.remove(target);
+        } else {
+            self.state.mirrors_off.insert(target.to_owned());
+        }
         if enabled {
             // Workers are started by the ordinary poll pass; bring it forward
             // so the sidebar repopulates now rather than at the next tick.
@@ -394,16 +399,34 @@ impl App {
         } else {
             self.stop_unconfigured_remote_space_workers();
             self.close_mirrors_for_unconfigured_hosts();
-            self.mirror_streams.clear();
-            self.mirror_controls.clear();
-            self.mirror_remote_herdr.clear();
-            self.mirror_stream_retry.clear();
+            if let Some(stream) = self.mirror_streams.remove(target) {
+                stream.stop();
+            }
+            if let Some(control) = self.mirror_controls.remove(target) {
+                control.stop();
+            }
+            self.mirror_remote_herdr.remove(target);
+            self.mirror_stream_retry.remove(target);
             // What a host can do is a fact about that host, so
             // `mirror_multiplex_unsupported` is left alone: switching back on
             // should not make us re-probe a build we already know is too old.
-            self.state.remote_offline_hosts.clear();
+            self.state.remote_offline_hosts.remove(target);
         }
         true
+    }
+
+    /// Switches every configured host at once. Returns whether anything moved.
+    pub(crate) fn set_all_mirrors_enabled(&mut self, enabled: bool) -> bool {
+        let targets: Vec<String> = self
+            .remote_spaces
+            .iter()
+            .map(|space| space.target.clone())
+            .collect();
+        let mut moved = false;
+        for target in targets {
+            moved |= self.set_host_mirrors_enabled(&target, enabled);
+        }
+        moved
     }
 
     /// Ensures one long-lived worker is running per configured host.
@@ -1769,7 +1792,10 @@ mod tests {
             .insert("workbox".to_string(), "/usr/bin/herdr".to_string());
         app.state.remote_offline_hosts.insert("workbox".to_string());
 
-        assert!(app.set_mirrors_enabled(false), "the switch should move");
+        assert!(
+            app.set_host_mirrors_enabled("workbox", false),
+            "the switch should move"
+        );
 
         assert!(
             app.config_remote_spaces().is_empty(),
@@ -1797,10 +1823,10 @@ mod tests {
 
         // And the host is configured again the moment it is switched back on,
         // so the ordinary poll pass repopulates without a config reload.
-        assert!(app.set_mirrors_enabled(true));
+        assert!(app.set_host_mirrors_enabled("workbox", true));
         assert_eq!(app.config_remote_spaces().len(), 1);
         assert!(
-            !app.set_mirrors_enabled(true),
+            !app.set_host_mirrors_enabled("workbox", true),
             "switching it to where it already is changes nothing"
         );
     }

@@ -1365,7 +1365,7 @@ mod tests {
                 space_marks: app.state.space_marks.clone(),
                 agent_marks: app.state.agent_marks.clone(),
                 keep_offline_mirrors: app.state.keep_offline_mirrors,
-                mirrors_enabled: Some(app.state.mirrors_enabled),
+                mirrors_off: Some(app.state.mirrors_off.clone()),
                 hide_spaces_in_agents: app.state.hide_spaces_in_agents,
             },
         );
