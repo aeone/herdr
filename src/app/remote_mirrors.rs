@@ -1378,14 +1378,17 @@ impl App {
     ///
     /// A host renders what it sends at the size it is given, so this is what
     /// decides whether a mirror is legible. Only the workspace on screen has a
-    /// laid-out pane to measure, so the rest are asked for at the estimate and
-    /// corrected the moment they are looked at -- which is why the set is
-    /// refreshed after every render, not only when panes come and go.
+    /// laid-out pane to measure; the rest keep whatever they were last asked
+    /// for, and are corrected the moment they are looked at -- which is why the
+    /// set is refreshed after every render, not only when panes come and go.
+    /// Guessing afresh for the ones off screen would rewrite the whole set
+    /// every time the guess moved, which is every workspace switch.
     fn mirror_stream_targets(
         &self,
         target: &str,
     ) -> Vec<crate::remote::mirror_stream::MirrorStreamTarget> {
         let (estimated_rows, estimated_cols) = self.state.estimate_pane_size();
+        let watching = self.mirror_streams.get(target);
         self.state
             .workspaces
             .iter()
@@ -1397,6 +1400,7 @@ impl App {
                 let (cols, rows) = self
                     .state
                     .laid_out_pane_size(workspace.root_pane)
+                    .or_else(|| watching.and_then(|stream| stream.size_of(&mirror.remote_terminal)))
                     .unwrap_or((estimated_cols, estimated_rows));
                 Some(crate::remote::mirror_stream::MirrorStreamTarget {
                     terminal_id: mirror.remote_terminal.clone(),

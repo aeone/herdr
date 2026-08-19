@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Fixed
+- A watched terminal keeps its baseline when a watcher re-sends its set at the same size, and a mirror off screen keeps the size it was last asked for. A watcher re-sends its whole set whenever any one pane changes size, so without either of these one pane being zoomed cost a full repaint of every other mirror of that host -- and guessing afresh for the panes not on screen made the guess move on every workspace switch, which changed every entry in the set.
+
 - A mirror is asked for at the size its own pane is drawn at. Every mirror of a host was requested at the size of whichever pane happened to be first in the workspace on screen, measured to its outer edge rather than its content -- so a mirror was rendered by its host for a shape it was not in, and only came right when that unrelated pane changed size. The host is now told again after any render that moved the panes, so activating a mirror, zooming it, switching workspace or resizing the window each correct it immediately; a render that moved nothing costs one comparison. This was survivable while hosts re-rendered every watched terminal sixty times a second, because a fresh frame was never more than a moment away; once that stopped, a mirror drawn at the wrong size simply stayed that way until something else disturbed it.
 
 ### Added

@@ -1877,18 +1877,45 @@ impl HeadlessServer {
         // of that host went dark at once -- and stayed dark, because the set was
         // retried unchanged. An attach per pane only ever lost the one pane.
         let mut missing: Vec<String> = Vec::new();
+        // A watcher re-sends its whole set whenever any one pane changes size,
+        // so a terminal still being watched at the same size keeps its baseline
+        // and how far it has been rendered. Starting them all afresh would make
+        // one pane being zoomed cost a full repaint of every other mirror of
+        // this host.
+        let mut carried: std::collections::HashMap<(String, (u16, u16)), _> = self
+            .clients
+            .get_mut(&client_id)
+            .map(|client| std::mem::take(&mut client.observed))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|observed| {
+                (
+                    (observed.terminal_id.clone(), observed.size),
+                    (observed.render_state, observed.last_output_seq),
+                )
+            })
+            .collect();
         for target in targets {
             let Some(terminal_id) = self.resolve_terminal_target_id_string(&target.target) else {
                 debug!(client_id, target = %target.target, "observe target did not resolve");
                 missing.push(target.target);
                 continue;
             };
+            let size = (target.cols.max(1), target.rows.max(1));
+            let (render_state, last_output_seq) = carried
+                .remove(&(terminal_id.clone(), size))
+                .unwrap_or_else(|| {
+                    (
+                        crate::server::clients::ClientRenderState::new(encoding),
+                        None,
+                    )
+                });
             resolved.push(crate::server::clients::ObservedTerminal {
                 target: target.target,
                 terminal_id,
-                size: (target.cols.max(1), target.rows.max(1)),
-                render_state: crate::server::clients::ClientRenderState::new(encoding),
-                last_output_seq: None,
+                size,
+                render_state,
+                last_output_seq,
             });
         }
 
@@ -6067,6 +6094,58 @@ next_tab = ""
                     .and_then(|observed| observed.last_output_seq)
                     > seq_after_first,
                 "a terminal that moved should be rendered again"
+            );
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
+    /// A watcher re-sends its whole set whenever any one of its panes changes
+    /// size, which is every time one is activated or zoomed. A terminal still
+    /// watched at the same size must keep its baseline, or one pane moving
+    /// would cost a full repaint of every other mirror of that host.
+    #[test]
+    fn resizing_one_watched_terminal_does_not_repaint_the_others() {
+        with_terminal_session_test_server(|server, _terminal_id, terminal_id_string, _| {
+            let _control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
+            macro_rules! ask {
+                ($cols:expr) => {
+                    server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                        client_id: 7,
+                        targets: vec![crate::protocol::ObservedTarget {
+                            target: terminal_id_string.clone(),
+                            cols: $cols,
+                            rows: 10,
+                        }],
+                    })
+                };
+            }
+
+            assert!(ask!(40));
+            // Stand in for a terminal that has already been rendered once.
+            server
+                .clients
+                .get_mut(&7)
+                .expect("the connection should be live")
+                .observed[0]
+                .last_output_seq = Some(11);
+
+            // Asked for again at the same size: nothing about the terminal has
+            // changed, so neither has how far it has been rendered.
+            assert!(ask!(40));
+            assert_eq!(
+                server.clients.get(&7).expect("live").observed[0].last_output_seq,
+                Some(11),
+                "a terminal asked for at the same size keeps its baseline"
+            );
+
+            // Asked for at a new size: the baseline describes a screen of the
+            // old shape and cannot be differenced against the new one.
+            assert!(ask!(60));
+            assert_eq!(
+                server.clients.get(&7).expect("live").observed[0].last_output_seq,
+                None,
+                "a terminal that changed size is rendered again in full"
             );
 
             shutdown_test_runtimes(server);
