@@ -251,19 +251,6 @@ impl MirrorStream {
         self.watching == targets
     }
 
-    /// The size this terminal was last asked for, if it is being watched.
-    ///
-    /// A mirror in a workspace that is not on screen has no laid-out pane to
-    /// measure, and guessing again each time would churn the whole set every
-    /// time the guess moved. Keeping what it was last asked for means only the
-    /// panes actually on screen ever change size.
-    pub(crate) fn size_of(&self, terminal_id: &str) -> Option<(u16, u16)> {
-        self.watching
-            .iter()
-            .find(|target| target.terminal_id == terminal_id)
-            .map(|target| (target.cols, target.rows))
-    }
-
     /// Replaces the set of terminals this connection carries.
     /// Forgets what this connection was last told to watch, so the next
     /// reconcile names the set again even though it has not changed.
