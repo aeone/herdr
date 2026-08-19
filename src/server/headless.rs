@@ -1902,6 +1902,22 @@ impl HeadlessServer {
                 continue;
             };
             let size = (target.cols.max(1), target.rows.max(1));
+            // The size a watcher asks for is the size the terminal becomes.
+            //
+            // A terminal is rendered at its own size, so without this a watcher
+            // with a taller pane gets the remote's shorter screen painted into
+            // the top of it and blank below -- alleria's 23 rows in a 70 row
+            // pane. Asking is what sizes it, as it was when a mirror was a
+            // whole attach: the machine being used wins, and stops winning when
+            // it stops asking. Only a set being named resizes anything, not
+            // every render, so two watchers of one terminal take turns rather
+            // than fight -- whoever moved last has it.
+            if let Some(runtime) = self.runtime_for_terminal_id_string(&terminal_id) {
+                let (rows, cols) = runtime.current_size();
+                if (cols, rows) != size {
+                    runtime.resize(size.1, size.0, 0, 0);
+                }
+            }
             let (render_state, last_output_seq) = carried
                 .remove(&(terminal_id.clone(), size))
                 .unwrap_or_else(|| {
@@ -4167,12 +4183,17 @@ impl HeadlessServer {
     }
 
     fn render_and_stream(&mut self) {
-        let full_started = crate::render_prof::timer();
-        // Before anything is sent: a host renders a mirror at the size it was
-        // last given, so a pane that has just been activated, zoomed or resized
-        // must say so or it goes on being drawn for its old shape.
+        self.render_and_stream_frames();
+        // After, not before: the layout pass inside is what resizes a mirror's
+        // terminal, and a pane that has just been activated or zoomed has to
+        // say so in the same pass. Told beforehand, the host would go on
+        // drawing it for its old shape until something else caused a render.
         #[cfg(unix)]
         self.app.refresh_mirror_stream_sizes();
+    }
+
+    fn render_and_stream_frames(&mut self) {
+        let full_started = crate::render_prof::timer();
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
 
         if render_targets.is_empty() {
@@ -6095,6 +6116,61 @@ next_tab = ""
                     > seq_after_first,
                 "a terminal that moved should be rendered again"
             );
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
+    /// A terminal is rendered at its own size, so a watcher with a taller pane
+    /// used to get the remote's shorter screen painted into the top of it and
+    /// blank below. Asking is what sizes it: the machine being used wins, which
+    /// is what a mirror did when it was a whole attach.
+    #[test]
+    fn asking_to_watch_a_terminal_sizes_it_to_the_pane_it_is_being_watched_in() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let _control_rx = connect_pending_terminal_client_with_control_rx(server, 7);
+            macro_rules! size_now {
+                () => {
+                    server
+                        .app
+                        .terminal_runtimes
+                        .get(&terminal_id)
+                        .expect("the terminal")
+                        .current_size()
+                };
+            }
+            let before = size_now!();
+            assert_ne!(before, (40, 100), "the test needs a size to move from");
+
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 100,
+                        rows: 40,
+                    }],
+                })
+            );
+            assert_eq!(
+                size_now!(),
+                (40, 100),
+                "the terminal should take the size it is being watched in"
+            );
+
+            // And follow the watcher when its pane changes, which is how
+            // switching from a phone back to a laptop puts it back.
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 80,
+                        rows: 24,
+                    }],
+                })
+            );
+            assert_eq!(size_now!(), (24, 80));
 
             shutdown_test_runtimes(server);
         });
