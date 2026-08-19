@@ -492,6 +492,7 @@ impl App {
             self.close_mirror_at(ws_idx);
         }
         self.shutdown_detached_terminal_runtimes();
+        self.release_controls_for_closed_mirrors();
     }
 
     /// Applies a completed poll. A failed poll only reschedules: existing
@@ -877,6 +878,10 @@ impl App {
             // After the plan, so the set named to the host is the set that now
             // exists here rather than the one that did a moment ago.
             self.update_mirror_stream(space, &snapshot.remote_herdr);
+            // A handoff on the host rebuilds every mirror under new terminal
+            // ids, so a claim held across one is left attached to a terminal
+            // this side no longer shows.
+            self.release_controls_for_closed_mirrors();
         }
         // Always, even when the structure plan was empty: an agent changing
         // status (idle->working) is not a structure change, and its mirror must
@@ -1090,79 +1095,137 @@ impl App {
         {
             return;
         }
-        if !self.mirror_controls.contains_key(target) {
-            let Some(space) = self
-                .config_remote_spaces()
-                .into_iter()
-                .find(|space| space.target == target)
-            else {
+        if !self.claim_mirror_control(target, terminal_id) {
+            return;
+        }
+        if let Err(err) = self.send_on_mirror_control(target, terminal_id, request) {
+            // A control connection dies on the far side without warning -- the
+            // host restarts, the terminal goes, ssh drops -- and the first this
+            // side hears of it is a broken pipe on the way out. Dropping the
+            // keystroke and waiting for the next one turned that into a claim
+            // per keypress, each one a fresh attach on a terminal the host then
+            // resized to match, so typing into a mirror after any hiccup left
+            // the far side reflowing. One clean retry sends the keystroke that
+            // found the fault rather than eating it.
+            tracing::debug!(target, terminal_id, %err, "mirror input failed; claiming again");
+            if !self.claim_mirror_control(target, terminal_id) {
                 return;
-            };
-            let Some(remote_herdr) = self.mirror_remote_herdr.get(target).cloned() else {
-                tracing::debug!(target, "no host binary known yet; dropping mirror input");
-                return;
-            };
-            match crate::remote::mirror_stream::MirrorControl::spawn(
-                &space,
-                terminal_id,
-                &remote_herdr,
-            ) {
-                Ok(mut control) => {
-                    tracing::info!(target, terminal_id, "claimed a mirrored terminal");
-                    // A control connection is an attach, and a host sizes a
-                    // terminal to its attach client -- so claiming one would
-                    // otherwise resize it to whatever pty that ssh happened to
-                    // get, undoing the size the mirror pane actually needs. The
-                    // first thing it says is how big the pane is.
-                    if let Some((rows, cols)) = self.mirror_pane_size_for(target, terminal_id) {
-                        let size = crate::pane::StreamedPaneRequest::Resize {
-                            rows,
-                            cols,
-                            cell_width_px: 0,
-                            cell_height_px: 0,
-                        };
-                        if let Err(err) = control.send(terminal_id, &size) {
-                            tracing::warn!(target, terminal_id, %err, "could not size a claimed mirror");
-                        }
-                    }
-                    self.mirror_controls.insert(target.to_owned(), control);
-                }
-                Err(err) => {
-                    tracing::warn!(target, %err, "could not open a writable mirror connection");
-                    return;
-                }
+            }
+            if let Err(err) = self.send_on_mirror_control(target, terminal_id, request) {
+                tracing::warn!(target, terminal_id, %err, "mirror input failed twice; giving up on it");
+                self.release_mirror_control(target);
             }
         }
-        // Moving the claim to another pane attaches to it, and that sizes it
-        // too, so the new pane's size goes first for the same reason the first
-        // claim's did.
-        let moving = self
+    }
+
+    /// Ensures this machine holds `target`'s writable connection, opening one if
+    /// it does not. Returns whether it now holds a usable one.
+    fn claim_mirror_control(&mut self, target: &str, terminal_id: &str) -> bool {
+        if self.mirror_controls.contains_key(target) {
+            return true;
+        }
+        let Some(space) = self
+            .config_remote_spaces()
+            .into_iter()
+            .find(|space| space.target == target)
+        else {
+            return false;
+        };
+        let Some(remote_herdr) = self.mirror_remote_herdr.get(target).cloned() else {
+            tracing::debug!(target, "no host binary known yet; dropping mirror input");
+            return false;
+        };
+        match crate::remote::mirror_stream::MirrorControl::spawn(&space, terminal_id, &remote_herdr)
+        {
+            Ok(control) => {
+                tracing::info!(target, terminal_id, "claimed a mirrored terminal");
+                self.mirror_controls.insert(target.to_owned(), control);
+                true
+            }
+            Err(err) => {
+                tracing::warn!(target, %err, "could not open a writable mirror connection");
+                false
+            }
+        }
+    }
+
+    /// Sends one request on the held connection, sizing the terminal first when
+    /// the claim is landing on it for the first time.
+    ///
+    /// A control connection is an attach, and a host sizes a terminal to its
+    /// attach client -- so claiming one would otherwise resize it to whatever
+    /// pty that ssh happened to get, undoing the size the mirror pane actually
+    /// needs. The first thing a claim says is how big the pane is, and the same
+    /// goes every time it moves to another pane.
+    ///
+    /// Any failure drops the connection, because a half-written one is worse
+    /// than none: the next attempt would size a terminal it no longer holds.
+    fn send_on_mirror_control(
+        &mut self,
+        target: &str,
+        terminal_id: &str,
+        request: &crate::pane::StreamedPaneRequest,
+    ) -> std::io::Result<()> {
+        let landing = self
             .mirror_controls
             .get(target)
             .is_some_and(|control| control.controlling() != terminal_id);
-        if moving {
-            if let Some((rows, cols)) = self.mirror_pane_size_for(target, terminal_id) {
-                let size = crate::pane::StreamedPaneRequest::Resize {
-                    rows,
-                    cols,
-                    cell_width_px: 0,
-                    cell_height_px: 0,
-                };
-                if let Some(control) = self.mirror_controls.get_mut(target) {
-                    if let Err(err) = control.send(terminal_id, &size) {
-                        tracing::warn!(target, terminal_id, %err, "could not size a claimed mirror");
-                    }
-                }
-            }
-        }
+        let size = landing
+            .then(|| self.mirror_pane_size_for(target, terminal_id))
+            .flatten();
         let Some(control) = self.mirror_controls.get_mut(target) else {
-            return;
+            return Err(std::io::Error::other("no writable mirror connection"));
         };
-        if let Err(err) = control.send(terminal_id, request) {
-            tracing::warn!(target, terminal_id, %err, "mirror input failed; reopening on the next one");
-            if let Some(control) = self.mirror_controls.remove(target) {
-                control.stop();
-            }
+        let result = size
+            .map(|(rows, cols)| {
+                control.send(
+                    terminal_id,
+                    &crate::pane::StreamedPaneRequest::Resize {
+                        rows,
+                        cols,
+                        cell_width_px: 0,
+                        cell_height_px: 0,
+                    },
+                )
+            })
+            .unwrap_or(Ok(()))
+            .and_then(|()| control.send(terminal_id, request));
+        if result.is_err() {
+            self.release_mirror_control(target);
+        }
+        result
+    }
+
+    /// Lets go of a host's writable connection, if it holds one.
+    fn release_mirror_control(&mut self, target: &str) {
+        if let Some(control) = self.mirror_controls.remove(target) {
+            control.stop();
+        }
+    }
+
+    /// Lets go of any writable connection whose terminal is no longer mirrored
+    /// here.
+    ///
+    /// A claim outlives the pane that made it -- closing a mirror, or switching
+    /// its host off, leaves the connection attached to a terminal with nothing
+    /// on this side to show it. The host keeps sizing that terminal to an attach
+    /// nobody is looking at.
+    pub(crate) fn release_controls_for_closed_mirrors(&mut self) {
+        let stale: Vec<String> = self
+            .mirror_controls
+            .iter()
+            .filter(|(target, control)| {
+                !self.state.workspaces.iter().any(|workspace| {
+                    workspace.remote_mirror.as_ref().is_some_and(|mirror| {
+                        mirror.target == **target && mirror.remote_terminal == control.controlling()
+                    })
+                })
+            })
+            .map(|(target, _)| target.clone())
+            .collect();
+        for target in stale {
+            tracing::debug!(target, "letting go of a claim on a mirror that has closed");
+            self.release_mirror_control(&target);
         }
     }
 
@@ -1905,6 +1968,212 @@ mod tests {
         assert!(
             !app.set_host_mirrors_enabled("workbox", true),
             "switching it to where it already is changes nothing"
+        );
+    }
+
+    /// A watcher mirroring several hosts at once, each with one mirror pane of
+    /// its own size and a connection already carrying it. This is the smallest
+    /// arrangement that can show one host's mirrors disturbing another's, which
+    /// no single-host test can: every size, every observe set and every stamp
+    /// here is global, so a change meant for one host passes through all of
+    /// them on its way out.
+    fn watcher_mirroring(hosts: &[(&str, u16, u16)]) -> App {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.remote_spaces = hosts.iter().map(|(target, ..)| space(target)).collect();
+        app.state.workspaces.clear();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        for (target, cols, rows) in hosts {
+            let key = format!("{target}\u{1f}w1\u{1f}term-1");
+            let workspace = mirror(target, &key, target);
+            let terminal_id = workspace
+                .terminal_id(workspace.root_pane)
+                .expect("a mirror pane has a terminal")
+                .clone();
+            app.state.workspaces.push(workspace);
+            app.terminal_runtimes.insert(
+                terminal_id,
+                crate::terminal::TerminalRuntime::test_with_scrollback_bytes(
+                    *cols,
+                    *rows,
+                    1 << 16,
+                    b"",
+                ),
+            );
+        }
+        // Connections that already carry exactly what this layout asks for, so
+        // anything they are told afterwards is a change and not a first word.
+        for (target, ..) in hosts {
+            let targets = app.mirror_stream_targets(target);
+            app.mirror_streams.insert(
+                (*target).to_string(),
+                crate::remote::mirror_stream::MirrorStream::test_watching(targets),
+            );
+            app.mirror_remote_herdr
+                .insert((*target).to_string(), "/usr/bin/herdr".to_string());
+        }
+        app
+    }
+
+    /// What a host is told to watch is what decides whether it repaints: naming
+    /// the set again makes it start from a whole frame, because a mirror pane
+    /// rebuilt on this side cannot read differences against a frame it never
+    /// saw. So switching one host off must not name any other host's set. It
+    /// went wrong the other way round in use -- switching one host off in the
+    /// keybind overlay left another host's mirror garbled -- and every size and
+    /// stamp involved is shared between hosts, so nothing but a second host in
+    /// the test can hold this.
+    #[tokio::test]
+    async fn switching_one_host_off_never_says_a_word_to_the_others() {
+        let mut app = watcher_mirroring(&[("workbox", 100, 40), ("keeper", 90, 30)]);
+        let before = app.mirror_stream_targets("keeper");
+        assert_eq!(before.len(), 1, "the other host is mirrored to begin with");
+
+        assert!(app.set_host_mirrors_enabled("workbox", false));
+
+        assert_eq!(
+            app.mirror_stream_targets("keeper"),
+            before,
+            "the other host is still watched at the same size"
+        );
+        // Every render refreshes sizes, and the host that stayed on must fall
+        // out of that walk untouched however many times it runs.
+        for _ in 0..3 {
+            app.refresh_mirror_stream_sizes();
+        }
+        let keeper = app
+            .mirror_streams
+            .get("keeper")
+            .expect("the other host is still connected");
+        assert!(
+            keeper.told().is_empty(),
+            "the host that was left on should never have been told again, but was: {:?}",
+            keeper.told()
+        );
+    }
+
+    /// Switching a host off has to stay off. Its feed can still be mid-flight
+    /// when the switch moves, and a snapshot applied after the fact would
+    /// rebuild every mirror that was just closed -- then the next pass would
+    /// close them again, which is what flickering is.
+    #[tokio::test]
+    async fn a_host_switched_off_is_not_rebuilt_by_a_poll_still_in_flight() {
+        let mut app = watcher_mirroring(&[("workbox", 100, 40), ("keeper", 90, 30)]);
+
+        assert!(app.set_host_mirrors_enabled("workbox", false));
+
+        for _ in 0..3 {
+            app.handle_remote_spaces_polled(
+                "workbox".to_string(),
+                Ok(snapshot(vec![agent_pane("w1", "remote", "term-1")])),
+            );
+            app.refresh_mirror_stream_sizes();
+            assert!(
+                !app.state.workspaces.iter().any(|workspace| workspace
+                    .remote_mirror
+                    .as_ref()
+                    .is_some_and(|mirror| mirror.target == "workbox")),
+                "a host that is switched off should stay closed"
+            );
+        }
+        assert!(!app.mirror_streams.contains_key("workbox"));
+        assert!(!app.remote_space_workers.contains_key("workbox"));
+        assert!(
+            !app.state.remote_offline_hosts.contains("workbox"),
+            "and it is not reported as unreachable either, it is simply not asked"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "the other host keeps its mirror"
+        );
+    }
+
+    /// A claim is an attach, and an attach sizes the terminal it lands on. So a
+    /// claim that outlives the pane that made it leaves the host sizing a
+    /// terminal for a viewer who is no longer there -- and the mirror on the
+    /// far side reflows to fit nobody. Closing a mirror has to let it go.
+    #[tokio::test]
+    async fn a_claim_on_a_mirror_that_has_closed_is_let_go() {
+        let mut app = watcher_mirroring(&[("workbox", 100, 40), ("keeper", 90, 30)]);
+        app.mirror_controls.insert(
+            "workbox".to_string(),
+            crate::remote::mirror_stream::MirrorControl::test_already_dead("term-remote"),
+        );
+        app.mirror_controls.insert(
+            "keeper".to_string(),
+            crate::remote::mirror_stream::MirrorControl::test_already_dead("term-remote"),
+        );
+
+        // The host's own handoff rebuilds its mirrors under new terminal ids,
+        // which is the common way a claim is orphaned without anyone asking.
+        app.state.workspaces.retain(|workspace| {
+            workspace
+                .remote_mirror
+                .as_ref()
+                .is_none_or(|mirror| mirror.target != "workbox")
+        });
+        app.release_controls_for_closed_mirrors();
+
+        assert!(
+            !app.mirror_controls.contains_key("workbox"),
+            "the claim on the closed mirror should have been let go"
+        );
+        assert!(
+            app.mirror_controls.contains_key("keeper"),
+            "and the claim on a mirror that is still open should be kept"
+        );
+    }
+
+    /// A connection dies on the far side without warning and this side only
+    /// learns of it on the way out. Keeping the dead one and dropping the
+    /// keystroke made every following keypress claim afresh -- attach, size,
+    /// fail, attach -- which is a resize storm on the host for as long as
+    /// someone is typing. A failed write means the connection is gone.
+    #[tokio::test]
+    async fn a_write_that_finds_a_dead_claim_lets_go_of_it() {
+        let mut app = watcher_mirroring(&[("workbox", 100, 40)]);
+        app.mirror_controls.insert(
+            "workbox".to_string(),
+            crate::remote::mirror_stream::MirrorControl::test_already_dead("term-remote"),
+        );
+        // Nothing known about the host's binary, so the retry cannot dial out
+        // and the test stays off the network.
+        app.mirror_remote_herdr.clear();
+
+        app.send_mirror_request(
+            "workbox",
+            "term-remote",
+            &crate::pane::StreamedPaneRequest::Input(b"hello".to_vec().into()),
+        );
+
+        assert!(
+            app.mirror_controls.is_empty(),
+            "a claim that could not be written to is not a claim any more"
+        );
+    }
+
+    /// Watching claims nothing, so laying a pane out must never take a terminal
+    /// from whoever is typing into it elsewhere.
+    #[tokio::test]
+    async fn a_size_alone_never_claims_a_mirror() {
+        let mut app = watcher_mirroring(&[("workbox", 100, 40)]);
+
+        app.send_mirror_request(
+            "workbox",
+            "term-remote",
+            &crate::pane::StreamedPaneRequest::Resize {
+                rows: 40,
+                cols: 100,
+                cell_width_px: 0,
+                cell_height_px: 0,
+            },
+        );
+
+        assert!(
+            app.mirror_controls.is_empty(),
+            "a size on its own should not have opened a writable connection"
         );
     }
 

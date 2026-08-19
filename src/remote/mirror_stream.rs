@@ -125,6 +125,10 @@ pub(crate) struct MirrorStream {
     /// The last thing the far side said on stderr, which is where a host too
     /// old for this command prints its usage.
     complaint: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Every set this connection has been told to watch, kept only in tests so
+    /// one host's churn can be asserted against another's quiet.
+    #[cfg(test)]
+    told: Vec<Vec<MirrorStreamTarget>>,
 }
 
 impl MirrorStream {
@@ -219,6 +223,8 @@ impl MirrorStream {
             watching: Vec::new(),
             frames,
             complaint,
+            #[cfg(test)]
+            told: Vec::new(),
         })
     }
 
@@ -234,7 +240,26 @@ impl MirrorStream {
             watching: Vec::new(),
             frames: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(frames)),
             complaint: std::sync::Arc::new(std::sync::Mutex::new(complaint.map(str::to_owned))),
+            told: Vec::new(),
         }
+    }
+
+    /// A connection already watching `targets`, with no host behind it.
+    ///
+    /// Enough to tell "this host was told again" from "this host was left
+    /// alone", which is the difference between a mirror that repaints and one
+    /// that does not.
+    #[cfg(test)]
+    pub(crate) fn test_watching(targets: Vec<MirrorStreamTarget>) -> Self {
+        let mut stream = Self::test_without_a_host(1, None);
+        stream.watching = targets;
+        stream
+    }
+
+    /// The sets this connection has been told to watch since it was made.
+    #[cfg(test)]
+    pub(crate) fn told(&self) -> &[Vec<MirrorStreamTarget>] {
+        &self.told
     }
 
     /// Whether this connection ever carried a frame.
@@ -271,11 +296,18 @@ impl MirrorStream {
 
     pub(crate) fn set_targets(&mut self, targets: Vec<MirrorStreamTarget>) -> std::io::Result<()> {
         let line = observe_request_line(&targets);
-        let Some(stdin) = self.stdin.as_mut() else {
-            return Err(std::io::Error::other("observe stream stdin is closed"));
-        };
-        stdin.write_all(line.as_bytes())?;
-        stdin.flush()?;
+        #[cfg(test)]
+        self.told.push(targets.clone());
+        match self.stdin.as_mut() {
+            Some(stdin) => {
+                stdin.write_all(line.as_bytes())?;
+                stdin.flush()?;
+            }
+            // A test connection has no host to write to, but which sets it was
+            // told is the whole point of one, so it is recorded either way.
+            None if cfg!(test) => {}
+            None => return Err(std::io::Error::other("observe stream stdin is closed")),
+        }
         self.watching = targets;
         Ok(())
     }
@@ -339,6 +371,20 @@ impl MirrorControl {
     /// The terminal this connection currently holds.
     pub(crate) fn controlling(&self) -> &str {
         &self.controlling
+    }
+
+    /// A claim whose far side has already gone, which is what every real one
+    /// eventually becomes: the host restarts, the terminal ends, ssh drops, and
+    /// this side only finds out on the next write.
+    #[cfg(test)]
+    pub(crate) fn test_already_dead(terminal_id: &str) -> Self {
+        Self {
+            child: std::process::Command::new("true")
+                .spawn()
+                .expect("spawning `true` should work"),
+            stdin: None,
+            controlling: terminal_id.to_owned(),
+        }
     }
 
     /// Sends one request, moving the claim first if it is for another terminal.
