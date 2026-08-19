@@ -4141,6 +4141,11 @@ impl HeadlessServer {
 
     fn render_and_stream(&mut self) {
         let full_started = crate::render_prof::timer();
+        // Before anything is sent: a host renders a mirror at the size it was
+        // last given, so a pane that has just been activated, zoomed or resized
+        // must say so or it goes on being drawn for its old shape.
+        #[cfg(unix)]
+        self.app.refresh_mirror_stream_sizes();
         let render_targets = render_targets(&self.clients, self.foreground_client_id);
 
         if render_targets.is_empty() {

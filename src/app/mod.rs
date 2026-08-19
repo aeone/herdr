@@ -176,6 +176,10 @@ pub struct App {
     /// One connection per mirrored host, carrying every mirror of it.
     #[cfg(unix)]
     pub(crate) mirror_streams: HashMap<String, crate::remote::mirror_stream::MirrorStream>,
+    /// The pane layout the hosts were last told about, so a render that changed
+    /// nothing costs a comparison rather than a walk of every workspace.
+    #[cfg(unix)]
+    pub(crate) mirror_layout_stamp: remote_mirrors::MirrorLayoutStamp,
     /// The one writable connection per host, opened when a mirror of it is
     /// first typed into and moved from pane to pane after that.
     #[cfg(unix)]
@@ -900,6 +904,7 @@ impl App {
             multiplexed_mirrors: config.remote.multiplexed_mirrors,
             #[cfg(unix)]
             mirror_streams: HashMap::new(),
+            mirror_layout_stamp: remote_mirrors::MirrorLayoutStamp::default(),
             #[cfg(unix)]
             mirror_controls: HashMap::new(),
             #[cfg(unix)]

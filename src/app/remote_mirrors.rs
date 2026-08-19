@@ -17,6 +17,17 @@ use crate::workspace::{RemoteMirror, Workspace};
 
 use super::App;
 
+/// What the panes on screen looked like when mirror sizes were last sent.
+///
+/// Compared on every render to decide whether any host needs telling, so it
+/// holds only what can change a mirror's size: which workspace is on screen and
+/// how its panes are laid out.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct MirrorLayoutStamp {
+    active: Option<usize>,
+    panes: Vec<(crate::layout::PaneId, u16, u16)>,
+}
+
 /// One change reconcile wants to make to the local workspace list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 // Creating carries everything needed to build a mirror and the other two carry
@@ -1362,11 +1373,19 @@ impl App {
 
     /// Every terminal we currently mirror of one host, with the size to render
     /// each at.
+    /// The terminals to ask a host for, each at the size its own pane is drawn
+    /// at.
+    ///
+    /// A host renders what it sends at the size it is given, so this is what
+    /// decides whether a mirror is legible. Only the workspace on screen has a
+    /// laid-out pane to measure, so the rest are asked for at the estimate and
+    /// corrected the moment they are looked at -- which is why the set is
+    /// refreshed after every render, not only when panes come and go.
     fn mirror_stream_targets(
         &self,
         target: &str,
     ) -> Vec<crate::remote::mirror_stream::MirrorStreamTarget> {
-        let (rows, cols) = self.state.estimate_pane_size();
+        let (estimated_rows, estimated_cols) = self.state.estimate_pane_size();
         self.state
             .workspaces
             .iter()
@@ -1375,6 +1394,10 @@ impl App {
                 if mirror.target != target {
                     return None;
                 }
+                let (cols, rows) = self
+                    .state
+                    .laid_out_pane_size(workspace.root_pane)
+                    .unwrap_or((estimated_cols, estimated_rows));
                 Some(crate::remote::mirror_stream::MirrorStreamTarget {
                     terminal_id: mirror.remote_terminal.clone(),
                     cols,
@@ -1382,6 +1405,55 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    /// Tells every open connection the sizes its terminals are now drawn at.
+    ///
+    /// Called after a render rather than on a timer: activating a pane, zooming
+    /// it, switching workspace or resizing the window all change what size a
+    /// mirror is shown at, and a host that is not told goes on sending frames
+    /// cut for the old one. Opens nothing and dials nothing -- a host that is
+    /// not already connected is left to the poll.
+    pub(crate) fn refresh_mirror_stream_sizes(&mut self) {
+        if self.mirror_streams.is_empty() {
+            return;
+        }
+        // This runs on every render pass, so it has to be cheap when nothing
+        // has moved. Only the workspace on screen is laid out, so its panes and
+        // their sizes are the whole of what can change the answer -- a handful
+        // of entries to compare, against walking every workspace per host.
+        let stamp = MirrorLayoutStamp {
+            active: self.state.active,
+            panes: self
+                .state
+                .view
+                .pane_infos
+                .iter()
+                .map(|info| (info.id, info.inner_rect.width, info.inner_rect.height))
+                .collect(),
+        };
+        if self.mirror_layout_stamp == stamp {
+            return;
+        }
+        self.mirror_layout_stamp = stamp;
+
+        let hosts: Vec<String> = self.mirror_streams.keys().cloned().collect();
+        for host in hosts {
+            let targets = self.mirror_stream_targets(&host);
+            let Some(stream) = self.mirror_streams.get_mut(&host) else {
+                continue;
+            };
+            if targets.is_empty() || stream.is_watching(&targets) {
+                continue;
+            }
+            if let Err(err) = stream.set_targets(targets) {
+                tracing::warn!(target = %host, %err, "could not resize a shared mirror connection");
+                if let Some(stream) = self.mirror_streams.remove(&host) {
+                    stream.stop();
+                }
+                self.defer_mirror_stream(&host);
+            }
+        }
     }
 
     /// Opens the host's connection if it is not open, and tells it which
@@ -1728,6 +1800,98 @@ mod tests {
             !app.set_mirrors_enabled(true),
             "switching it to where it already is changes nothing"
         );
+    }
+
+    /// A host renders a mirror at the size it is given, so the size has to be
+    /// the pane's own. Every mirror used to be asked for at the size of
+    /// whichever pane happened to be first in the workspace on screen, which is
+    /// a different pane, and measured to its outer edge rather than its content
+    /// -- so a mirror was drawn for a shape it was not in and only came right
+    /// when that unrelated first pane changed size.
+    #[tokio::test]
+    async fn a_mirror_is_asked_for_at_the_size_its_own_pane_is_drawn_at() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces.clear();
+        let mut mirrored = mirror("workbox", "workbox\u{1f}w1\u{1f}term-1", "remote");
+        let mirror_pane = mirrored.root_pane;
+        mirrored.custom_name = Some("remote".to_string());
+        app.state.workspaces.push(mirrored);
+        app.state.active = Some(0);
+
+        // Laid out as the renderer leaves it: the mirror's pane is 100x40 of
+        // content, and another pane on screen is a different size entirely.
+        app.state.view.pane_infos = vec![
+            crate::layout::PaneInfo {
+                id: crate::layout::PaneId::from_raw(999),
+                rect: ratatui::layout::Rect::new(0, 0, 20, 5),
+                inner_rect: ratatui::layout::Rect::new(1, 1, 18, 3),
+                scrollbar_rect: None,
+                borders: ratatui::widgets::Borders::ALL,
+                is_focused: false,
+            },
+            crate::layout::PaneInfo {
+                id: mirror_pane,
+                rect: ratatui::layout::Rect::new(0, 6, 102, 42),
+                inner_rect: ratatui::layout::Rect::new(1, 7, 100, 40),
+                scrollbar_rect: None,
+                borders: ratatui::widgets::Borders::ALL,
+                is_focused: true,
+            },
+        ];
+
+        let targets = app.mirror_stream_targets("workbox");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(
+            (targets[0].cols, targets[0].rows),
+            (100, 40),
+            "the mirror should be asked for at its own content size, not the first pane's"
+        );
+
+        // A mirror in a workspace that is not on screen has no laid-out pane to
+        // measure, so it falls back rather than being asked for at nothing.
+        app.state.view.pane_infos.clear();
+        let targets = app.mirror_stream_targets("workbox");
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].cols > 0 && targets[0].rows > 0);
+    }
+
+    /// The refresh runs on every render, so it must cost nothing when the panes
+    /// have not moved, and must fire when they have.
+    #[tokio::test]
+    async fn a_layout_that_has_not_moved_does_not_retell_the_hosts() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces.clear();
+        app.state.workspaces.push(local("mine"));
+        app.state.active = Some(0);
+        app.mirror_streams.insert(
+            "workbox".to_string(),
+            crate::remote::mirror_stream::MirrorStream::test_without_a_host(1, None),
+        );
+
+        app.refresh_mirror_stream_sizes();
+        let settled = MirrorLayoutStamp {
+            active: app.state.active,
+            panes: Vec::new(),
+        };
+        assert_eq!(app.mirror_layout_stamp, settled);
+
+        // Unchanged: the stamp is what stops the walk, so it must still match.
+        app.refresh_mirror_stream_sizes();
+        assert_eq!(app.mirror_layout_stamp, settled);
+
+        // Zooming a pane changes its size without changing which panes exist,
+        // and that is exactly the case that was being missed.
+        app.state.view.pane_infos = vec![crate::layout::PaneInfo {
+            id: crate::layout::PaneId::from_raw(7),
+            rect: ratatui::layout::Rect::new(0, 0, 40, 10),
+            inner_rect: ratatui::layout::Rect::new(1, 1, 38, 8),
+            scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::ALL,
+            is_focused: true,
+        }];
+        app.refresh_mirror_stream_sizes();
+        assert_ne!(app.mirror_layout_stamp, settled);
     }
 
     /// Mirrors reconcile on what a host pushes. A host that has stopped pushing

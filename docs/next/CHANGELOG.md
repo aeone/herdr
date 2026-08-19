@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+### Fixed
+- A mirror is asked for at the size its own pane is drawn at. Every mirror of a host was requested at the size of whichever pane happened to be first in the workspace on screen, measured to its outer edge rather than its content -- so a mirror was rendered by its host for a shape it was not in, and only came right when that unrelated pane changed size. The host is now told again after any render that moved the panes, so activating a mirror, zooming it, switching workspace or resizing the window each correct it immediately; a render that moved nothing costs one comparison. This was survivable while hosts re-rendered every watched terminal sixty times a second, because a fresh frame was never more than a moment away; once that stopped, a mirror drawn at the wrong size simply stayed that way until something else disturbed it.
+
 ### Added
 - Mirroring can be switched off and back on from the keybind overlay, by clicking the switch beside the title or pressing `m` while the overlay is open. Off means the machine behaves as though no host were configured: every mirror pane closes, the discovery feeds stop and the shared connections are let go, so it is the honest way to take a machine out of the fleet for a moment rather than a way of hiding rows. The answer is kept with the session, so a deploy's live handoff does not quietly put it back. The key is only live while the overlay is open and only on a machine with `[[remote.spaces]]` configured, so it costs no global binding.
 

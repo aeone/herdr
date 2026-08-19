@@ -264,6 +264,12 @@ impl App {
             self.next_mirror_stream_poll = now + crate::app::MIRROR_STREAM_POLL_INTERVAL;
         }
 
+        // Not on the poll's clock: a mirror is drawn at whatever size its host
+        // was last told, so a pane that has just been activated or resized has
+        // to say so now rather than in five seconds.
+        #[cfg(unix)]
+        self.refresh_mirror_stream_sizes();
+
         if self
             .config_diagnostic_deadline
             .is_some_and(|deadline| now >= deadline)

@@ -2000,6 +2000,20 @@ impl AppState {
         self.sidebar_mark_colors[level.slot()].unwrap_or(self.palette.overlay0)
     }
 
+    /// The content size a pane is actually drawn at, in columns and rows.
+    ///
+    /// Only the workspace on screen is laid out, so this answers for its panes
+    /// and nothing else. It is the inner rect, which is what the pane's own
+    /// terminal is resized to -- the outer one counts the border and would send
+    /// anyone rendering from it a screen two columns too wide.
+    pub(crate) fn laid_out_pane_size(&self, pane_id: crate::layout::PaneId) -> Option<(u16, u16)> {
+        self.view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .map(|info| (info.inner_rect.width.max(1), info.inner_rect.height.max(1)))
+    }
+
     pub fn estimate_pane_size(&self) -> (u16, u16) {
         if let Some(info) = self.view.pane_infos.first() {
             (info.rect.height, info.rect.width)
