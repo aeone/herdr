@@ -1101,13 +1101,51 @@ impl App {
                 terminal_id,
                 &remote_herdr,
             ) {
-                Ok(control) => {
+                Ok(mut control) => {
                     tracing::info!(target, terminal_id, "claimed a mirrored terminal");
+                    // A control connection is an attach, and a host sizes a
+                    // terminal to its attach client -- so claiming one would
+                    // otherwise resize it to whatever pty that ssh happened to
+                    // get, undoing the size the mirror pane actually needs. The
+                    // first thing it says is how big the pane is.
+                    if let Some((rows, cols)) = self.mirror_pane_size_for(target, terminal_id) {
+                        let size = crate::pane::StreamedPaneRequest::Resize {
+                            rows,
+                            cols,
+                            cell_width_px: 0,
+                            cell_height_px: 0,
+                        };
+                        if let Err(err) = control.send(terminal_id, &size) {
+                            tracing::warn!(target, terminal_id, %err, "could not size a claimed mirror");
+                        }
+                    }
                     self.mirror_controls.insert(target.to_owned(), control);
                 }
                 Err(err) => {
                     tracing::warn!(target, %err, "could not open a writable mirror connection");
                     return;
+                }
+            }
+        }
+        // Moving the claim to another pane attaches to it, and that sizes it
+        // too, so the new pane's size goes first for the same reason the first
+        // claim's did.
+        let moving = self
+            .mirror_controls
+            .get(target)
+            .is_some_and(|control| control.controlling() != terminal_id);
+        if moving {
+            if let Some((rows, cols)) = self.mirror_pane_size_for(target, terminal_id) {
+                let size = crate::pane::StreamedPaneRequest::Resize {
+                    rows,
+                    cols,
+                    cell_width_px: 0,
+                    cell_height_px: 0,
+                };
+                if let Some(control) = self.mirror_controls.get_mut(target) {
+                    if let Err(err) = control.send(terminal_id, &size) {
+                        tracing::warn!(target, terminal_id, %err, "could not size a claimed mirror");
+                    }
                 }
             }
         }
@@ -1439,6 +1477,17 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    /// The size of the pane a host's terminal is mirrored into, found by the
+    /// name that host knows it by.
+    fn mirror_pane_size_for(&self, target: &str, remote_terminal: &str) -> Option<(u16, u16)> {
+        let workspace = self.state.workspaces.iter().find(|workspace| {
+            workspace.remote_mirror.as_ref().is_some_and(|mirror| {
+                mirror.target == target && mirror.remote_terminal == remote_terminal
+            })
+        })?;
+        self.mirror_pane_size(workspace)
     }
 
     /// The size of the local terminal a mirror's frames are written into.
@@ -1923,6 +1972,44 @@ mod tests {
             MirrorLayoutStamp {
                 sizes: vec![(50, 120)],
             }
+        );
+    }
+
+    /// A control connection is an attach, and a host sizes a terminal to its
+    /// attach client. So claiming a mirror to type into it resized the terminal
+    /// to whatever pty that ssh happened to get -- a 70 row pane typed into
+    /// became a 40 row terminal on the other machine, which is the size the
+    /// watching path had just been fixed to get right.
+    #[tokio::test]
+    async fn claiming_a_mirror_to_type_into_it_tells_the_host_how_big_the_pane_is() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces.clear();
+        let mirrored = mirror("workbox", "workbox\u{1f}w1\u{1f}term-1", "remote");
+        let terminal_id = mirrored
+            .terminal_id(mirrored.root_pane)
+            .expect("a mirror pane has a terminal")
+            .clone();
+        let remote_terminal = mirrored
+            .remote_mirror
+            .as_ref()
+            .expect("a mirror")
+            .remote_terminal
+            .clone();
+        app.state.workspaces.push(mirrored);
+        app.terminal_runtimes.insert(
+            terminal_id,
+            crate::terminal::TerminalRuntime::test_with_scrollback_bytes(100, 70, 1 << 16, b""),
+        );
+
+        assert_eq!(
+            app.mirror_pane_size_for("workbox", &remote_terminal),
+            Some((70, 100)),
+            "the size sent on claiming is the size of the pane being typed into"
+        );
+        assert_eq!(
+            app.mirror_pane_size_for("workbox", "some-other-terminal"),
+            None,
+            "and nothing is claimed for a terminal this host does not mirror"
         );
     }
 

@@ -336,6 +336,11 @@ impl MirrorControl {
         })
     }
 
+    /// The terminal this connection currently holds.
+    pub(crate) fn controlling(&self) -> &str {
+        &self.controlling
+    }
+
     /// Sends one request, moving the claim first if it is for another terminal.
     pub(crate) fn send(
         &mut self,
