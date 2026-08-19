@@ -493,6 +493,21 @@ fn spawn_windows_client_accept_thread(
     });
 }
 
+/// One observed terminal as a render pass sees it: which terminal, the target
+/// the watcher named it by, the size to draw it at, and how far it had got when
+/// we last drew it.
+type ObservedPlan = (String, String, (u16, u16), Option<u64>);
+
+/// What one pass made of an observed terminal.
+enum ObservedRender {
+    /// The terminal is no longer here.
+    Gone,
+    /// Unmoved since we last rendered it, so there is nothing to do.
+    Unchanged,
+    /// Rendered, tagged with how far the terminal had got.
+    Frame(u64, FrameData),
+}
+
 impl HeadlessServer {
     /// Creates and starts the headless server.
     ///
@@ -1872,6 +1887,7 @@ impl HeadlessServer {
                 terminal_id,
                 size: (target.cols.max(1), target.rows.max(1)),
                 render_state: crate::server::clients::ClientRenderState::new(encoding),
+                last_output_seq: None,
             });
         }
 
@@ -3977,7 +3993,7 @@ impl HeadlessServer {
         let Some(client) = self.clients.get(&client_id) else {
             return (false, false);
         };
-        let plan: Vec<(String, String, (u16, u16))> = client
+        let plan: Vec<ObservedPlan> = client
             .observed
             .iter()
             .map(|observed| {
@@ -3985,6 +4001,7 @@ impl HeadlessServer {
                     observed.terminal_id.clone(),
                     observed.target.clone(),
                     observed.size,
+                    observed.last_output_seq,
                 )
             })
             .collect();
@@ -3995,18 +4012,29 @@ impl HeadlessServer {
         // Render before touching the client again: the runtimes and the client
         // map are both on `self`, and a terminal that has gone is reported once
         // and dropped rather than taking the rest of the connection with it.
-        let mut rendered: Vec<Option<FrameData>> = Vec::with_capacity(plan.len());
-        for (terminal_id, _, (cols, rows)) in &plan {
+        let mut rendered: Vec<ObservedRender> = Vec::with_capacity(plan.len());
+        for (terminal_id, _, (cols, rows), last_seq) in &plan {
+            let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) else {
+                rendered.push(ObservedRender::Gone);
+                continue;
+            };
+            // A terminal nobody has typed into and which has printed nothing is
+            // the same terminal it was a sixtieth of a second ago. Rendering it
+            // again to find that out cost one machine three quarters of a core
+            // -- and the person using it a visibly slower keyboard.
+            let seq = runtime.output_seq();
+            if *last_seq == Some(seq) {
+                rendered.push(ObservedRender::Unchanged);
+                continue;
+            }
             let area = Rect::new(0, 0, (*cols).max(1), (*rows).max(1));
-            rendered.push(
-                self.runtime_for_terminal_id_string(terminal_id)
-                    .map(|runtime| {
-                        let (buffer, cursor) =
-                            crate::server::render_stream::render_terminal_virtual(runtime, area);
-                        let hyperlinks = runtime.visible_hyperlinks(area);
-                        FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks)
-                    }),
-            );
+            let (buffer, cursor) =
+                crate::server::render_stream::render_terminal_virtual(runtime, area);
+            let hyperlinks = runtime.visible_hyperlinks(area);
+            rendered.push(ObservedRender::Frame(
+                seq,
+                FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
+            ));
         }
 
         let Some(client) = self.clients.get_mut(&client_id) else {
@@ -4024,14 +4052,21 @@ impl HeadlessServer {
             let Some(observed) = client.observed.get_mut(index) else {
                 break;
             };
-            let Some(frame) = frame else {
-                ended.push(ServerMessage::ObservedTerminalEnded {
-                    terminal_id: observed.terminal_id.clone(),
-                    target: observed.target.clone(),
-                    reason: Some("terminal is gone".to_owned()),
-                });
-                client.observed.remove(index);
-                continue;
+            let (seq, frame) = match frame {
+                ObservedRender::Gone => {
+                    ended.push(ServerMessage::ObservedTerminalEnded {
+                        terminal_id: observed.terminal_id.clone(),
+                        target: observed.target.clone(),
+                        reason: Some("terminal is gone".to_owned()),
+                    });
+                    client.observed.remove(index);
+                    continue;
+                }
+                ObservedRender::Unchanged => {
+                    index += 1;
+                    continue;
+                }
+                ObservedRender::Frame(seq, frame) => (seq, frame),
             };
             index += 1;
 
@@ -4039,6 +4074,9 @@ impl HeadlessServer {
             // the bytes into a terminal of its own rather than onto the host
             // screen the kitty cache is keyed to.
             let Some(prepared) = observed.render_state.prepare_frame(frame) else {
+                // Rendered and found identical: remember how far we got, or we
+                // would render it again on the very next pass.
+                observed.last_output_seq = Some(seq);
                 continue;
             };
             let ServerMessage::Terminal(terminal_frame) = prepared.message().clone() else {
@@ -4067,8 +4105,10 @@ impl HeadlessServer {
             {
                 Ok(()) => {
                     // Commit only on send: an uncommitted baseline re-encodes
-                    // the same diff next tick rather than losing it.
+                    // the same diff next tick rather than losing it. The same
+                    // goes for how far we have rendered.
                     observed.render_state.commit_sent_frame(prepared);
+                    observed.last_output_seq = Some(seq);
                     sent_any = true;
                 }
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -5943,6 +5983,85 @@ next_tab = ""
             ];
             expected.sort();
             assert_eq!(sizes, expected);
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
+    /// A watcher renders in the host's own render loop, sixty times a second,
+    /// so rendering every watched terminal each pass was three quarters of a
+    /// core spent proving nothing had changed -- and a slower keyboard for
+    /// whoever was using the machine.
+    #[test]
+    fn a_watched_terminal_that_has_not_moved_is_not_rendered_again() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (writer, _control_rx, render_rx) = test_client_writer_with_render_capacity(8);
+            assert!(server.handle_server_event(ServerEvent::ClientConnected {
+                client_id: 7,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: None,
+                direct_attach_requested: true,
+                writer,
+            }));
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 40,
+                        rows: 10,
+                    }],
+                })
+            );
+
+            server.render_and_stream();
+            let first = std::iter::from_fn(|| render_rx.try_recv().ok()).count();
+            assert!(first > 0, "the first look should send a frame");
+            let seq_after_first = server
+                .clients
+                .get(&7)
+                .and_then(|client| client.observed.first())
+                .and_then(|observed| observed.last_output_seq);
+            assert!(
+                seq_after_first.is_some(),
+                "and should remember how far the terminal had got"
+            );
+
+            // Nothing typed, nothing printed.
+            server.render_and_stream();
+            assert_eq!(
+                std::iter::from_fn(|| render_rx.try_recv().ok()).count(),
+                0,
+                "an unmoved terminal should send nothing"
+            );
+            assert_eq!(
+                server
+                    .clients
+                    .get(&7)
+                    .and_then(|client| client.observed.first())
+                    .and_then(|observed| observed.last_output_seq),
+                seq_after_first,
+                "and should not have been rendered again"
+            );
+
+            // Something printed: it is rendered and sent again.
+            if let Some(runtime) = server.app.terminal_runtimes.get(&terminal_id) {
+                runtime.test_process_pty_bytes(b"hello from the host");
+            }
+            server.render_and_stream();
+            assert!(
+                server
+                    .clients
+                    .get(&7)
+                    .and_then(|client| client.observed.first())
+                    .and_then(|observed| observed.last_output_seq)
+                    > seq_after_first,
+                "a terminal that moved should be rendered again"
+            );
 
             shutdown_test_runtimes(server);
         });

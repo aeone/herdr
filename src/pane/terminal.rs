@@ -171,11 +171,32 @@ pub(crate) struct GhosttyPaneCore {
 
 pub(crate) struct PaneTerminal {
     pub(crate) ghostty: GhosttyPaneTerminal,
+    /// Bumped whenever this terminal's screen could have changed.
+    ///
+    /// Someone watching this terminal from another machine renders it in their
+    /// own render loop, which runs whenever anything on this machine moves. For
+    /// a watcher that is a whole render of every terminal they watch, sixty
+    /// times a second, almost all of it thrown away by the diff that follows.
+    /// Comparing this first is what lets an unchanged terminal cost nothing.
+    output_seq: std::sync::atomic::AtomicU64,
 }
 
 impl PaneTerminal {
     pub(crate) fn new(ghostty: GhosttyPaneTerminal) -> Self {
-        Self { ghostty }
+        Self {
+            ghostty,
+            output_seq: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Where this terminal's screen has got to, for anyone rendering it.
+    pub(crate) fn output_seq(&self) -> u64 {
+        self.output_seq.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn mark_screen_moved(&self) {
+        self.output_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn process_pty_bytes(
@@ -185,8 +206,13 @@ impl PaneTerminal {
         bytes: &[u8],
         response_writer: &mpsc::Sender<Bytes>,
     ) -> ProcessBytesResult {
-        self.ghostty
-            .process_pty_bytes(pane_id, shell_pid, bytes, response_writer)
+        let result = self
+            .ghostty
+            .process_pty_bytes(pane_id, shell_pid, bytes, response_writer);
+        if result.request_render {
+            self.mark_screen_moved();
+        }
+        result
     }
 
     pub fn resize(
@@ -196,23 +222,28 @@ impl PaneTerminal {
         cell_width_px: u32,
         cell_height_px: u32,
     ) -> Vec<Bytes> {
+        self.mark_screen_moved();
         self.ghostty
             .resize(rows, cols, cell_width_px, cell_height_px)
     }
 
     pub fn scroll_up(&self, lines: usize) {
+        self.mark_screen_moved();
         self.ghostty.scroll_up(lines);
     }
 
     pub fn scroll_down(&self, lines: usize) {
+        self.mark_screen_moved();
         self.ghostty.scroll_down(lines);
     }
 
     pub fn scroll_reset(&self) {
+        self.mark_screen_moved();
         self.ghostty.scroll_reset();
     }
 
     pub fn set_scroll_offset_from_bottom(&self, lines: usize) {
+        self.mark_screen_moved();
         self.ghostty.set_scroll_offset_from_bottom(lines);
     }
 

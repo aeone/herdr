@@ -199,6 +199,11 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    /// Where this terminal's screen has got to, for anyone rendering it.
+    pub fn output_seq(&self) -> u64 {
+        self.0.output_seq()
+    }
+
     /// Applies a frame from the host holding this terminal, returning false if
     /// this terminal is not a streamed one.
     pub fn apply_streamed_bytes(&self, bytes: &[u8]) -> bool {

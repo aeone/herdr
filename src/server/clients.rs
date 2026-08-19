@@ -34,6 +34,9 @@ pub(crate) struct ObservedTerminal {
     pub(crate) size: (u16, u16),
     /// Render baseline for this terminal alone.
     pub(crate) render_state: ClientRenderState,
+    /// Where this terminal's screen had got to when we last rendered it for
+    /// this watcher, so a terminal that has not moved is not rendered again.
+    pub(crate) last_output_seq: Option<u64>,
 }
 
 pub(crate) type RenderTarget = (

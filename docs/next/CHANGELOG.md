@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- A terminal someone is watching from another machine is only rendered again once it has moved. A watcher's frames are produced inside the host's own render loop, which runs up to sixty times a second whenever anything on that machine changes, and every watched terminal was being rendered on every pass — the diff that followed threw almost all of it away. Measured on a machine with sixteen watched agent panes: the server fell from **101% of a core to 25%** when its one watcher was cut, and that quarter-core is what it now costs to keep the watcher. The visible symptom was a slower keyboard in every pane, mirrored or not, because input waits behind rendering.
+
 - A mirror going no longer moves the person using the machine. Closing a workspace leaves the active one following the selection, which is what someone closing the space they are in wants and the opposite of what a mirror disappearing should do: the focus left the pane being typed in and landed in whichever space had taken the mirror's place.
 
 - A mirror keeps one identity however many hosts it is passed through. It was keyed on the host that reported it, so the same agent reached through two hosts was a different mirror from the same agent reached directly -- and handing off an intermediate host re-keyed everything behind it, since every workspace id that host reports changes. Two machines mirroring each other ended up showing each other their own panes, frozen on an old status with a mangled screen, once the chain was two hops deep.

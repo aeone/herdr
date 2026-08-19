@@ -2054,6 +2054,11 @@ impl PaneRuntime {
         true
     }
 
+    /// Where this pane's screen has got to, for anyone rendering it from afar.
+    pub fn output_seq(&self) -> u64 {
+        self.terminal.output_seq()
+    }
+
     /// Whether this pane is fed by another host rather than a process here.
     #[cfg(test)]
     pub fn is_streamed(&self) -> bool {
