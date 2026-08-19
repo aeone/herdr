@@ -371,6 +371,12 @@ impl MirrorControl {
                 "cell_width_px": cell_width_px,
                 "cell_height_px": cell_height_px,
             }),
+            crate::pane::StreamedPaneRequest::Scroll { up, lines } => serde_json::json!({
+                "type": "terminal.scroll",
+                "direction": if *up { "up" } else { "down" },
+                "lines": (*lines).max(1),
+                "source": "wheel",
+            }),
         }
         .to_string();
         stdin.write_all(line.as_bytes())?;

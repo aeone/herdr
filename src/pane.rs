@@ -1020,6 +1020,14 @@ pub enum StreamedPaneRequest {
         cell_width_px: u32,
         cell_height_px: u32,
     },
+    /// Scrollback belongs to the host: a mirror is fed rendered screens, so
+    /// nothing ever rolls off into a scrollback of its own and there is nothing
+    /// here to scroll. The host is asked to move its viewport instead, and the
+    /// frame that follows is what the mirror shows.
+    Scroll {
+        up: bool,
+        lines: u16,
+    },
 }
 
 enum PaneRuntimeIo {
@@ -1170,7 +1178,9 @@ impl PaneRuntimeIo {
                 .await
                 .map_err(|err| match err.0 {
                     StreamedPaneRequest::Input(bytes) => mpsc::error::SendError(bytes),
-                    StreamedPaneRequest::Resize { .. } => mpsc::error::SendError(Bytes::new()),
+                    StreamedPaneRequest::Resize { .. } | StreamedPaneRequest::Scroll { .. } => {
+                        mpsc::error::SendError(Bytes::new())
+                    }
                 }),
             #[cfg(test)]
             PaneRuntimeIo::TestChannel { sender, .. } => sender.send(bytes).await,
@@ -2653,12 +2663,34 @@ impl PaneRuntime {
 
     /// Scroll up by N lines (into scrollback history).
     pub fn scroll_up(&self, lines: usize) {
+        if self.ask_host_to_scroll(true, lines) {
+            return;
+        }
         self.terminal.scroll_up(lines);
     }
 
     /// Scroll down by N lines (toward live output).
     pub fn scroll_down(&self, lines: usize) {
+        if self.ask_host_to_scroll(false, lines) {
+            return;
+        }
         self.terminal.scroll_down(lines);
+    }
+
+    /// Asks the host to move a mirrored terminal's viewport, if this is one.
+    ///
+    /// Returns whether it was asked. A mirror has no scrollback of its own --
+    /// it is fed rendered screens, so nothing rolls off into one -- and
+    /// scrolling the local copy moves a viewport with nothing behind it.
+    fn ask_host_to_scroll(&self, up: bool, lines: usize) -> bool {
+        let PaneRuntimeIo::Streamed { requests } = &self.io else {
+            return false;
+        };
+        let lines = lines.clamp(1, u16::MAX as usize) as u16;
+        // Dropped rather than queued when the connection is behind: a scroll
+        // nobody saw is better than one that arrives after several more.
+        let _ = requests.try_send(StreamedPaneRequest::Scroll { up, lines });
+        true
     }
 
     /// Reset scroll to live view (offset = 0).
@@ -3138,6 +3170,58 @@ mod tests {
                 cell_width_px: 0,
                 cell_height_px: 0,
             }
+        );
+    }
+
+    /// Scrollback belongs to the host. A mirror is fed rendered screens, so
+    /// nothing ever rolls off into a scrollback of its own -- scrolling the
+    /// local copy moved a viewport with nothing behind it, which is why mirrors
+    /// could not be scrolled at all once they stopped being repainted
+    /// constantly.
+    #[tokio::test]
+    async fn scrolling_a_streamed_pane_asks_the_host_to_move_its_viewport() {
+        let (runtime, mut requests) = streamed_test_runtime(40, 8);
+
+        runtime.scroll_up(3);
+        assert_eq!(
+            requests.try_recv().expect("a request should be queued"),
+            StreamedPaneRequest::Scroll { up: true, lines: 3 }
+        );
+
+        runtime.scroll_down(1);
+        assert_eq!(
+            requests.try_recv().expect("a request should be queued"),
+            StreamedPaneRequest::Scroll {
+                up: false,
+                lines: 1,
+            }
+        );
+    }
+
+    /// And a pane with a terminal of its own still scrolls its own scrollback,
+    /// with nothing asked of anyone.
+    #[tokio::test]
+    async fn scrolling_a_local_pane_stays_local() {
+        let runtime = PaneRuntime::test_with_scrollback_bytes(
+            20,
+            4,
+            1 << 16,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\n",
+        );
+
+        let before = runtime
+            .scroll_metrics()
+            .expect("a pane with scrollback has metrics")
+            .offset_from_bottom;
+        runtime.scroll_up(2);
+        let after = runtime
+            .scroll_metrics()
+            .expect("a pane with scrollback has metrics")
+            .offset_from_bottom;
+
+        assert!(
+            after > before,
+            "a local pane should move its own viewport: {before} -> {after}"
         );
     }
 
