@@ -2033,12 +2033,24 @@ impl AppState {
         self.sidebar_mark_colors[level.slot()].unwrap_or(self.palette.overlay0)
     }
 
+    /// A size for a pane that has not been laid out yet.
+    ///
+    /// Falls back to the whole terminal area before 80x24, because this is what
+    /// a mirror pane is created at and a mirror asks its host to render at the
+    /// size of the pane it lands in. Guessing 80x24 on a machine whose panes
+    /// are 70 rows tall meant a mirror rebuilt by a handoff briefly asked its
+    /// host for 24 rows -- and a host does what it is asked, so real terminals
+    /// on the other machine were shrunk and their output reflowed before the
+    /// pane was laid out and the guess corrected.
     pub fn estimate_pane_size(&self) -> (u16, u16) {
         if let Some(info) = self.view.pane_infos.first() {
-            (info.rect.height, info.rect.width)
-        } else {
-            (24, 80)
+            return (info.rect.height, info.rect.width);
         }
+        let area = self.view.terminal_area;
+        if area.height > 0 && area.width > 0 {
+            return (area.height, area.width);
+        }
+        (24, 80)
     }
 
     /// Returns true when the given (workspace, tab, pane) refers to the
@@ -2674,6 +2686,34 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    /// A mirror pane is created at this size and asks its host to render at it,
+    /// and a host does what it is asked. Guessing 80x24 on a machine whose panes
+    /// are 70 rows tall shrank real terminals on the other machine every time a
+    /// handoff rebuilt the mirrors.
+    #[test]
+    fn a_pane_not_laid_out_yet_is_guessed_at_the_screen_rather_than_eighty_by_twenty_four() {
+        let mut state = AppState::test_new();
+
+        // Nothing rendered at all: the last resort is still a sane terminal.
+        assert_eq!(state.estimate_pane_size(), (24, 80));
+
+        // Once the screen is known, that is the better guess -- a mirror about
+        // to be created will be shown somewhere on it.
+        state.view.terminal_area = Rect::new(0, 0, 120, 70);
+        assert_eq!(state.estimate_pane_size(), (70, 120));
+
+        // And a pane that has actually been laid out beats both.
+        state.view.pane_infos = vec![crate::layout::PaneInfo {
+            id: crate::layout::PaneId::from_raw(1),
+            rect: Rect::new(0, 0, 60, 30),
+            inner_rect: Rect::new(1, 1, 58, 28),
+            scrollbar_rect: None,
+            borders: ratatui::widgets::Borders::ALL,
+            is_focused: true,
+        }];
+        assert_eq!(state.estimate_pane_size(), (30, 60));
+    }
 
     /// One press still gives the loudest mark, as it did before levels; the
     /// rest of the cycle steps down and then off, and the entry leaves the map
