@@ -385,7 +385,12 @@ impl App {
             self.stop_unconfigured_remote_space_workers();
             self.close_mirrors_for_unconfigured_hosts();
             self.mirror_streams.clear();
+            self.mirror_controls.clear();
             self.mirror_remote_herdr.clear();
+            self.mirror_stream_retry.clear();
+            // What a host can do is a fact about that host, so
+            // `mirror_multiplex_unsupported` is left alone: switching back on
+            // should not make us re-probe a build we already know is too old.
             self.state.remote_offline_hosts.clear();
         }
         true
@@ -1703,6 +1708,7 @@ mod tests {
             "every mirror pane should have been closed"
         );
         assert!(app.mirror_streams.is_empty());
+        assert!(app.mirror_controls.is_empty());
         assert!(app.mirror_remote_herdr.is_empty());
         assert!(
             app.state.remote_offline_hosts.is_empty(),

@@ -27,7 +27,11 @@ impl App {
         #[cfg(unix)]
         {
             let wanted = !self.state.mirrors_enabled;
-            self.set_mirrors_enabled(wanted);
+            if self.set_mirrors_enabled(wanted) {
+                // The answer is kept with the session, so a live handoff does
+                // not quietly put mirroring back.
+                self.state.mark_session_dirty();
+            }
         }
     }
 
