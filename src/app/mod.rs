@@ -736,6 +736,9 @@ impl App {
             sidebar_agents: config.ui.sidebar.agents.clone(),
             sidebar_spaces: config.ui.sidebar.spaces.clone(),
             remote_keep_offline_mirrors: config.remote.keep_offline_mirrors,
+            mirrors_enabled: true,
+            // Mirroring is a unix feature, so nothing to switch elsewhere.
+            mirror_hosts_configured: cfg!(unix) && !config.remote.spaces.is_empty(),
             next_agent_state_change_seq: 0,
             mouse_capture: config.ui.mouse_capture,
             copy_on_select: config.ui.copy_on_select,
@@ -973,6 +976,7 @@ impl App {
         app.state.space_marks = snapshot.space_marks.clone();
         app.state.agent_marks = snapshot.agent_marks.clone();
         app.state.keep_offline_mirrors = snapshot.keep_offline_mirrors;
+        app.state.mirrors_enabled = snapshot.mirrors_enabled.unwrap_or(true);
         app.state.hide_spaces_in_agents = snapshot.hide_spaces_in_agents;
         app.state.mode = if app.state.active.is_some() {
             state::Mode::Terminal
@@ -1596,6 +1600,7 @@ impl App {
                 self.state.sidebar_agents = config.ui.sidebar.agents.clone();
                 self.state.sidebar_spaces = config.ui.sidebar.spaces.clone();
                 self.state.remote_keep_offline_mirrors = config.remote.keep_offline_mirrors;
+                self.state.mirror_hosts_configured = cfg!(unix) && !config.remote.spaces.is_empty();
                 #[cfg(unix)]
                 {
                     self.multiplexed_mirrors = config.remote.multiplexed_mirrors;
@@ -1931,7 +1936,11 @@ impl App {
                 self.handle_context_menu_key_via_api(key_event);
             }
             Mode::KeybindHelp => {
-                input::handle_keybind_help_key(&mut self.state, key_event);
+                if self.state.keybind_help_mirrors_key(key_event) {
+                    self.toggle_mirrors_from_overlay();
+                } else {
+                    input::handle_keybind_help_key(&mut self.state, key_event);
+                }
             }
             Mode::GlobalMenu => {
                 input::handle_global_menu_key(&mut self.state, key_event);

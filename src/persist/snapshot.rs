@@ -42,6 +42,11 @@ pub struct SessionSnapshot {
         skip_serializing_if = "Option::is_none"
     )]
     pub keep_offline_mirrors: Option<bool>,
+    /// Whether the session mirrors its configured hosts at all. Absent means a
+    /// session written before the switch existed, which mirrored, so it reads
+    /// back on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirrors_enabled: Option<bool>,
     /// Whether the Space list hides spaces the Agent panel already lists, once
     /// the user has answered. Absent means the config value still decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -58,6 +63,7 @@ pub struct SessionMarks {
     pub space_marks: HashMap<String, crate::app::MarkLevel>,
     pub agent_marks: HashMap<u32, crate::app::MarkLevel>,
     pub keep_offline_mirrors: Option<bool>,
+    pub mirrors_enabled: Option<bool>,
     pub hide_spaces_in_agents: Option<bool>,
 }
 
@@ -245,6 +251,8 @@ struct RawSessionSnapshot {
     #[serde(default, rename = "offline_mirrors_kept")]
     keep_offline_mirrors: Option<bool>,
     #[serde(default)]
+    mirrors_enabled: Option<bool>,
+    #[serde(default)]
     hide_spaces_in_agents: Option<bool>,
 }
 
@@ -267,6 +275,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         space_marks: merge_legacy_marks(raw.space_marks, raw.highlighted_workspaces),
         agent_marks: merge_legacy_marks(raw.agent_marks, raw.highlighted_panes),
         keep_offline_mirrors: raw.keep_offline_mirrors,
+        mirrors_enabled: raw.mirrors_enabled,
         hide_spaces_in_agents: raw.hide_spaces_in_agents,
     })
 }
@@ -369,6 +378,7 @@ pub fn capture(
         space_marks: marks.space_marks,
         agent_marks: marks.agent_marks,
         keep_offline_mirrors: marks.keep_offline_mirrors,
+        mirrors_enabled: marks.mirrors_enabled,
         hide_spaces_in_agents: marks.hide_spaces_in_agents,
     }
 }
@@ -709,6 +719,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
+            mirrors_enabled: None,
             hide_spaces_in_agents: None,
         }
     }
@@ -820,6 +831,7 @@ mod tests {
                 space_marks: state.space_marks.clone(),
                 agent_marks: state.agent_marks.clone(),
                 keep_offline_mirrors: state.keep_offline_mirrors,
+                mirrors_enabled: Some(state.mirrors_enabled),
                 hide_spaces_in_agents: state.hide_spaces_in_agents,
             },
         )
@@ -889,6 +901,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
+            mirrors_enabled: None,
             hide_spaces_in_agents: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -985,6 +998,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
+            mirrors_enabled: None,
             hide_spaces_in_agents: None,
         };
 
@@ -1622,6 +1636,7 @@ mod tests {
             space_marks: Default::default(),
             agent_marks: Default::default(),
             keep_offline_mirrors: None,
+            mirrors_enabled: None,
             hide_spaces_in_agents: None,
         };
 

@@ -19,6 +19,18 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
 }
 
 impl App {
+    /// Flips mirroring from the keybind overlay, by click or by key. Turning it
+    /// off closes every mirror and stops dialling out; turning it back on
+    /// repopulates from the configured hosts. Windows has no mirroring, so
+    /// there the switch is never offered and this does nothing.
+    pub(crate) fn toggle_mirrors_from_overlay(&mut self) {
+        #[cfg(unix)]
+        {
+            let wanted = !self.state.mirrors_enabled;
+            self.set_mirrors_enabled(wanted);
+        }
+    }
+
     pub(super) fn handle_overlay_mouse(&mut self, mouse: MouseEvent) -> bool {
         if self.state.mode == Mode::ReleaseNotes {
             match mouse.kind {
@@ -198,6 +210,13 @@ impl App {
                         .keybind_help_close_button_at(mouse.column, mouse.row) =>
                 {
                     leave_modal(&mut self.state);
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .state
+                        .keybind_help_mirrors_button_at(mouse.column, mouse.row) =>
+                {
+                    self.toggle_mirrors_from_overlay();
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
                     if let Some(target) = self
@@ -626,6 +645,36 @@ impl AppState {
         }
         let button =
             crate::ui::release_notes_close_button_rect(Rect::new(inner.x, inner.y, inner.width, 1));
+        col >= button.x
+            && col < button.x + button.width
+            && row >= button.y
+            && row < button.y + button.height
+    }
+
+    /// Whether a key pressed with the keybind overlay open means the mirrors
+    /// switch. It answers to a bare letter, which is safe here and nowhere
+    /// else: the overlay takes no text, and it is the only mode this is asked
+    /// in. A machine with nothing to mirror does not claim the key.
+    pub(crate) fn keybind_help_mirrors_key(&self, key: crossterm::event::KeyEvent) -> bool {
+        self.mirror_hosts_configured
+            && key.modifiers.is_empty()
+            && key.code == crossterm::event::KeyCode::Char(crate::ui::MIRRORS_TOGGLE_KEY)
+    }
+
+    pub(crate) fn keybind_help_mirrors_button_at(&self, col: u16, row: u16) -> bool {
+        if !self.mirror_hosts_configured {
+            return false;
+        }
+        let Some(inner) = self.keybind_help_modal_inner() else {
+            return false;
+        };
+        if inner.height < 4 || inner.width < 12 {
+            return false;
+        }
+        let button = crate::ui::keybind_help_mirrors_button_rect(
+            Rect::new(inner.x, inner.y + 1, inner.width, 1),
+            self.mirrors_enabled,
+        );
         col >= button.x
             && col < button.x + button.width
             && row >= button.y

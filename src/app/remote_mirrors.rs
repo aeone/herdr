@@ -358,8 +358,37 @@ pub(crate) struct RemoteSpaceWorker {
 }
 
 impl App {
-    fn config_remote_spaces(&self) -> Vec<RemoteSpaceConfig> {
+    /// The hosts this session mirrors: what config lists, unless mirroring has
+    /// been switched off, in which case there are none. Every path that looks
+    /// at configured hosts goes through here, so turning mirroring off is the
+    /// same event as config dropping every host -- workers stop, mirrors close,
+    /// and nothing dials out again until it is turned back on.
+    pub(super) fn config_remote_spaces(&self) -> Vec<RemoteSpaceConfig> {
+        if !self.state.mirrors_enabled {
+            return Vec::new();
+        }
         self.remote_spaces.clone()
+    }
+
+    /// Switches mirroring on or off for this session, tearing down or
+    /// restarting everything the change implies. Returns whether it moved.
+    pub(crate) fn set_mirrors_enabled(&mut self, enabled: bool) -> bool {
+        if self.state.mirrors_enabled == enabled {
+            return false;
+        }
+        self.state.mirrors_enabled = enabled;
+        if enabled {
+            // Workers are started by the ordinary poll pass; bring it forward
+            // so the sidebar repopulates now rather than at the next tick.
+            self.start_remote_space_polls_if_due(std::time::Instant::now());
+        } else {
+            self.stop_unconfigured_remote_space_workers();
+            self.close_mirrors_for_unconfigured_hosts();
+            self.mirror_streams.clear();
+            self.mirror_remote_herdr.clear();
+            self.state.remote_offline_hosts.clear();
+        }
+        true
     }
 
     /// Ensures one long-lived worker is running per configured host.
@@ -394,11 +423,9 @@ impl App {
 
     /// Stops worker threads whose host is no longer configured.
     pub(crate) fn stop_unconfigured_remote_space_workers(&mut self) {
+        let configured = self.config_remote_spaces();
         self.remote_space_workers.retain(|target, worker| {
-            let keep = self
-                .remote_spaces
-                .iter()
-                .any(|space| space.target == *target);
+            let keep = configured.iter().any(|space| space.target == *target);
             if !keep {
                 worker
                     .stop
@@ -408,10 +435,12 @@ impl App {
         });
     }
 
-    /// Drops mirrors for hosts that config no longer lists. Called on config
-    /// reload, where the removed host will never be polled again.
+    /// Drops mirrors for hosts this session no longer mirrors. Called on config
+    /// reload and when mirroring is switched off, where the dropped host will
+    /// never be polled again.
     pub(crate) fn close_mirrors_for_unconfigured_hosts(&mut self) {
-        let stale = mirrors_for_unconfigured_hosts(&self.state.workspaces, &self.remote_spaces);
+        let stale =
+            mirrors_for_unconfigured_hosts(&self.state.workspaces, &self.config_remote_spaces());
         if stale.is_empty() {
             return;
         }
@@ -1637,6 +1666,64 @@ mod tests {
         assert_eq!(selected_id, Some(mine_id), "and still the selected one");
     }
 
+    /// Switching mirroring off has to be the same event as config dropping
+    /// every host: the panes go, the workers stop and the shared connections
+    /// are let go. A switch that only stopped new mirrors appearing would leave
+    /// the sidebar full of panes nothing was updating.
+    #[tokio::test]
+    async fn switching_mirroring_off_closes_what_is_mirrored_and_stops_dialling() {
+        let mut app = crate::app::tests::test_app();
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+        app.state.workspaces.push(local("mine"));
+        app.state
+            .workspaces
+            .push(mirror("workbox", "workbox\u{1f}w1\u{1f}term-1", "remote"));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.mirror_streams.insert(
+            "workbox".to_string(),
+            crate::remote::mirror_stream::MirrorStream::test_without_a_host(1, None),
+        );
+        app.mirror_remote_herdr
+            .insert("workbox".to_string(), "/usr/bin/herdr".to_string());
+        app.state.remote_offline_hosts.insert("workbox".to_string());
+
+        assert!(app.set_mirrors_enabled(false), "the switch should move");
+
+        assert!(
+            app.config_remote_spaces().is_empty(),
+            "no host is mirrored while the switch is off"
+        );
+        assert!(
+            app.state
+                .workspaces
+                .iter()
+                .all(|workspace| workspace.remote_mirror.is_none()),
+            "every mirror pane should have been closed"
+        );
+        assert!(app.mirror_streams.is_empty());
+        assert!(app.mirror_remote_herdr.is_empty());
+        assert!(
+            app.state.remote_offline_hosts.is_empty(),
+            "a host that is not mirrored is not offline, it is simply not asked"
+        );
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "the local space is left alone"
+        );
+
+        // And the host is configured again the moment it is switched back on,
+        // so the ordinary poll pass repopulates without a config reload.
+        assert!(app.set_mirrors_enabled(true));
+        assert_eq!(app.config_remote_spaces().len(), 1);
+        assert!(
+            !app.set_mirrors_enabled(true),
+            "switching it to where it already is changes nothing"
+        );
+    }
+
     /// Mirrors reconcile on what a host pushes. A host that has stopped pushing
     /// still needs its connection dialled, or its mirrors stay blank for as
     /// long as it stays quiet -- which is how one wedged feed blanked a whole
@@ -1881,7 +1968,8 @@ mod tests {
         let space = space("workbox");
         let pane = agent_pane("w1", "api", "term-1");
 
-        let record = remote_mirror_record(&space, &pane.mirror_key(&space.target), &pane.terminal_id);
+        let record =
+            remote_mirror_record(&space, &pane.mirror_key(&space.target), &pane.terminal_id);
 
         assert_eq!(record.key, pane.mirror_key("workbox"));
         assert_eq!(record.target, "workbox");
@@ -2020,7 +2108,8 @@ mod tests {
         let pane = mirrored_pane("w2", "notes", "term-hop", "ryielle@valkyrie", "term-far");
         let origin = pane.origin.clone().expect("origin");
 
-        let record = remote_mirror_record_for_origin(&space("pandora"), "k", "term-remote", &origin);
+        let record =
+            remote_mirror_record_for_origin(&space("pandora"), "k", "term-remote", &origin);
 
         assert_eq!(record.host_label, "valkyrie");
         // Left unset so the sidebar derives its usual per-host colour.

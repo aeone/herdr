@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Mirroring can be switched off and back on from the keybind overlay, by clicking the switch beside the title or pressing `m` while the overlay is open. Off means the machine behaves as though no host were configured: every mirror pane closes, the discovery feeds stop and the shared connections are let go, so it is the honest way to take a machine out of the fleet for a moment rather than a way of hiding rows. The answer is kept with the session, so a deploy's live handoff does not quietly put it back. The key is only live while the overlay is open and only on a machine with `[[remote.spaces]]` configured, so it costs no global binding.
+
 - A terminal someone is watching from another machine is only rendered again once it has moved. A watcher's frames are produced inside the host's own render loop, which runs up to sixty times a second whenever anything on that machine changes, and every watched terminal was being rendered on every pass — the diff that followed threw almost all of it away. Measured on a machine with sixteen watched agent panes: the server fell from **101% of a core to 25%** when its one watcher was cut, and that quarter-core is what it now costs to keep the watcher. The visible symptom was a slower keyboard in every pane, mirrored or not, because input waits behind rendering.
 
 - A mirror going no longer moves the person using the machine. Closing a workspace leaves the active one following the selection, which is what someone closing the space they are in wants and the opposite of what a mirror disappearing should do: the focus left the pane being typed in and landed in whichever space had taken the mirror's place.

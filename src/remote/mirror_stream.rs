@@ -430,7 +430,9 @@ mod tests {
         assert!(complaint_means_too_old(Some(
             "usage: herdr terminal session observe <target> [--cols N] [--rows N]"
         )));
-        assert!(complaint_means_too_old(Some("unexpected argument: observe-many")));
+        assert!(complaint_means_too_old(Some(
+            "unexpected argument: observe-many"
+        )));
 
         assert!(!complaint_means_too_old(None));
         assert!(!complaint_means_too_old(Some(

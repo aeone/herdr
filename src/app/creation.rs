@@ -109,7 +109,7 @@ impl App {
             enabled: true,
             target: None,
         }];
-        for space in &self.remote_spaces {
+        for space in &self.config_remote_spaces() {
             // Our own session is not mirrored, so it cannot take a space either.
             // Same guard as the poller: only a local entry can name us.
             if space.is_local() && super::remote_mirrors::mirrors_own_session(space) {

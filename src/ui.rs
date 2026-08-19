@@ -85,7 +85,7 @@ pub(crate) use self::{
     },
 };
 pub(crate) use self::{
-    keybind_help::keybind_help_lines,
+    keybind_help::{keybind_help_lines, keybind_help_mirrors_button_rect, MIRRORS_TOGGLE_KEY},
     mobile::{
         mobile_switcher_areas, mobile_switcher_max_scroll, mobile_switcher_target_at,
         mobile_switcher_workspace_doc_range, MobileSwitcherTarget,
@@ -651,6 +651,87 @@ mod tests {
 
         assert!(screen.contains("new workspace"), "{screen}");
         assert!(screen.contains("project"), "{screen}");
+    }
+
+    /// The mirrors switch is only useful if the place it is drawn is the place
+    /// a click lands, so this asserts the drawing and the hit test against each
+    /// other rather than against a hardcoded column.
+    #[test]
+    fn the_keybind_overlay_draws_a_mirrors_switch_where_a_click_finds_it() {
+        let area = Rect::new(0, 0, 100, 30);
+
+        for (enabled, label) in [(true, "mirrors on"), (false, "mirrors off")] {
+            let mut app = crate::app::state::AppState::test_new();
+            app.mode = Mode::KeybindHelp;
+            app.mirror_hosts_configured = true;
+            app.mirrors_enabled = enabled;
+
+            compute_view(&mut app, area);
+            let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+            terminal.draw(|frame| render(&app, frame)).unwrap();
+
+            let rows = (0..area.height)
+                .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
+                .collect::<Vec<_>>();
+            let screen = rows.join("\n");
+            let (row, col) = rows
+                .iter()
+                .enumerate()
+                .find_map(|(row, text)| text.find(label).map(|col| (row as u16, col as u16)))
+                .unwrap_or_else(|| panic!("{label} should be on screen\n{screen}"));
+
+            assert!(
+                app.keybind_help_mirrors_button_at(col, row),
+                "a click on {label} at {col},{row} should reach the switch\n{screen}"
+            );
+            assert!(
+                !app.keybind_help_mirrors_button_at(col, row.saturating_sub(1)),
+                "the row above is the close button, not the switch\n{screen}"
+            );
+        }
+    }
+
+    /// A machine with no host to mirror is not offered the switch, and does not
+    /// take the key it answers to either.
+    #[test]
+    fn the_keybind_overlay_offers_no_mirrors_switch_without_a_host_to_mirror() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.mode = Mode::KeybindHelp;
+        app.mirror_hosts_configured = false;
+
+        let area = Rect::new(0, 0, 100, 30);
+        compute_view(&mut app, area);
+        let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let screen = (0..area.height)
+            .map(|row| buffer_row_text(terminal.backend().buffer(), area, row))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!screen.contains("mirrors on"), "{screen}");
+        assert!(!screen.contains("mirrors off"), "{screen}");
+        assert!(
+            !app.keybind_help_mirrors_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(MIRRORS_TOGGLE_KEY),
+                crossterm::event::KeyModifiers::NONE,
+            ))
+        );
+
+        app.mirror_hosts_configured = true;
+        assert!(
+            app.keybind_help_mirrors_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(MIRRORS_TOGGLE_KEY),
+                crossterm::event::KeyModifiers::NONE,
+            ))
+        );
+        // The overlay scrolls with j/k, so the switch must not answer to a key
+        // the overlay already uses, nor to the letter with a modifier held.
+        assert!(
+            !app.keybind_help_mirrors_key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char(MIRRORS_TOGGLE_KEY),
+                crossterm::event::KeyModifiers::CONTROL,
+            ))
+        );
     }
 
     /// The headings must actually reach the screen, not just the layout.

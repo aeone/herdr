@@ -1263,6 +1263,7 @@ impl HeadlessServer {
                 space_marks: self.app.state.space_marks.clone(),
                 agent_marks: self.app.state.agent_marks.clone(),
                 keep_offline_mirrors: self.app.state.keep_offline_mirrors,
+                mirrors_enabled: Some(self.app.state.mirrors_enabled),
                 hide_spaces_in_agents: self.app.state.hide_spaces_in_agents,
             },
         );
@@ -6092,7 +6093,10 @@ next_tab = ""
                 })
             );
 
-            let client = server.clients.get(&7).expect("the connection should be live");
+            let client = server
+                .clients
+                .get(&7)
+                .expect("the connection should be live");
             assert!(
                 matches!(client.mode, ClientConnectionMode::TerminalObserveMany),
                 "the watcher should still be watching"

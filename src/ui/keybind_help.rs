@@ -11,8 +11,8 @@ use ratatui::{
 use super::release_notes::release_notes_close_button_rect;
 use super::scrollbar::{release_notes_scrollbar_rect, render_scrollbar};
 use super::widgets::{
-    modal_stack_areas, panel_contrast_fg, render_action_button, render_modal_header,
-    render_modal_shell,
+    action_button_width, modal_stack_areas, panel_contrast_fg, render_action_button,
+    render_modal_header, render_modal_shell,
 };
 use crate::app::AppState;
 
@@ -297,6 +297,24 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
             .style(Style::default().fg(app.palette.overlay1)),
         header_rows[1],
     );
+    if app.mirror_hosts_configured {
+        let label = mirrors_button_label(app.mirrors_enabled);
+        let background = if app.mirrors_enabled {
+            app.palette.green
+        } else {
+            app.palette.overlay0
+        };
+        render_action_button(
+            frame,
+            keybind_help_mirrors_button_rect(header_rows[1], app.mirrors_enabled),
+            Some(&MIRRORS_TOGGLE_KEY.to_string()),
+            label,
+            Style::default()
+                .fg(panel_contrast_fg(&app.palette))
+                .bg(background)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
 
     let body_area = stack.content;
     let metrics = crate::pane::ScrollMetrics {
@@ -338,17 +356,61 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         );
     }
 
+    let mut footer = vec![
+        Span::styled(" scroll ", Style::default().fg(app.palette.overlay0)),
+        Span::styled("wheel ↑↓", Style::default().fg(app.palette.text)),
+        Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
+        Span::styled("jump", Style::default().fg(app.palette.overlay0)),
+        Span::styled(" pgup / pgdn ", Style::default().fg(app.palette.text)),
+        Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
+        Span::styled("close", Style::default().fg(app.palette.overlay0)),
+        Span::styled(" esc / enter ", Style::default().fg(app.palette.text)),
+    ];
+    if app.mirror_hosts_configured {
+        footer.push(Span::styled(
+            "  ·  ",
+            Style::default().fg(app.palette.overlay0),
+        ));
+        footer.push(Span::styled(
+            "mirrors",
+            Style::default().fg(app.palette.overlay0),
+        ));
+        footer.push(Span::styled(
+            format!(" {MIRRORS_TOGGLE_KEY} "),
+            Style::default().fg(app.palette.text),
+        ));
+    }
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(" scroll ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("wheel ↑↓", Style::default().fg(app.palette.text)),
-            Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("jump", Style::default().fg(app.palette.overlay0)),
-            Span::styled(" pgup / pgdn ", Style::default().fg(app.palette.text)),
-            Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
-            Span::styled("close", Style::default().fg(app.palette.overlay0)),
-            Span::styled(" esc / enter ", Style::default().fg(app.palette.text)),
-        ])),
+        Paragraph::new(Line::from(footer)),
         stack.footer.unwrap_or_default(),
     );
+}
+
+/// The key that flips mirroring while the keybind overlay is open, and only
+/// while it is open. Shown on the button so the two ways in read as one
+/// control.
+pub(crate) const MIRRORS_TOGGLE_KEY: char = 'm';
+
+fn mirrors_button_label(enabled: bool) -> &'static str {
+    if enabled {
+        "mirrors on"
+    } else {
+        "mirrors off"
+    }
+}
+
+/// Where the mirrors switch sits: the right of the overlay's description row,
+/// under the close button. Width follows the label, which changes with the
+/// state, so the hit test must be told which label is showing.
+pub(crate) fn keybind_help_mirrors_button_rect(area: Rect, enabled: bool) -> Rect {
+    let width = action_button_width(
+        Some(&MIRRORS_TOGGLE_KEY.to_string()),
+        mirrors_button_label(enabled),
+    );
+    Rect::new(
+        area.x + area.width.saturating_sub(width),
+        area.y,
+        width.min(area.width),
+        1,
+    )
 }

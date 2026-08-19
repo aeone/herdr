@@ -1682,6 +1682,15 @@ pub struct AppState {
     pub keep_offline_mirrors: Option<bool>,
     /// `remote.keep_offline_mirrors`, refreshed on every config reload.
     pub remote_keep_offline_mirrors: bool,
+    /// Whether configured hosts are mirrored at all. Off means the session
+    /// behaves as though no host were configured: no feed, no mirror panes.
+    /// Kept in state rather than config so it can be turned off from the
+    /// keybind overlay and put back without editing a file.
+    pub mirrors_enabled: bool,
+    /// Whether `remote.spaces` names any host, refreshed on every config
+    /// reload. The switch above is only worth offering on a machine that has
+    /// something to mirror.
+    pub mirror_hosts_configured: bool,
     /// Keys typed so far in jump mode, empty on entry. Only meaningful while
     /// the mode is `Jump`; the labels themselves are derived, not stored.
     pub jump_input: String,
@@ -2137,6 +2146,8 @@ impl AppState {
             agent_marks: std::collections::HashMap::new(),
             keep_offline_mirrors: None,
             remote_keep_offline_mirrors: false,
+            mirrors_enabled: true,
+            mirror_hosts_configured: false,
             jump_input: String::new(),
             hide_spaces_in_agents: None,
             created_remote_workspaces: std::collections::HashMap::new(),

@@ -770,6 +770,7 @@ fn capture_snapshot(state: &AppState) -> crate::persist::SessionSnapshot {
             space_marks: state.space_marks.clone(),
             agent_marks: state.agent_marks.clone(),
             keep_offline_mirrors: state.keep_offline_mirrors,
+            mirrors_enabled: Some(state.mirrors_enabled),
             hide_spaces_in_agents: state.hide_spaces_in_agents,
         },
     )
