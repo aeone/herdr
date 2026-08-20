@@ -36,6 +36,8 @@ pub struct AgentDetection {
     /// activity is the normal working authority; this remains diagnostic
     /// metadata and for non-PTY fallback paths.
     pub visible_working: bool,
+    /// Background shells the agent left running, when a rule reported them.
+    pub background_shells: Option<u32>,
 }
 
 /// Which agent we detected running in a pane.
@@ -264,6 +266,7 @@ pub fn detect_agent_with_osc(
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            background_shells: None,
         };
     };
     manifest::detect_with_osc(
@@ -286,6 +289,58 @@ pub fn should_skip_state_update(agent: Option<Agent>, screen_content: &str) -> b
 /// remote's reported state and ignores screen-detecting the ssh session, which
 /// cannot read the remote's OSC title and misreads the streamed screen.
 pub(crate) const REMOTE_MIRROR_HOOK_SOURCE: &str = "herdr:remote-mirror";
+
+/// Rules this machine reads as "background shells", not as "working".
+///
+/// Set from config on every reload. A static because detection runs on the pane
+/// threads, far from anything holding a config, and the answer is the same for
+/// every pane on the machine.
+static SHELL_RULES: std::sync::RwLock<Vec<String>> = std::sync::RwLock::new(Vec::new());
+
+/// Replaces the set of rules treated as a background-shell signal.
+pub fn set_shell_rules(rules: &[String]) {
+    if let Ok(mut current) = SHELL_RULES.write() {
+        current.clear();
+        current.extend(rules.iter().map(|rule| rule.trim().to_ascii_lowercase()));
+    }
+}
+
+/// Whether `rule_id` on `agent` is a background-shell signal rather than a state.
+///
+/// Accepts the rule id on its own as well as `<agent>:<rule_id>`, since a rule
+/// id is only unique within its manifest and naming the agent is what makes the
+/// setting readable.
+pub(crate) fn is_shell_rule(agent: Agent, rule_id: &str) -> bool {
+    let Ok(rules) = SHELL_RULES.read() else {
+        return false;
+    };
+    if rules.is_empty() {
+        return false;
+    }
+    let rule_id = rule_id.to_ascii_lowercase();
+    let qualified = format!("{}:{rule_id}", agent_label(agent).to_ascii_lowercase());
+    rules
+        .iter()
+        .any(|configured| *configured == rule_id || *configured == qualified)
+}
+
+/// How many background shells a matched shell-rule's region is reporting.
+///
+/// Deliberately not upstream's regex. That one requires whitespace after the
+/// count before the line ends, so it stops matching the moment the agent's
+/// trailing hint disappears -- which is exactly what happens when someone types
+/// a character. The state flipped on a keystroke because of it. This one ends
+/// the match at the word.
+pub(crate) fn background_shell_count(region: &str) -> Option<u32> {
+    static COUNT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = COUNT.get_or_init(|| {
+        regex::Regex::new(r"(?:^|\xb7)\s*([1-9]\d*)\s+shells?\b")
+            .expect("the background shell count pattern should compile")
+    });
+    re.captures(region)
+        .and_then(|caps| caps.get(1))
+        .and_then(|count| count.as_str().parse().ok())
+}
 
 pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> bool {
     // The mirror source is authoritative for whatever agent the remote named.

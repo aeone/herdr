@@ -488,6 +488,7 @@ fn status_name(state: crate::detect::AgentState, seen: bool) -> String {
         AgentStatus::Working => "working",
         AgentStatus::Blocked => "blocked",
         AgentStatus::Done => "done",
+        AgentStatus::Shells => "shells",
         AgentStatus::Unknown => "unknown",
     }
     .to_string()

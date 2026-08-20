@@ -301,6 +301,7 @@ pub struct Config {
     pub advanced: AdvancedConfig,
     pub experimental: ExperimentalConfig,
     pub remote: RemoteConfig,
+    pub agent_detection: AgentDetectionConfig,
 }
 
 #[derive(Debug)]
@@ -991,6 +992,27 @@ impl RemoteSpaceConfig {
     pub fn is_local(&self) -> bool {
         self.target == LOCAL_REMOTE_SPACE_TARGET
     }
+}
+
+/// Adjustments to agent screen detection, for rules this machine disagrees with.
+///
+/// Detection manifests are fetched from upstream and take precedence over the
+/// bundled ones, so a rule that is wrong for this fleet cannot be fixed by
+/// editing the copy in the repository. This is the lever that does not fight
+/// the update: everything else about the manifest keeps tracking upstream.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AgentDetectionConfig {
+    /// Rules whose match means "this agent left background shells running"
+    /// rather than "this agent is working", written `<agent>:<rule_id>`.
+    ///
+    /// Such a rule stops deciding the state -- the next rule down does, which
+    /// for a finished agent is the one that sees its prompt box -- and instead
+    /// records how many shells are running, which is reported as the `shells`
+    /// status. Without this an agent that left a shell behind is held at
+    /// `working` for as long as the shell lives, and never reaches `done`.
+    /// Default: empty.
+    pub shell_rules: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]

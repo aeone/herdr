@@ -146,6 +146,21 @@ pub enum AgentStatus {
     Working,
     Blocked,
     Done,
+    /// The agent's turn is over, but it left background shells running.
+    ///
+    /// Distinct from `Done` because the pane is not finished with the machine,
+    /// and distinct from `Working` because the agent is not doing anything and
+    /// is waiting for input. Reporting it as working is what kept a pane that
+    /// had plainly stopped out of `Done` for as long as a shell it started --
+    /// or a shell that hung, which is the usual case -- was still alive.
+    Shells,
+    /// Also the landing place for a status this build does not know.
+    ///
+    /// A newer host reports statuses an older one has never heard of, and the
+    /// fleet runs mixed builds as a matter of course. Without this an unknown
+    /// string fails the whole snapshot rather than the one field, which on this
+    /// path takes every mirror of that host with it.
+    #[serde(other)]
     Unknown,
 }
 

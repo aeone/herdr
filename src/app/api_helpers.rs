@@ -99,6 +99,9 @@ pub(crate) fn pane_state_and_seen(
     match status {
         AgentStatus::Idle => (AgentState::Idle, true),
         AgentStatus::Done => (AgentState::Idle, false),
+        // The turn is over, so the state is idle; that shells are still running
+        // is a fact about the pane carried beside the state, not in it.
+        AgentStatus::Shells => (AgentState::Idle, true),
         AgentStatus::Working => (AgentState::Working, true),
         AgentStatus::Blocked => (AgentState::Blocked, true),
         AgentStatus::Unknown => (AgentState::Unknown, true),

@@ -34,6 +34,7 @@ pub struct DetectionExplain {
     pub visible_idle: bool,
     pub visible_blocker: bool,
     pub visible_working: bool,
+    pub background_shells: Option<u32>,
     pub skip_state_update: bool,
     pub skipped_update_reason: Option<String>,
     pub fallback_reason: Option<String>,
@@ -367,6 +368,7 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            background_shells: None,
             skip_state_update: false,
             skipped_update_reason: None,
             fallback_reason: Some("unknown_agent".to_string()),
@@ -407,6 +409,7 @@ impl DetectionExplain {
             visible_idle: self.visible_idle,
             visible_blocker: self.visible_blocker,
             visible_working: self.visible_working,
+            background_shells: self.background_shells,
         }
     }
 }
@@ -419,6 +422,7 @@ fn evaluate_loaded_manifest(
 ) -> DetectionExplain {
     let mut matched: Option<(&ManifestRule, String)> = None;
     let mut evaluated_rules = Vec::new();
+    let mut background_shells = None;
 
     for (rule, compiled_rule) in loaded.manifest.rules.iter().zip(&loaded.compiled_rules) {
         let region_text = region(input, &rule.region);
@@ -435,6 +439,24 @@ fn evaluate_loaded_manifest(
             matched: matched_rule,
         });
 
+        // A rule this machine reads as a background-shell signal says nothing
+        // about what the agent is doing, so it never decides the state: the next
+        // rule down does, which for an agent whose turn is over is the one that
+        // can see its prompt box.
+        //
+        // Its region is read for the count whether or not the rule itself
+        // matched, because upstream's pattern is not reliable enough to gate on
+        // -- it needs whitespace after the count before the line ends, so it
+        // stops matching as soon as the agent drops its trailing hint, which is
+        // what typing a character does. Gating on the match would drop the count
+        // at exactly that moment.
+        if crate::detect::is_shell_rule(agent, &rule.id) {
+            if let Some(count) = crate::detect::background_shell_count(region_text) {
+                background_shells = Some(count);
+            }
+            continue;
+        }
+
         if !matched_rule {
             continue;
         }
@@ -446,11 +468,13 @@ fn evaluate_loaded_manifest(
     }
 
     let Some((rule, region_name)) = matched else {
-        return fallback_explain(
+        let mut explain = fallback_explain(
             Some(agent),
             Some((loaded, evaluated_rules)),
             include_update_status,
         );
+        explain.background_shells = background_shells;
+        return explain;
     };
 
     let state = rule
@@ -479,6 +503,7 @@ fn evaluate_loaded_manifest(
         visible_idle: rule.visible_idle && state == AgentState::Idle,
         visible_blocker: rule.visible_blocker && state == AgentState::Blocked,
         visible_working: rule.visible_working && state == AgentState::Working,
+        background_shells,
         skip_state_update: rule.skip_state_update,
         skipped_update_reason,
         fallback_reason: None,
@@ -536,6 +561,7 @@ fn fallback_explain(
         visible_idle: false,
         visible_blocker: false,
         visible_working: false,
+        background_shells: None,
         skip_state_update: false,
         skipped_update_reason: None,
         fallback_reason: known_agent.then(|| DEFAULT_KNOWN_AGENT_IDLE_FALLBACK.to_string()),

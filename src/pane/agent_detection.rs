@@ -309,6 +309,8 @@ pub(super) fn detection_update_for_publish_with_osc(
             visible_idle: true,
             visible_blocker: false,
             visible_working: false,
+            // The process is gone, so whatever it started went with it.
+            background_shells: None,
         });
     }
 
@@ -346,6 +348,7 @@ mod tests {
             visible_idle: state == AgentState::Idle,
             visible_blocker: false,
             visible_working: state == AgentState::Working,
+            background_shells: None,
         }
     }
 

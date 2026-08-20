@@ -779,6 +779,86 @@ line_regex = ['^\s*❯']
     });
 }
 
+/// The fix for the turn above: told that the shells rule is a shell signal, the
+/// same finished screen reads idle and carries the count instead.
+///
+/// Both screens here are the real ones, captured from a pane on lute that had
+/// been pinned to working for a day by a hung `ssh` it had started. The second
+/// is that screen after a single keystroke, which is what made the state flip:
+/// Claude only shows its trailing hint while the prompt box is empty, so typing
+/// removes it, and upstream's pattern requires whitespace after the count
+/// before the line ends. Both must now give the same answer -- the shells did
+/// not change because someone touched the keyboard.
+#[test]
+fn a_rule_read_as_a_shell_signal_stops_deciding_the_state_and_reports_the_count() {
+    with_manifest_dirs("shell-signal", || {
+        write_local_codex(&rules_manifest(
+            r#"
+[[rules]]
+id = "background_shell_working"
+state = "working"
+priority = 965
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+line_regex = ['^\s*[⏸⏵].*·\s+[1-9]\d*\s+shells?\s+(?:·|$)']
+
+[[rules]]
+id = "live_prompt_box"
+state = "idle"
+priority = 950
+region = "prompt_box_body"
+visible_idle = true
+line_regex = ['^\s*❯']
+"#,
+        ));
+
+        let waiting = concat!(
+            "───────────────────────────────────────\n",
+            "❯\n",
+            "───────────────────────────────────────\n",
+            "   ryi@lute  ~/lifestream/RG8J-aneath  main ?\n",
+            "  ⏵⏵ auto mode on · 1 shell · ← for agents\n",
+        );
+        // The same screen one keystroke later: the hint is gone.
+        let typed = concat!(
+            "───────────────────────────────────────\n",
+            "❯ k\n",
+            "───────────────────────────────────────\n",
+            "   ryi@lute  ~/lifestream/RG8J-aneath  main ?\n",
+            "  ⏵⏵ auto mode on · 1 shell\n",
+        );
+
+        // Without the setting, the shells rule decides -- and disagrees with
+        // itself across a keystroke, which is the fault as shipped.
+        crate::detect::set_shell_rules(&[]);
+        assert_eq!(explain(Agent::Codex, waiting).state, AgentState::Working);
+        assert_eq!(explain(Agent::Codex, typed).state, AgentState::Idle);
+
+        crate::detect::set_shell_rules(&["codex:background_shell_working".to_string()]);
+
+        for (name, screen) in [("waiting", waiting), ("typed", typed)] {
+            let result = explain(Agent::Codex, screen);
+            assert_eq!(
+                result.state,
+                AgentState::Idle,
+                "{name}: an agent at its prompt is idle whether or not it left shells"
+            );
+            assert_eq!(
+                result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+                Some("live_prompt_box"),
+                "{name}: the shells rule should not be deciding the state"
+            );
+            assert_eq!(
+                result.background_shells,
+                Some(1),
+                "{name}: the count survives, and does not depend on the hint"
+            );
+        }
+
+        crate::detect::set_shell_rules(&[]);
+    });
+}
+
 // --- Codex OSC rules ---
 
 #[test]
