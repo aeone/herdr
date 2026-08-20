@@ -334,12 +334,16 @@ pub(crate) struct MirrorControl {
 }
 
 impl MirrorControl {
+    /// `size` is the pane the claim is landing in, as `(rows, cols)`. It is
+    /// carried in the command because attaching is what sizes the terminal:
+    /// correcting it afterwards is a visible shrink and back again.
     pub(crate) fn spawn(
         space: &RemoteSpaceConfig,
         terminal_id: &str,
         remote_herdr: &str,
+        size: Option<(u16, u16)>,
     ) -> std::io::Result<Self> {
-        let argv = crate::remote::spaces::control_argv(space, terminal_id, remote_herdr);
+        let argv = crate::remote::spaces::control_argv(space, terminal_id, remote_herdr, size);
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| std::io::Error::other("empty control command"))?;

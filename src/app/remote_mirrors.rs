@@ -804,8 +804,16 @@ impl App {
             .unwrap_or_default();
         // Every host we are configured to mirror, so a reflection of one of
         // them can be told from a reflection of somewhere we cannot reach.
+        //
+        // Every configured host, including one switched off: switching a host
+        // off means its panes are not wanted, not that they should start
+        // arriving the long way round. Filtering here took the host out of this
+        // set, so the reflection reaching us through another host stopped being
+        // recognised as its own and was kept -- switching a host off is what
+        // made its panes appear, two hops away and wearing the other machine's
+        // spelling of them.
         let mirrored_hosts: std::collections::HashSet<String> = self
-            .config_remote_spaces()
+            .remote_spaces
             .iter()
             .map(|configured| crate::remote::spaces::MirrorOrigin::host_key(&configured.target))
             .collect();
@@ -1135,8 +1143,13 @@ impl App {
             tracing::debug!(target, "no host binary known yet; dropping mirror input");
             return false;
         };
-        match crate::remote::mirror_stream::MirrorControl::spawn(&space, terminal_id, &remote_herdr)
-        {
+        let size = self.mirror_pane_size_for(target, terminal_id);
+        match crate::remote::mirror_stream::MirrorControl::spawn(
+            &space,
+            terminal_id,
+            &remote_herdr,
+            size,
+        ) {
             Ok(control) => {
                 tracing::info!(target, terminal_id, "claimed a mirrored terminal");
                 self.mirror_controls.insert(target.to_owned(), control);
@@ -2174,6 +2187,52 @@ mod tests {
         assert!(
             app.mirror_controls.is_empty(),
             "a size on its own should not have opened a writable connection"
+        );
+    }
+
+    /// Switching a host off must not be the thing that makes its panes appear.
+    ///
+    /// The fleet is a star: a leaf is mirrored by the hub, and this machine
+    /// mirrors the hub, so every leaf pane arrives twice -- once straight from
+    /// the leaf and once reflected through the hub. The reflection is dropped
+    /// because the leaf is a host we mirror. Switching the leaf off took it out
+    /// of that set, so the reflection stopped being recognised and came back:
+    /// the same panes, two hops away, under the hub's spelling of them, popping
+    /// in and out with the leaf's own sleep. Off means the machine's panes are
+    /// not wanted, however they get here.
+    #[tokio::test]
+    async fn a_host_switched_off_stays_off_when_its_panes_arrive_through_another() {
+        let mut app = crate::app::tests::test_app();
+        app.remote_spaces = vec![space("hub"), space("leaf")];
+        app.state.workspaces.clear();
+        app.set_host_mirrors_enabled("leaf", false);
+
+        // The hub reports one of its own panes and one it is mirroring for the
+        // leaf, which is what a hub's snapshot looks like.
+        let mut reflected = agent_pane("w9", "leaf work", "term-hop");
+        reflected.origin = Some(crate::remote::spaces::MirrorOrigin {
+            target: "leaf".to_string(),
+            workspace_id: "w9".to_string(),
+            terminal_id: "term-leaf".to_string(),
+            label: Some("lf".to_string()),
+            color: None,
+        });
+        let snapshot = snapshot(vec![agent_pane("w1", "hub work", "term-hub"), reflected]);
+
+        app.reconcile_remote_mirrors(&space("hub"), &snapshot);
+
+        let mirrored: Vec<Option<String>> = app
+            .state
+            .workspaces
+            .iter()
+            .filter_map(|workspace| workspace.remote_mirror.as_ref())
+            .map(|mirror| mirror.origin_target.clone())
+            .collect();
+        assert_eq!(
+            mirrored,
+            vec![None],
+            "only the hub's own pane should be mirrored; the switched-off host's \
+             pane should not arrive through it"
         );
     }
 

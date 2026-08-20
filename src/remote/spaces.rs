@@ -250,19 +250,38 @@ pub(crate) fn control_argv(
     space: &RemoteSpaceConfig,
     terminal_id: &str,
     remote_herdr: &str,
+    size: Option<(u16, u16)>,
 ) -> Vec<String> {
     let mut argv = observe_many_argv(space, remote_herdr);
     let last = argv.len() - 1;
+    // A control connection is an attach, and a host sizes a terminal to its
+    // attach client. Without a size this one claims 120x40 -- so clicking into
+    // a mirror shrank the terminal behind it to that, and only a later resize
+    // put it back. The size the pane is actually drawn at goes in the command
+    // itself, so the terminal is never the wrong size for even a moment.
+    let sized = |subcommand: String| match size {
+        Some((rows, cols)) => format!("{subcommand} --cols {} --rows {}", cols.max(1), rows.max(1)),
+        None => subcommand,
+    };
     if space.is_local() {
         // The local form ends with the subcommand as its own argument.
         argv[last] = "control".to_string();
         argv.push(terminal_id.to_string());
+        if let Some((rows, cols)) = size {
+            argv.push("--cols".to_string());
+            argv.push(cols.max(1).to_string());
+            argv.push("--rows".to_string());
+            argv.push(rows.max(1).to_string());
+        }
         return argv;
     }
     // Over ssh the whole remote command is one argument.
     argv[last] = argv[last].replace(
         "terminal session observe-many",
-        &format!("terminal session control {}", shell_quote(terminal_id)),
+        &sized(format!(
+            "terminal session control {}",
+            shell_quote(terminal_id)
+        )),
     );
     argv
 }
@@ -1533,6 +1552,30 @@ mod tests {
 
     /// One machine, two spellings. Neither is more correct, so the login name
     /// cannot be part of deciding which machine a target names.
+    /// Claiming a mirror is an attach, and a host sizes a terminal to its
+    /// attach client -- so the size has to be in the command that opens it.
+    /// Left out, the control client claims its own default of 120x40, which is
+    /// why clicking into a full-size mirror shrank the terminal behind it and
+    /// only a later resize grew it back.
+    #[test]
+    fn a_claim_carries_the_size_of_the_pane_it_lands_in() {
+        let space = space("workbox");
+
+        let sized = control_argv(&space, "term-1", "/usr/bin/herdr", Some((70, 203)));
+        let command = sized.last().expect("a command");
+        assert!(
+            command.contains("--cols 203") && command.contains("--rows 70"),
+            "the claim should land at the pane's size, but was: {command}"
+        );
+
+        let without_size = control_argv(&space, "term-1", "/usr/bin/herdr", None);
+        let command = without_size.last().expect("a command");
+        assert!(
+            !command.contains("--cols"),
+            "with no size known, nothing is claimed about it: {command}"
+        );
+    }
+
     #[test]
     fn host_key_ignores_the_login_name_and_case() {
         assert_eq!(
