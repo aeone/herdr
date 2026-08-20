@@ -20,6 +20,8 @@ pub struct PaneDetail {
     pub agent: Option<Agent>,
     pub state: AgentState,
     pub seen: bool,
+    /// Background shells this pane's agent left running, if it reported any.
+    pub background_shells: Option<u32>,
     pub last_agent_state_change_seq: Option<u64>,
     pub agent_state_changed_at_ms: Option<u64>,
     pub state_labels: HashMap<String, String>,
@@ -71,6 +73,7 @@ impl Tab {
                     agent_kind_label,
                     agent: terminal.effective_known_agent(),
                     state: terminal.state,
+                    background_shells: terminal.background_shells,
                     seen: pane.seen,
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
                     agent_state_changed_at_ms: terminal.agent_state_changed_at_ms,

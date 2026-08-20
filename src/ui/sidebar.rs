@@ -38,6 +38,8 @@ pub(crate) struct AgentPanelEntry {
     pub agent: Option<crate::detect::Agent>,
     pub state: AgentState,
     pub seen: bool,
+    /// Background shells the agent left running, if it reported any.
+    pub background_shells: Option<u32>,
     pub last_agent_state_change_seq: Option<u64>,
     /// Unix ms of the last agent state change, for idle-age grouping.
     pub agent_state_changed_at_ms: Option<u64>,
@@ -265,6 +267,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
                         state: detail.state,
+                        background_shells: detail.background_shells,
                         seen: detail.seen,
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
                         agent_state_changed_at_ms: detail.agent_state_changed_at_ms,

@@ -66,6 +66,17 @@ pub enum AppEvent {
         process_exited: bool,
         observed_at: Instant,
     },
+    /// A pane's screen reported how many background shells its agent left
+    /// running.
+    ///
+    /// Separate from `StateChanged` because it is not part of the state: an
+    /// agent with shells running has still finished its turn, and conflating
+    /// the two is what kept such a pane out of `done` entirely. Sent only when
+    /// the answer moves.
+    BackgroundShellsReported {
+        pane_id: PaneId,
+        shells: Option<u32>,
+    },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {
         pane_id: PaneId,

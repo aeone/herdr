@@ -2622,6 +2622,10 @@ impl AppState {
                 self.handle_pane_died(pane_id);
                 Vec::new()
             }
+            AppEvent::BackgroundShellsReported { pane_id, shells } => {
+                self.set_background_shells(pane_id, shells);
+                Vec::new()
+            }
             AppEvent::UpdateReady {
                 version,
                 install_command,
@@ -3250,6 +3254,26 @@ impl AppState {
         }
 
         deliveries
+    }
+
+    /// Records how many background shells a pane's agent left running.
+    ///
+    /// Kept on the terminal beside the state rather than in it: the agent has
+    /// finished its turn either way, and the shells only change how that is
+    /// presented.
+    pub(crate) fn set_background_shells(&mut self, pane_id: PaneId, shells: Option<u32>) {
+        let Some(terminal_id) = self
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .find_map(|tab| tab.panes.get(&pane_id))
+            .map(|pane| pane.attached_terminal_id.clone())
+        else {
+            return;
+        };
+        if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
+            terminal.background_shells = shells;
+        }
     }
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {

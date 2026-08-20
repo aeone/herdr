@@ -269,6 +269,7 @@ mod tests {
             agent: Some(crate::detect::Agent::Pi),
             state: AgentState::Working,
             seen: true,
+            background_shells: None,
             last_agent_state_change_seq: None,
             agent_state_changed_at_ms: None,
             state_labels: std::collections::HashMap::new(),

@@ -1152,6 +1152,18 @@
           "description": "While prefix mode is active, temporarily switch the macOS host input source to an ASCII-capable keyboard layout so prefix commands are read as ASCII even when a CJK IME is active, then restore the previous input source when prefix mode exits. macOS only; a no-op elsewhere and a best-effort no-op if the switch fails."
         }
       ]
+    },
+    {
+      "id": "agent_detection",
+      "title": "Agent detection",
+      "keys": [
+        {
+          "key": "agent_detection.shell_rules",
+          "type": "array of strings",
+          "default": "[]",
+          "description": "Detection rules to read as \"this agent left background shells running\" rather than \"this agent is working\", written <agent>:<rule_id> (for example \"claude:background_shell_working\"). Such a rule stops deciding the agent's state, so a finished agent is reported as done rather than held at working for as long as a shell it started stays alive, and the shells are reported as the shells status instead."
+        }
+      ]
     }
   ]
 }

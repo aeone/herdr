@@ -5,7 +5,7 @@ use crate::api::schema::{EventData, EventEnvelope, EventKind};
 use tracing::error;
 
 use super::{
-    api_helpers::{pane_agent_status, tab_attention_priority},
+    api_helpers::{pane_agent_status, pane_agent_status_with_shells, tab_attention_priority},
     App, Mode,
 };
 use crate::{config::NewTerminalCwdConfig, workspace::Workspace};
@@ -586,7 +586,11 @@ impl App {
             terminal_title: terminal.terminal_title.clone(),
             terminal_title_stripped: terminal.terminal_title_stripped(),
             display_agent: presentation.display_agent,
-            agent_status: pane_agent_status(terminal.state, pane.seen),
+            agent_status: pane_agent_status_with_shells(
+                terminal.state,
+                pane.seen,
+                terminal.background_shells,
+            ),
             state_labels: presentation.state_labels,
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),

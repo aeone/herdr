@@ -395,9 +395,11 @@ fn builtin_field_value(
     field: AgentViewBuiltinField,
 ) -> Option<EvalValue> {
     match field {
-        AgentViewBuiltinField::Status => {
-            Some(EvalValue::String(status_name(entry.state, entry.seen)))
-        }
+        AgentViewBuiltinField::Status => Some(EvalValue::String(status_name_with_shells(
+            entry.state,
+            entry.seen,
+            entry.background_shells,
+        ))),
         AgentViewBuiltinField::WorkspaceId => app
             .workspaces
             .get(entry.ws_idx)
@@ -444,38 +446,51 @@ fn sort_value(
         AgentViewSortField::Token { token } => {
             entry.tokens.get(token).cloned().map(EvalValue::String)
         }
-        AgentViewSortField::Builtin(field) => match field {
-            AgentViewBuiltinSortField::WorkspaceOrder => {
-                Some(EvalValue::Number(entry.ws_idx as u64))
+        AgentViewSortField::Builtin(field) => {
+            match field {
+                AgentViewBuiltinSortField::WorkspaceOrder => {
+                    Some(EvalValue::Number(entry.ws_idx as u64))
+                }
+                AgentViewBuiltinSortField::TabOrder => app
+                    .workspaces
+                    .get(entry.ws_idx)
+                    .and_then(|workspace| workspace.public_tab_number(entry.tab_idx))
+                    .map(|number| EvalValue::Number(number as u64)),
+                AgentViewBuiltinSortField::PaneOrder => app
+                    .workspaces
+                    .get(entry.ws_idx)
+                    .and_then(|workspace| workspace.public_pane_number(entry.pane_id))
+                    .map(|number| EvalValue::Number(number as u64)),
+                AgentViewBuiltinSortField::Attention => Some(EvalValue::Number(u64::from(
+                    super::api_helpers::tab_attention_priority(entry.state, entry.seen),
+                ))),
+                AgentViewBuiltinSortField::Status => Some(EvalValue::String(
+                    status_name_with_shells(entry.state, entry.seen, entry.background_shells),
+                )),
+                AgentViewBuiltinSortField::Agent => {
+                    entry.agent_kind_label.clone().map(EvalValue::String)
+                }
+                AgentViewBuiltinSortField::Seen => Some(EvalValue::Bool(entry.seen)),
+                AgentViewBuiltinSortField::StateChangeSeq => {
+                    entry.last_agent_state_change_seq.map(EvalValue::Number)
+                }
             }
-            AgentViewBuiltinSortField::TabOrder => app
-                .workspaces
-                .get(entry.ws_idx)
-                .and_then(|workspace| workspace.public_tab_number(entry.tab_idx))
-                .map(|number| EvalValue::Number(number as u64)),
-            AgentViewBuiltinSortField::PaneOrder => app
-                .workspaces
-                .get(entry.ws_idx)
-                .and_then(|workspace| workspace.public_pane_number(entry.pane_id))
-                .map(|number| EvalValue::Number(number as u64)),
-            AgentViewBuiltinSortField::Attention => Some(EvalValue::Number(u64::from(
-                super::api_helpers::tab_attention_priority(entry.state, entry.seen),
-            ))),
-            AgentViewBuiltinSortField::Status => {
-                Some(EvalValue::String(status_name(entry.state, entry.seen)))
-            }
-            AgentViewBuiltinSortField::Agent => {
-                entry.agent_kind_label.clone().map(EvalValue::String)
-            }
-            AgentViewBuiltinSortField::Seen => Some(EvalValue::Bool(entry.seen)),
-            AgentViewBuiltinSortField::StateChangeSeq => {
-                entry.last_agent_state_change_seq.map(EvalValue::Number)
-            }
-        },
+        }
     }
 }
 
 fn status_name(state: crate::detect::AgentState, seen: bool) -> String {
+    status_name_with_shells(state, seen, None)
+}
+
+fn status_name_with_shells(
+    state: crate::detect::AgentState,
+    seen: bool,
+    shells: Option<u32>,
+) -> String {
+    if matches!(state, crate::detect::AgentState::Idle) && shells.is_some_and(|count| count > 0) {
+        return "shells".to_string();
+    }
     let status = match (state, seen) {
         (crate::detect::AgentState::Idle, false) => AgentStatus::Done,
         (crate::detect::AgentState::Idle, true) => AgentStatus::Idle,
@@ -689,6 +704,7 @@ mod tests {
             agent: None,
             state,
             seen,
+            background_shells: None,
             last_agent_state_change_seq: None,
             agent_state_changed_at_ms: changed_at_ms,
             state_labels: std::collections::HashMap::new(),

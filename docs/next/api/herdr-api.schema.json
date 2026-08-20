@@ -70,14 +70,27 @@
           "type": "string"
         },
         "AgentStatus": {
-          "enum": [
-            "idle",
-            "working",
-            "blocked",
-            "done",
-            "unknown"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "idle",
+                "working",
+                "blocked",
+                "done"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "shells",
+              "description": "The agent's turn is over, but it left background shells running.\n\nDistinct from `Done` because the pane is not finished with the machine,\nand distinct from `Working` because the agent is not doing anything and\nis waiting for input. Reporting it as working is what kept a pane that\nhad plainly stopped out of `Done` for as long as a shell it started --\nor a shell that hung, which is the usual case -- was still alive.",
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "Also the landing place for a status this build does not know.\n\nA newer host reports statuses an older one has never heard of, and the\nfleet runs mixed builds as a matter of course. Without this an unknown\nstring fails the whole snapshot rather than the one field, which on this\npath takes every mirror of that host with it.",
+              "type": "string"
+            }
+          ]
         },
         "EventData": {
           "oneOf": [
@@ -1454,14 +1467,27 @@
           "type": "object"
         },
         "AgentStatus": {
-          "enum": [
-            "idle",
-            "working",
-            "blocked",
-            "done",
-            "unknown"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "idle",
+                "working",
+                "blocked",
+                "done"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "shells",
+              "description": "The agent's turn is over, but it left background shells running.\n\nDistinct from `Done` because the pane is not finished with the machine,\nand distinct from `Working` because the agent is not doing anything and\nis waiting for input. Reporting it as working is what kept a pane that\nhad plainly stopped out of `Done` for as long as a shell it started --\nor a shell that hung, which is the usual case -- was still alive.",
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "Also the landing place for a status this build does not know.\n\nA newer host reports statuses an older one has never heard of, and the\nfleet runs mixed builds as a matter of course. Without this an unknown\nstring fails the whole snapshot rather than the one field, which on this\npath takes every mirror of that host with it.",
+              "type": "string"
+            }
+          ]
         },
         "AgentTarget": {
           "properties": {
@@ -5874,14 +5900,27 @@
     "subscription_event": {
       "$defs": {
         "AgentStatus": {
-          "enum": [
-            "idle",
-            "working",
-            "blocked",
-            "done",
-            "unknown"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "idle",
+                "working",
+                "blocked",
+                "done"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "shells",
+              "description": "The agent's turn is over, but it left background shells running.\n\nDistinct from `Done` because the pane is not finished with the machine,\nand distinct from `Working` because the agent is not doing anything and\nis waiting for input. Reporting it as working is what kept a pane that\nhad plainly stopped out of `Done` for as long as a shell it started --\nor a shell that hung, which is the usual case -- was still alive.",
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "Also the landing place for a status this build does not know.\n\nA newer host reports statuses an older one has never heard of, and the\nfleet runs mixed builds as a matter of course. Without this an unknown\nstring fails the whole snapshot rather than the one field, which on this\npath takes every mirror of that host with it.",
+              "type": "string"
+            }
+          ]
         },
         "PaneAgentStatusChangedEvent": {
           "properties": {
@@ -6304,14 +6343,27 @@
           "type": "string"
         },
         "AgentStatus": {
-          "enum": [
-            "idle",
-            "working",
-            "blocked",
-            "done",
-            "unknown"
-          ],
-          "type": "string"
+          "oneOf": [
+            {
+              "enum": [
+                "idle",
+                "working",
+                "blocked",
+                "done"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "shells",
+              "description": "The agent's turn is over, but it left background shells running.\n\nDistinct from `Done` because the pane is not finished with the machine,\nand distinct from `Working` because the agent is not doing anything and\nis waiting for input. Reporting it as working is what kept a pane that\nhad plainly stopped out of `Done` for as long as a shell it started --\nor a shell that hung, which is the usual case -- was still alive.",
+              "type": "string"
+            },
+            {
+              "const": "unknown",
+              "description": "Also the landing place for a status this build does not know.\n\nA newer host reports statuses an older one has never heard of, and the\nfleet runs mixed builds as a matter of course. Without this an unknown\nstring fails the whole snapshot rather than the one field, which on this\npath takes every mirror of that host with it.",
+              "type": "string"
+            }
+          ]
         },
         "ClientWindowTitleReason": {
           "enum": [

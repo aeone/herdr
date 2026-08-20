@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Added
+- A `shells` status for an agent whose turn is over but which left background shells running, and `[agent_detection] shell_rules` to produce it. An agent that finishes and leaves a shell behind was held at `working` for as long as that shell lived -- usually indefinitely, since the shell is normally one that hung -- so it never reached `done` at all. The rule responsible only ever decides the outcome once the turn is already over, because the real working signals outrank it, so pinning finished agents is its entire effect. Naming it in `shell_rules` stops it deciding the state and reads its region for a count instead, reported as `shells`. Detection manifests are fetched from upstream and outrank the bundled ones, so this is the lever that does not fight the next update: everything else about the manifest keeps tracking upstream.
+
+- The shell count is read with its own pattern rather than the rule's. Upstream's requires whitespace after the count before the line ends, so it stops matching the moment the agent drops its trailing hint -- which is exactly what typing one character does. That is why such a pane flipped from `working` to `idle` on a keystroke while its shells carried on running, and why the two now agree.
+
+- An unknown agent status from a remote is read as `unknown` rather than failing the parse. The fleet runs mixed builds as a matter of course, and a status one build has never heard of would otherwise take every mirror of that host with it.
+
 ### Fixed
 - Clicking into a mirror no longer shrinks the terminal behind it. Claiming one is an attach, and a host sizes a terminal to its attach client, so a claim that named no size took the control client's own default of 120x40 -- a full-size mirror clicked into became a 120x40 terminal on the other machine, and only a later resize grew it back. The size of the pane the claim is landing in now goes in the command that opens it, so the terminal is never the wrong size for even a moment.
 

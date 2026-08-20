@@ -108,6 +108,23 @@ pub(crate) fn pane_state_and_seen(
     }
 }
 
+/// The status of a pane whose agent left background shells running.
+///
+/// Shells outrank `done` and `idle` because they say more: the turn is over
+/// either way, and what is worth knowing is that the machine is still busy on
+/// this pane's behalf. They never outrank `working` or `blocked`, which are
+/// about the agent itself.
+pub(crate) fn pane_agent_status_with_shells(
+    state: crate::detect::AgentState,
+    seen: bool,
+    shells: Option<u32>,
+) -> crate::api::schema::AgentStatus {
+    if matches!(state, crate::detect::AgentState::Idle) && shells.is_some_and(|count| count > 0) {
+        return crate::api::schema::AgentStatus::Shells;
+    }
+    pane_agent_status(state, seen)
+}
+
 pub(crate) fn pane_agent_status(
     state: crate::detect::AgentState,
     seen: bool,

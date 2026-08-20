@@ -596,6 +596,7 @@ fn spawn_basic_detection_task(
         let mut last_screen_scan_detection_content_seq = None;
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
+        let mut last_background_shells: Option<Option<u32>> = None;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -820,6 +821,15 @@ fn spawn_basic_detection_task(
                 pending_idle.clear();
                 continue;
             };
+            if last_background_shells != Some(screen_detection.background_shells) {
+                last_background_shells = Some(screen_detection.background_shells);
+                let _ = state_events
+                    .send(AppEvent::BackgroundShellsReported {
+                        pane_id,
+                        shells: screen_detection.background_shells,
+                    })
+                    .await;
+            }
             match decide_screen_detection_publish(
                 ScreenDetectionPublishInput {
                     screen_detection,
@@ -2249,6 +2259,7 @@ impl PaneRuntime {
                 let mut last_screen_scan_detection_content_seq = None;
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
+                let mut last_background_shells: Option<Option<u32>> = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2520,6 +2531,15 @@ impl PaneRuntime {
                         pending_idle.clear();
                         continue;
                     };
+                    if last_background_shells != Some(screen_detection.background_shells) {
+                        last_background_shells = Some(screen_detection.background_shells);
+                        let _ = state_events
+                            .send(AppEvent::BackgroundShellsReported {
+                                pane_id,
+                                shells: screen_detection.background_shells,
+                            })
+                            .await;
+                    }
                     match decide_screen_detection_publish(
                         ScreenDetectionPublishInput {
                             screen_detection,
