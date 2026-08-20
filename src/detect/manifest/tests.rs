@@ -697,6 +697,88 @@ fn claude_empty_osc_empty_screen_is_idle_fallback() {
     assert!(!result.visible_idle);
 }
 
+/// A finished turn that left background shells running still reports working.
+///
+/// Reproduces a live fault: `done` is `idle` plus unseen, so an agent that
+/// cannot reach idle can never be reported done. Upstream's remote manifest
+/// gained `background_shell_working` at priority 965, above `live_prompt_box`
+/// at 950, so for as long as any background shell is alive the shells rule wins
+/// and the pane reads working -- however long ago the agent actually stopped.
+///
+/// The two rules are copied verbatim from the manifest in force (claude
+/// 2026.08.19.1); the fork's bundled manifest is 2026.07.13.1 and has neither,
+/// which is why this is written against the rules rather than against
+/// `Agent::Claude`. The screen is the real one, captured from a pane in this
+/// state: a live prompt box above Claude's status line.
+///
+/// Asserts the behaviour as it is today. It is the defect, not the intent --
+/// the last line is what should hold.
+#[test]
+fn a_finished_turn_with_background_shells_still_reads_as_working() {
+    with_manifest_dirs("background-shells", || {
+        write_local_codex(&rules_manifest(
+            r#"
+[[rules]]
+id = "background_shell_working"
+state = "working"
+priority = 965
+region = "bottom_non_empty_lines(5)"
+visible_working = true
+line_regex = ['^\s*[⏸⏵].*·\s+[1-9]\d*\s+shells?\s+(?:·|$)']
+
+[[rules]]
+id = "live_prompt_box"
+state = "idle"
+priority = 950
+region = "prompt_box_body"
+visible_idle = true
+line_regex = ['^\s*❯']
+"#,
+        ));
+
+        // The turn has ended: no spinner line, no working title, just the
+        // prompt box waiting for the next instruction -- and four shells the
+        // agent started and left running.
+        let finished = "\
+───────────────────────────────────────\n\
+❯\n\
+───────────────────────────────────────\n\
+   ryi@pandora  ~/lifestream  ♦ 15:10\n\
+  ⏵⏵ bypass permissions on · 4 shells · ⇐ for agents\n";
+
+        let result = explain(Agent::Codex, finished);
+
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("background_shell_working"),
+            "the shells rule outranks the prompt box, so it decides the state"
+        );
+        assert_eq!(
+            result.state,
+            AgentState::Working,
+            "which is the defect: an agent waiting for input reads as working"
+        );
+
+        // The control: the very same screen with the shells line gone is idle,
+        // which is what pins the shells line as the cause rather than anything
+        // else about a finished turn.
+        let no_shells = finished.replace(" \u{b7} 4 shells \u{b7} ", " \u{b7} ");
+        assert_ne!(no_shells, finished, "the control has to change the screen");
+        let quiet = explain(Agent::Codex, &no_shells);
+        assert_eq!(
+            quiet.state,
+            AgentState::Idle,
+            "with no shells left the same finished turn reads idle, so the \
+             shells line is what holds it working"
+        );
+
+        // What should hold instead: the shells are the agent's leftovers, not
+        // its turn. A pane sitting at the prompt is done, and until it can
+        // reach idle it can never be reported done at all.
+        // assert_eq!(result.state, AgentState::Idle);
+    });
+}
+
 // --- Codex OSC rules ---
 
 #[test]
