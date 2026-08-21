@@ -12,7 +12,7 @@
 use std::time::Duration;
 
 use crate::config::RemoteSpaceConfig;
-use crate::remote::spaces::{attach_argv, mirror_labels, RemoteSpaceSnapshot};
+use crate::remote::spaces::{attach_argv, mirror_labels, RemoteAgentPane, RemoteSpaceSnapshot};
 use crate::workspace::{RemoteMirror, Workspace};
 
 use super::App;
@@ -41,20 +41,22 @@ pub(crate) struct MirrorLayoutStamp {
 // to save nothing that matters.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum MirrorAction {
+    /// A remote space nothing here stands for yet, with the tabs it should open
+    /// holding one per remote pane.
     Create {
-        key: String,
-        /// The terminal id the polled host knows this pane by, which is not the
-        /// key when the pane reached us through another host.
-        remote_terminal: String,
+        space_key: String,
         label: String,
-        argv: Vec<String>,
-        /// Agent the remote reported, passed to the mirror pane as the
-        /// `HERDR_AGENT` hint so local detection can see past the ssh wrapper.
-        agent: Option<String>,
-        /// Set when this pane reached us through another host. The mirror is
-        /// still reconciled against the host we poll, but it is shown under the
-        /// machine actually running it.
-        origin: Option<crate::remote::spaces::MirrorOrigin>,
+        tabs: Vec<MirrorTabSpec>,
+    },
+    /// A pane the host has that this mirrored space has no tab for yet.
+    AddTab {
+        ws_idx: usize,
+        tab: MirrorTabSpec,
+    },
+    /// A tab whose remote pane is gone, while the space it is in remains.
+    CloseTab {
+        ws_idx: usize,
+        tab_idx: usize,
     },
     Rename {
         ws_idx: usize,
@@ -63,6 +65,26 @@ pub(crate) enum MirrorAction {
     Close {
         ws_idx: usize,
     },
+}
+
+/// One tab of a mirrored space, and everything needed to open it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MirrorTabSpec {
+    /// Stable identity of the remote pane, naming the machine running it.
+    pub(crate) key: String,
+    /// The terminal id the polled host knows this pane by, which is not the key
+    /// when the pane reached us through another host.
+    pub(crate) remote_terminal: String,
+    /// What to call the tab.
+    pub(crate) label: Option<String>,
+    pub(crate) argv: Vec<String>,
+    /// Agent the remote reported, passed to the mirror pane as the
+    /// `HERDR_AGENT` hint so local detection can see past the ssh wrapper.
+    pub(crate) agent: Option<String>,
+    /// Set when this pane reached us through another host. The mirror is still
+    /// reconciled against the host we poll, but it is shown under the machine
+    /// actually running it.
+    pub(crate) origin: Option<crate::remote::spaces::MirrorOrigin>,
 }
 
 /// Works out how local mirrors for one host differ from what it reports.
@@ -160,64 +182,116 @@ pub(crate) fn plan_remote_mirrors(
         })
     });
 
-    let labels = mirror_labels(&panes);
-    let desired: Vec<(String, String)> = panes
-        .iter()
-        .zip(labels)
-        .map(|(pane, label)| (pane.mirror_key(&space.target), label))
-        .collect();
+    // One local space per remote space, holding a tab per remote pane. Grouped
+    // in the order the host reported them so the tabs of a space keep the
+    // host's own order rather than whatever the map iterates in.
+    let mut space_order: Vec<String> = Vec::new();
+    let mut by_space: std::collections::HashMap<String, Vec<&RemoteAgentPane>> =
+        std::collections::HashMap::new();
+    for pane in &panes {
+        let space_key = pane.mirror_space_key(&space.target);
+        if !by_space.contains_key(&space_key) {
+            space_order.push(space_key.clone());
+        }
+        by_space.entry(space_key).or_default().push(pane);
+    }
 
-    let mirror_for = |key: &str| {
+    // A space is labelled once, so the ordinals that used to tell one pane of a
+    // space from another are only needed when two *spaces* share a name.
+    let space_labels = {
+        let firsts: Vec<RemoteAgentPane> = space_order
+            .iter()
+            .filter_map(|key| by_space.get(key).and_then(|panes| panes.first()).copied())
+            .cloned()
+            .collect();
+        mirror_labels(&firsts)
+    };
+
+    let mirror_for = |space_key: &str| {
         workspaces.iter().position(|workspace| {
             workspace
                 .remote_mirror
                 .as_ref()
-                .is_some_and(|mirror| mirror.target == space.target && mirror.key == key)
+                .is_some_and(|mirror| mirror.target == space.target && mirror.key == space_key)
         })
     };
 
+    // Closing a whole space comes first and in descending index order, so
+    // applying the plan cannot invalidate a later index.
     let mut plan: Vec<MirrorAction> = workspaces
         .iter()
         .enumerate()
         .filter(|(_, workspace)| {
             workspace.remote_mirror.as_ref().is_some_and(|mirror| {
-                mirror.target == space.target && !desired.iter().any(|(key, _)| *key == mirror.key)
+                mirror.target == space.target && !space_order.iter().any(|key| *key == mirror.key)
             })
         })
         .map(|(ws_idx, _)| MirrorAction::Close { ws_idx })
         .collect();
     plan.reverse();
 
-    for (index, (key, label)) in desired.iter().enumerate() {
-        match mirror_for(key) {
-            // A remote workspace can be renamed, or gain a sibling that changes
-            // how duplicate labels are disambiguated.
+    let tab_spec = |pane: &RemoteAgentPane| MirrorTabSpec {
+        key: pane.mirror_key(&space.target),
+        remote_terminal: pane.terminal_id.clone(),
+        label: pane.pane_label.clone(),
+        argv: attach_argv(space, pane, &snapshot.remote_herdr),
+        agent: pane.agent.clone(),
+        origin: pane.origin.clone(),
+    };
+
+    for (space_key, label) in space_order.iter().zip(space_labels) {
+        let wanted = by_space.get(space_key).cloned().unwrap_or_default();
+        match mirror_for(space_key) {
+            None => plan.push(MirrorAction::Create {
+                space_key: space_key.clone(),
+                label,
+                tabs: wanted.into_iter().map(tab_spec).collect(),
+            }),
             Some(ws_idx) => {
                 // A rename on its way to the host has not come back in a
                 // snapshot yet, so the remote still reports the old label.
                 // Overwriting now would undo the name mid-flight and then put
                 // it back, which reads as the rename having failed.
                 if workspaces[ws_idx].custom_name.as_deref() != Some(label.as_str())
-                    && !renaming.contains(key)
+                    && !renaming.contains(space_key)
                 {
-                    plan.push(MirrorAction::Rename {
-                        ws_idx,
-                        label: label.clone(),
-                    });
+                    plan.push(MirrorAction::Rename { ws_idx, label });
                 }
-            }
-            None => {
-                let Some(pane) = panes.get(index) else {
-                    continue;
-                };
-                plan.push(MirrorAction::Create {
-                    key: key.clone(),
-                    remote_terminal: pane.terminal_id.clone(),
-                    label: label.clone(),
-                    argv: attach_argv(space, pane, &snapshot.remote_herdr),
-                    agent: pane.agent.clone(),
-                    origin: pane.origin.clone(),
-                });
+
+                let held: Vec<Option<String>> = workspaces[ws_idx]
+                    .tabs
+                    .iter()
+                    .map(|tab| tab.remote_mirror.as_ref().map(|mirror| mirror.key.clone()))
+                    .collect();
+
+                // Tabs whose remote pane is gone, dropped from the back so the
+                // indexes ahead of each removal still stand.
+                for (tab_idx, key) in held.iter().enumerate().rev() {
+                    let gone = key.as_ref().is_none_or(|key| {
+                        !wanted
+                            .iter()
+                            .any(|pane| pane.mirror_key(&space.target) == *key)
+                    });
+                    // A space always keeps one tab: emptying it would leave a
+                    // workspace with nothing in it, and the space itself is
+                    // closed by the rule above when the host stops reporting it.
+                    if gone && held.len() > 1 {
+                        plan.push(MirrorAction::CloseTab { ws_idx, tab_idx });
+                    }
+                }
+
+                for pane in wanted {
+                    let key = pane.mirror_key(&space.target);
+                    if !held
+                        .iter()
+                        .any(|held| held.as_deref() == Some(key.as_str()))
+                    {
+                        plan.push(MirrorAction::AddTab {
+                            ws_idx,
+                            tab: tab_spec(pane),
+                        });
+                    }
+                }
             }
         }
     }
@@ -737,8 +811,17 @@ impl App {
         let key = created.pane.mirror_key(&target);
         let label = created.pane.mirror_label();
         let argv = attach_argv(&space, &created.pane, &created.remote_herdr);
-        let mirror = remote_mirror_record(&space, &key, &created.pane.terminal_id);
-        if let Err(err) = self.create_remote_mirror(mirror, &label, &argv, None) {
+        let space_key = created.pane.mirror_space_key(&target);
+        let mirror = remote_mirror_record(&space, &space_key, &created.pane.terminal_id);
+        let tab = MirrorTabSpec {
+            key,
+            remote_terminal: created.pane.terminal_id.clone(),
+            label: created.pane.pane_label.clone(),
+            argv,
+            agent: None,
+            origin: created.pane.origin.clone(),
+        };
+        if let Err(err) = self.create_remote_mirror(mirror, &label, &tab) {
             tracing::warn!(target = %target, %err, "mirroring a new remote space failed");
             return;
         }
@@ -849,31 +932,60 @@ impl App {
                     }
                 }
                 MirrorAction::Create {
-                    key,
-                    remote_terminal,
+                    space_key,
                     label,
-                    argv,
-                    agent,
-                    origin,
+                    tabs,
                 } => {
-                    let mirror = match &origin {
-                        Some(origin) => {
-                            remote_mirror_record_for_origin(space, &key, &remote_terminal, origin)
-                        }
-                        None => remote_mirror_record(space, &key, &remote_terminal),
+                    let Some((first, rest)) = tabs.split_first() else {
+                        continue;
+                    };
+                    let mirror = match &first.origin {
+                        Some(origin) => remote_mirror_record_for_origin(
+                            space,
+                            &space_key,
+                            &first.remote_terminal,
+                            origin,
+                        ),
+                        None => remote_mirror_record(space, &space_key, &first.remote_terminal),
                     };
                     let created = if self.mirrors_are_multiplexed(&space.target) {
-                        self.create_streamed_mirror(mirror, &label)
+                        self.create_streamed_mirror(mirror, &label, first)
                     } else {
-                        self.create_remote_mirror(mirror, &label, &argv, agent.as_deref())
+                        self.create_remote_mirror(mirror, &label, first)
                     };
-                    if let Err(err) = created {
-                        tracing::warn!(
+                    match created {
+                        Ok(ws_idx) => {
+                            // The rest of the space's panes are tabs of the
+                            // workspace just made.
+                            for tab in rest {
+                                if let Err(err) = self.add_mirror_tab(space, ws_idx, tab) {
+                                    tracing::warn!(
+                                        target = %space.target,
+                                        %err,
+                                        "could not open a tab for a mirrored pane"
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => tracing::warn!(
                             target = %space.target,
                             %err,
                             "could not create remote mirror workspace"
+                        ),
+                    }
+                }
+                MirrorAction::AddTab { ws_idx, tab } => {
+                    if let Err(err) = self.add_mirror_tab(space, ws_idx, &tab) {
+                        tracing::warn!(
+                            target = %space.target,
+                            %err,
+                            "could not open a tab for a mirrored pane"
                         );
                     }
+                }
+                MirrorAction::CloseTab { ws_idx, tab_idx } => {
+                    self.close_mirror_tab_at(ws_idx, tab_idx);
+                    closed += 1;
                 }
             }
         }
@@ -1370,7 +1482,12 @@ impl App {
     ///
     /// Nothing is spawned: no ssh, no remote process, no claim on the remote
     /// terminal. The pane is a terminal parser waiting for frames.
-    fn create_streamed_mirror(&mut self, mirror: RemoteMirror, label: &str) -> std::io::Result<()> {
+    fn create_streamed_mirror(
+        &mut self,
+        mirror: RemoteMirror,
+        label: &str,
+        tab: &MirrorTabSpec,
+    ) -> std::io::Result<usize> {
         let host = mirror.target.clone();
         let (rows, cols) = self.state.estimate_pane_size();
         let cwd = std::env::var_os("HOME")
@@ -1379,27 +1496,8 @@ impl App {
         // Input and resizes a mirror produces belong to the host. They are
         // tagged with the terminal they came from here, since the pane itself
         // only knows it is a pane.
-        let (requests, mut request_rx) = tokio::sync::mpsc::channel(16);
-        {
-            let events = self.event_tx.clone();
-            let target = mirror.target.clone();
-            let terminal_id = mirror.remote_terminal.clone();
-            tokio::spawn(async move {
-                while let Some(request) = request_rx.recv().await {
-                    if events
-                        .send(crate::events::AppEvent::MirrorRequest {
-                            target: target.clone(),
-                            terminal_id: terminal_id.clone(),
-                            request,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-            });
-        }
+        let (requests, request_rx) = tokio::sync::mpsc::channel(16);
+        self.forward_mirror_requests(&mirror.target, &tab.remote_terminal, request_rx);
         let (mut workspace, terminal, runtime) = Workspace::new_streamed_mirror(
             cwd,
             rows,
@@ -1413,6 +1511,7 @@ impl App {
         )?;
         workspace.custom_name = Some(label.to_string());
         workspace.remote_mirror = Some(mirror);
+        Self::tag_mirror_tab(&mut workspace, 0, tab);
         // Which agent this is comes from the host, applied to every mirror by
         // `report_remote_agent_states` right after this. The attach path needs
         // `HERDR_AGENT` because its pane's foreground process is ssh and local
@@ -1429,7 +1528,36 @@ impl App {
         if let Some(stream) = self.mirror_streams.get_mut(&host) {
             stream.forget_targets();
         }
-        Ok(())
+        Ok(self.state.workspaces.len() - 1)
+    }
+
+    /// Sends what a mirrored pane produces back to the host that owns it,
+    /// tagged with the terminal it came from, since the pane only knows it is
+    /// a pane.
+    fn forward_mirror_requests(
+        &self,
+        target: &str,
+        remote_terminal: &str,
+        mut request_rx: tokio::sync::mpsc::Receiver<crate::pane::StreamedPaneRequest>,
+    ) {
+        let events = self.event_tx.clone();
+        let target = target.to_owned();
+        let terminal_id = remote_terminal.to_owned();
+        tokio::spawn(async move {
+            while let Some(request) = request_rx.recv().await {
+                if events
+                    .send(crate::events::AppEvent::MirrorRequest {
+                        target: target.clone(),
+                        terminal_id: terminal_id.clone(),
+                        request,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
     }
 
     /// Dials any host whose shared mirror connection is down but wanted.
@@ -1689,9 +1817,10 @@ impl App {
         &mut self,
         mirror: RemoteMirror,
         label: &str,
-        argv: &[String],
-        agent: Option<&str>,
-    ) -> std::io::Result<()> {
+        tab: &MirrorTabSpec,
+    ) -> std::io::Result<usize> {
+        let argv = &tab.argv;
+        let agent = tab.agent.as_deref();
         let (rows, cols) = self.state.estimate_pane_size();
         // The ssh client runs locally, so this cwd only sets where that local
         // process starts; it is never the remote agent's working directory.
@@ -1724,13 +1853,145 @@ impl App {
         )?;
         workspace.custom_name = Some(label.to_string());
         workspace.remote_mirror = Some(mirror);
+        Self::tag_mirror_tab(&mut workspace, 0, tab);
 
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
         self.state.terminals.insert(terminal.id.clone(), terminal);
         // Mirrors arrive without stealing focus; they are background context,
         // not something the user asked to switch to.
         self.state.workspaces.push(workspace);
+        Ok(self.state.workspaces.len() - 1)
+    }
+
+    /// Records which remote pane a tab stands for, and what to call it.
+    fn tag_mirror_tab(workspace: &mut Workspace, tab_idx: usize, spec: &MirrorTabSpec) {
+        if let Some(tab) = workspace.tabs.get_mut(tab_idx) {
+            tab.remote_mirror = Some(crate::workspace::RemoteMirrorTab {
+                key: spec.key.clone(),
+                remote_terminal: spec.remote_terminal.clone(),
+                disconnected: false,
+            });
+            if let Some(label) = spec.label.clone() {
+                tab.custom_name = Some(label);
+            }
+        }
+    }
+
+    /// Opens one more tab in a mirrored space, for a pane the host has that this
+    /// side has no tab for yet.
+    fn add_mirror_tab(
+        &mut self,
+        space: &RemoteSpaceConfig,
+        ws_idx: usize,
+        spec: &MirrorTabSpec,
+    ) -> std::io::Result<()> {
+        let (rows, cols) = self.state.estimate_pane_size();
+        let cwd = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let streamed = self.mirrors_are_multiplexed(&space.target);
+
+        let (tab, terminal, runtime) = if streamed {
+            let (requests, request_rx) = tokio::sync::mpsc::channel(16);
+            self.forward_mirror_requests(&space.target, &spec.remote_terminal, request_rx);
+            crate::workspace::Tab::new_streamed(
+                self.state
+                    .workspaces
+                    .get(ws_idx)
+                    .map(|workspace| workspace.next_public_tab_number)
+                    .unwrap_or(1),
+                cwd,
+                rows,
+                cols,
+                self.state.pane_scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+                self.event_tx.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+                requests,
+            )?
+        } else {
+            let extra_env = spec
+                .agent
+                .as_deref()
+                .and_then(crate::detect::parse_agent_label)
+                .map(|agent| {
+                    vec![(
+                        "HERDR_AGENT".to_string(),
+                        crate::detect::agent_label(agent).to_string(),
+                    )]
+                })
+                .unwrap_or_default();
+            let (ws_id, number) = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .map(|workspace| (workspace.id.clone(), workspace.next_public_tab_number))
+                .unwrap_or_default();
+            let launch_env = crate::pane::PaneLaunchEnv::from_extra(extra_env).with_identity(
+                ws_id.clone(),
+                crate::workspace::public_tab_id_for_number(&ws_id, number),
+                crate::workspace::public_pane_id_for_number(&ws_id, number),
+            );
+            crate::workspace::Tab::new_argv_command(
+                self.state
+                    .workspaces
+                    .get(ws_idx)
+                    .map(|workspace| workspace.next_public_tab_number)
+                    .unwrap_or(1),
+                cwd,
+                rows,
+                cols,
+                &spec.argv,
+                self.state.pane_scrollback_limit_bytes,
+                self.state.host_terminal_theme,
+                &launch_env,
+                self.event_tx.clone(),
+                self.render_notify.clone(),
+                self.render_dirty.clone(),
+            )?
+        };
+
+        let Some(workspace) = self.state.workspaces.get_mut(ws_idx) else {
+            return Ok(());
+        };
+        workspace.tabs.push(tab);
+        workspace.next_public_tab_number += 1;
+        let tab_idx = workspace.tabs.len() - 1;
+        Self::tag_mirror_tab(workspace, tab_idx, spec);
+
+        self.terminal_runtimes.insert(terminal.id.clone(), runtime);
+        self.state.terminals.insert(terminal.id.clone(), terminal);
+        if streamed {
+            // This pane is empty and the host sends differences against the last
+            // frame it sent, so the set has to be named again or it never paints.
+            if let Some(stream) = self.mirror_streams.get_mut(&space.target) {
+                stream.forget_targets();
+            }
+        }
         Ok(())
+    }
+
+    /// Closes one tab of a mirrored space, leaving the space in place.
+    fn close_mirror_tab_at(&mut self, ws_idx: usize, tab_idx: usize) {
+        let Some(workspace) = self.state.workspaces.get_mut(ws_idx) else {
+            return;
+        };
+        if workspace.tabs.len() <= 1 || tab_idx >= workspace.tabs.len() {
+            return;
+        }
+        let tab = workspace.tabs.remove(tab_idx);
+        for pane in tab.panes.values() {
+            self.state
+                .terminal_runtime_shutdowns
+                .push(pane.attached_terminal_id.clone());
+            self.state.terminals.remove(&pane.attached_terminal_id);
+        }
+        if let Some(workspace) = self.state.workspaces.get_mut(ws_idx) {
+            if workspace.active_tab >= workspace.tabs.len() {
+                workspace.active_tab = workspace.tabs.len().saturating_sub(1);
+            }
+        }
     }
 }
 
@@ -2628,6 +2889,10 @@ mod tests {
     fn agent_pane(workspace_id: &str, label: &str, terminal_id: &str) -> RemoteAgentPane {
         RemoteAgentPane {
             terminal_id: terminal_id.into(),
+            // One tab per pane unless a test says otherwise, which is what the
+            // host reports for the ordinary one-pane space.
+            tab_id: format!("{workspace_id}:t-{terminal_id}"),
+            pane_label: None,
             workspace_id: workspace_id.into(),
             workspace_label: label.into(),
             agent: Some("claude".into()),
@@ -2659,7 +2924,23 @@ mod tests {
     fn mirror(target: &str, key: &str, label: &str) -> Workspace {
         let mut workspace = Workspace::test_new(label);
         workspace.custom_name = Some(label.to_string());
-        workspace.remote_mirror = Some(remote_mirror_record(&space(target), key, "term-remote"));
+        // A mirror is identified by its space, and its tabs by the panes in it,
+        // so a per-pane key given here names both: the space it belongs to and
+        // the one tab standing for that pane.
+        let space_key = key
+            .rsplit_once('\u{1f}')
+            .map(|(head, _)| head.to_string())
+            .unwrap_or_else(|| key.to_string());
+        workspace.remote_mirror = Some(remote_mirror_record(
+            &space(target),
+            &space_key,
+            "term-remote",
+        ));
+        workspace.tabs[0].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
+            key: key.to_string(),
+            remote_terminal: "term-remote".to_string(),
+            disconnected: false,
+        });
         workspace
     }
 
@@ -2671,11 +2952,38 @@ mod tests {
         plan: &[MirrorAction],
     ) {
         for action in plan {
-            if let MirrorAction::Create { key, label, .. } = action {
+            if let MirrorAction::Create {
+                space_key,
+                label,
+                tabs,
+            } = action
+            {
                 let mut workspace = Workspace::test_new(label);
                 workspace.custom_name = Some(label.clone());
-                workspace.remote_mirror = Some(remote_mirror_record(space, key, "term-remote"));
+                workspace.remote_mirror =
+                    Some(remote_mirror_record(space, space_key, "term-remote"));
+                for (tab_idx, spec) in tabs.iter().enumerate() {
+                    if tab_idx > 0 {
+                        workspace.test_add_tab(None);
+                    }
+                    workspace.tabs[tab_idx].remote_mirror =
+                        Some(crate::workspace::RemoteMirrorTab {
+                            key: spec.key.clone(),
+                            remote_terminal: spec.remote_terminal.clone(),
+                            disconnected: false,
+                        });
+                }
                 workspaces.push(workspace);
+            }
+            if let MirrorAction::AddTab { ws_idx, tab } = action {
+                let workspace = &mut workspaces[*ws_idx];
+                workspace.test_add_tab(None);
+                let tab_idx = workspace.tabs.len() - 1;
+                workspace.tabs[tab_idx].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
+                    key: tab.key.clone(),
+                    remote_terminal: tab.remote_terminal.clone(),
+                    disconnected: false,
+                });
             }
         }
     }
@@ -2772,6 +3080,14 @@ mod tests {
         assert_ne!(record.key, record.host_label);
     }
 
+    /// The space half of a per-pane mirror key, which is what a workspace is
+    /// identified by now that its tabs carry the panes.
+    fn space_key_of(key: String) -> String {
+        key.rsplit_once('\u{1f}')
+            .map(|(head, _)| head.to_string())
+            .unwrap_or(key)
+    }
+
     fn key_for(target: &str, workspace_id: &str, terminal_id: &str) -> String {
         agent_pane(workspace_id, "ignored", terminal_id).mirror_key(target)
     }
@@ -2849,11 +3165,11 @@ mod tests {
         assert_eq!(
             plan.iter()
                 .filter_map(|action| match action {
-                    MirrorAction::Create { key, .. } => Some(key.clone()),
+                    MirrorAction::Create { space_key, .. } => Some(space_key.clone()),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
-            vec![key_for("workbox", "w1", "term-local")]
+            vec![space_key_of(key_for("workbox", "w1", "term-local"))]
         );
     }
 
@@ -2957,17 +3273,18 @@ mod tests {
         assert!(
             plan.iter().any(|action| matches!(
                 action,
-                MirrorAction::Create { key, .. }
-                    if key == &mirrored_pane("w2", "notes", "term-hop", "ryi@sera", "term-far")
-                        .mirror_key("workbox")
+                MirrorAction::Create { space_key: key, .. }
+                    if key
+                        == &mirrored_pane("w2", "notes", "term-hop", "ryi@sera", "term-far")
+                            .mirror_space_key("workbox")
             )),
             "{plan:?}"
         );
     }
 
-    /// A tab the user asked for on a mirrored space becomes another mirror of
-    /// that space, beside the one it was asked from. It is pinned by pane, not
-    /// by space, so nothing else living in that remote space comes with it.
+    /// A tab the user asked for on a mirrored space becomes a tab of it, beside
+    /// the pane it was asked from. It is pinned by pane, not by space, so
+    /// nothing else living in that remote space comes with it.
     #[test]
     fn plan_mirrors_a_pinned_pane_from_an_already_mirrored_space() {
         let snapshot = snapshot_with_extras(
@@ -2995,19 +3312,17 @@ mod tests {
             &Default::default(),
         );
 
-        // Two mirrors of one remote space now, so the shared label is
-        // disambiguated and the existing mirror is renamed to match.
+        // One mirror of one remote space, now two tabs deep. The space keeps
+        // its name: the ordinals only ever existed to tell apart what were
+        // really tabs of the same space.
         assert_eq!(
             plan,
-            vec![
-                MirrorAction::Rename {
-                    ws_idx: 0,
-                    label: "api 1".into(),
-                },
-                MirrorAction::Create {
+            vec![MirrorAction::AddTab {
+                ws_idx: 0,
+                tab: MirrorTabSpec {
                     key: key_for("workbox", "w1", "term-2"),
                     remote_terminal: "term-2".into(),
-                    label: "api 2".into(),
+                    label: None,
                     argv: attach_argv(
                         &space("workbox"),
                         &shell_pane("w1", "api", "term-2"),
@@ -3016,7 +3331,7 @@ mod tests {
                     agent: None,
                     origin: None,
                 },
-            ]
+            }]
         );
 
         // And the next poll leaves it alone rather than closing it again.
@@ -3089,16 +3404,20 @@ mod tests {
         assert_eq!(
             plan,
             vec![MirrorAction::Create {
-                key: key_for("workbox", "w7", "term-7"),
-                remote_terminal: "term-7".into(),
+                space_key: space_key_of(key_for("workbox", "w7", "term-7")),
                 label: "notes".into(),
-                argv: attach_argv(
-                    &space("workbox"),
-                    &agent_pane("w7", "notes", "term-7"),
-                    "/usr/bin/herdr"
-                ),
-                agent: Some("claude".into()),
-                origin: None,
+                tabs: vec![MirrorTabSpec {
+                    key: key_for("workbox", "w7", "term-7"),
+                    remote_terminal: "term-7".into(),
+                    label: None,
+                    argv: attach_argv(
+                        &space("workbox"),
+                        &agent_pane("w7", "notes", "term-7"),
+                        "/usr/bin/herdr"
+                    ),
+                    agent: Some("claude".into()),
+                    origin: None,
+                }],
             }]
         );
     }
@@ -3172,9 +3491,10 @@ mod tests {
             &snapshot(vec![agent_pane("w1", "api", "term-1")]),
         );
 
-        let MirrorAction::Create { argv, .. } = &plan[0] else {
+        let MirrorAction::Create { tabs, .. } = &plan[0] else {
             panic!("expected a create action, got {plan:?}");
         };
+        let argv = &tabs[0].argv;
         assert_eq!(argv[0], "ssh");
         // Positions after argv[0] shift as ssh options are added, so assert the
         // ends: the host and the remote command are always last.
@@ -3289,7 +3609,9 @@ mod tests {
         // because the rename has not reached it yet.
         let key = key_for("workbox", "w1", "term-1");
         let workspaces = vec![mirror("workbox", &key, "api-server")];
-        let renaming = std::collections::HashSet::from([key]);
+        // A space carries the name, so a rename in flight is held against the
+        // space rather than one of the panes in it.
+        let renaming = std::collections::HashSet::from([space_key_of(key)]);
 
         let plan = super::plan_remote_mirrors(
             &workspaces,
@@ -3369,16 +3691,20 @@ mod tests {
                     label: "lifestream 1".into(),
                 },
                 MirrorAction::Create {
-                    key: key_for("workbox", "w2", "term-2"),
-                    remote_terminal: "term-2".into(),
+                    space_key: space_key_of(key_for("workbox", "w2", "term-2")),
                     label: "lifestream 2".into(),
-                    argv: attach_argv(
-                        &space("workbox"),
-                        &agent_pane("w2", "lifestream", "term-2"),
-                        "/usr/bin/herdr",
-                    ),
-                    agent: Some("claude".into()),
-                    origin: None,
+                    tabs: vec![MirrorTabSpec {
+                        key: key_for("workbox", "w2", "term-2"),
+                        remote_terminal: "term-2".into(),
+                        label: None,
+                        argv: attach_argv(
+                            &space("workbox"),
+                            &agent_pane("w2", "lifestream", "term-2"),
+                            "/usr/bin/herdr",
+                        ),
+                        agent: Some("claude".into()),
+                        origin: None,
+                    }],
                 },
             ]
         );
@@ -3392,12 +3718,12 @@ mod tests {
             &snapshot(vec![agent_pane("w1", "api", "term-1")]),
         );
 
-        let MirrorAction::Create { agent, .. } = &plan[0] else {
+        let MirrorAction::Create { tabs, .. } = &plan[0] else {
             panic!("expected a create action, got {plan:?}");
         };
         // The mirror pane's foreground process is ssh, so the agent name has to
         // travel with the plan for the HERDR_AGENT hint.
-        assert_eq!(agent.as_deref(), Some("claude"));
+        assert_eq!(tabs[0].agent.as_deref(), Some("claude"));
     }
 
     #[test]

@@ -57,6 +57,11 @@ pub(crate) struct RemoteAgentPane {
     pub(crate) workspace_id: String,
     /// Remote workspace name, or the workspace id when the name is unknown.
     pub(crate) workspace_label: String,
+    /// The tab this pane sits in on the host, so a mirrored space can hold the
+    /// same tabs rather than scattering its panes across separate spaces.
+    pub(crate) tab_id: String,
+    /// What the host calls this pane, used to name the tab that mirrors it.
+    pub(crate) pane_label: Option<String>,
     /// Detected or reported agent name, when the remote knows one.
     pub(crate) agent: Option<String>,
     /// Status the remote reports. The remote has hook-level authority over its
@@ -98,6 +103,20 @@ impl RemoteAgentPane {
                 "{target}\u{1f}{}\u{1f}{}",
                 self.workspace_id, self.terminal_id
             ),
+        }
+    }
+
+    /// The identity of the *space* this pane belongs to, which is its mirror
+    /// key without the terminal.
+    ///
+    /// A mirrored space is one local workspace holding a tab per remote pane,
+    /// so this is what the workspace is found by while the full key still tells
+    /// one tab from another.
+    pub(crate) fn mirror_space_key(&self, target: &str) -> String {
+        let key = self.mirror_key(target);
+        match key.rfind('\u{1f}') {
+            Some(cut) => key[..cut].to_string(),
+            None => key,
         }
     }
 
@@ -690,6 +709,8 @@ fn parse_mirror_panes(
         RemoteAgentPane {
             status: pane.agent_status,
             terminal_id: pane.terminal_id,
+            tab_id: pane.tab_id,
+            pane_label: pane.label.or(pane.title),
             workspace_id: pane.workspace_id,
             workspace_label,
             agent: pane.display_agent.or(pane.agent),
@@ -907,6 +928,8 @@ fn parse_created_workspace(stdout: &str) -> io::Result<CreatedRemoteSpace> {
         pane: RemoteAgentPane {
             status: root_pane.agent_status,
             terminal_id: root_pane.terminal_id,
+            tab_id: root_pane.tab_id,
+            pane_label: root_pane.label.or(root_pane.title),
             workspace_id: root_pane.workspace_id,
             workspace_label: workspace.label,
             agent: None,
@@ -972,6 +995,8 @@ fn parse_created_tab(stdout: &str) -> io::Result<CreatedRemoteSpace> {
         pane: RemoteAgentPane {
             status: root_pane.agent_status,
             terminal_id: root_pane.terminal_id,
+            tab_id: root_pane.tab_id,
+            pane_label: root_pane.label.or(root_pane.title),
             workspace_id: root_pane.workspace_id,
             workspace_label,
             agent: None,
@@ -1104,6 +1129,8 @@ mod tests {
             snapshot.panes,
             vec![RemoteAgentPane {
                 terminal_id: "term-1".into(),
+                tab_id: "w1t1".into(),
+                pane_label: None,
                 workspace_id: "w1".into(),
                 workspace_label: "api-server".into(),
                 agent: Some("claude".into()),
@@ -1135,6 +1162,8 @@ mod tests {
             vec![
                 RemoteAgentPane {
                     terminal_id: "term_656ccaeee911e1".into(),
+                    tab_id: "w1:t1".into(),
+                    pane_label: None,
                     workspace_id: "w1".into(),
                     workspace_label: "lifestream".into(),
                     agent: Some("claude".into()),
@@ -1144,6 +1173,8 @@ mod tests {
                 },
                 RemoteAgentPane {
                     terminal_id: "term_656e5c429826d3".into(),
+                    tab_id: "w3:t1".into(),
+                    pane_label: None,
                     workspace_id: "w3".into(),
                     workspace_label: "emf".into(),
                     agent: Some("claude".into()),
@@ -1228,6 +1259,8 @@ mod tests {
     fn pane(workspace_id: &str, workspace_label: &str, terminal_id: &str) -> RemoteAgentPane {
         RemoteAgentPane {
             terminal_id: terminal_id.into(),
+            tab_id: "t1".into(),
+            pane_label: None,
             workspace_id: workspace_id.into(),
             workspace_label: workspace_label.into(),
             agent: Some("claude".into()),
@@ -1275,6 +1308,8 @@ mod tests {
     fn mirror_identity_is_stable_per_host_workspace_and_terminal() {
         let pane = RemoteAgentPane {
             terminal_id: "term-1".into(),
+            tab_id: "w1:t1".into(),
+            pane_label: None,
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: Some("claude".into()),
@@ -1292,6 +1327,8 @@ mod tests {
     fn attach_argv_targets_the_remote_terminal_through_a_pty() {
         let pane = RemoteAgentPane {
             terminal_id: "term-1".into(),
+            tab_id: "w1:t1".into(),
+            pane_label: None,
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: None,
@@ -1364,6 +1401,8 @@ mod tests {
         space.session = Some("agents".into());
         let pane = RemoteAgentPane {
             terminal_id: "term-1".into(),
+            tab_id: "w1:t1".into(),
+            pane_label: None,
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: None,
