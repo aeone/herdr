@@ -2236,6 +2236,104 @@ mod tests {
         );
     }
 
+    /// A tab made in a mirrored space belongs to the machine that owns the
+    /// space, so the ask has to travel there rather than making a tab here.
+    ///
+    /// Whether it travelled is the return value, and the caller makes an
+    /// ordinary local tab when it says no -- so every way of saying no looks
+    /// exactly like "it just made a normal tab", which is what was reported.
+    #[tokio::test]
+    async fn a_tab_made_in_a_mirror_is_asked_for_on_the_host() {
+        let mut app = crate::app::tests::test_app();
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+        app.state.workspaces.push(mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "remote",
+        ));
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        assert!(
+            app.request_remote_tab(None),
+            "a tab in a mirrored space should be asked for on the host"
+        );
+    }
+
+    /// The sidebar cursor and the space being worked in are different things,
+    /// and only one of them is the space the tab belongs to.
+    #[tokio::test]
+    async fn a_tab_is_asked_for_on_the_host_of_the_space_being_worked_in() {
+        let mut app = crate::app::tests::test_app();
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+        app.state.workspaces.push(local("mine"));
+        app.state.workspaces.push(mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "remote",
+        ));
+        // Working in the mirror while the sidebar cursor sits on the local
+        // space, which is an ordinary way to be.
+        app.state.active = Some(1);
+        app.state.selected = 0;
+
+        assert!(
+            app.request_remote_tab(None),
+            "the space being worked in is the mirror, so the host is asked"
+        );
+    }
+
+    /// A mirror reached through another host names the *origin's* workspace in
+    /// its key, but the ask is sent to the host we poll -- which has never
+    /// heard of that workspace id. Nothing can come of it.
+    #[tokio::test]
+    async fn a_tab_in_a_mirror_reached_through_a_hop_names_a_space_the_host_does_not_have() {
+        let origin = crate::remote::spaces::MirrorOrigin {
+            target: "leaf".to_string(),
+            workspace_id: "w9".to_string(),
+            terminal_id: "term-leaf".to_string(),
+            label: Some("lf".to_string()),
+            color: None,
+        };
+        let key = {
+            let mut pane = agent_pane("w9", "leaf work", "term-hop");
+            pane.origin = Some(origin.clone());
+            pane.mirror_key("hub")
+        };
+
+        // The workspace id carried in the key is the leaf's, not the hub's.
+        assert_eq!(super::remote_workspace_id(&key).as_deref(), Some("w9"));
+
+        let mut app = crate::app::tests::test_app();
+        app.remote_spaces = vec![space("hub")];
+        app.state.workspaces.clear();
+        let mut workspace = mirror("hub", &key, "leaf work");
+        workspace.remote_mirror = Some(super::remote_mirror_record_for_origin(
+            &space("hub"),
+            &key,
+            "term-hop",
+            &origin,
+        ));
+        app.state.workspaces.push(workspace);
+        app.state.active = Some(0);
+        app.state.selected = 0;
+
+        let mirror_record = app.state.workspaces[0]
+            .remote_mirror
+            .as_ref()
+            .expect("a mirror");
+        assert_eq!(
+            (
+                mirror_record.target.as_str(),
+                mirror_record.origin_target.as_deref()
+            ),
+            ("hub", Some("leaf")),
+            "the ask goes to the hub, but the space belongs to the leaf"
+        );
+    }
+
     /// A host renders a mirror at the size it is given, so the size has to be
     /// the one the frames are written into. It used to be a guess -- the size of
     /// whichever pane happened to be first in the workspace on screen, measured

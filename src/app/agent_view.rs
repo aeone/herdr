@@ -479,10 +479,6 @@ fn sort_value(
     }
 }
 
-fn status_name(state: crate::detect::AgentState, seen: bool) -> String {
-    status_name_with_shells(state, seen, None)
-}
-
 fn status_name_with_shells(
     state: crate::detect::AgentState,
     seen: bool,

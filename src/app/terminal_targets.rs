@@ -1,4 +1,4 @@
-use super::{api_helpers::pane_agent_status, api_helpers::pane_agent_status_with_shells, App};
+use super::{api_helpers::pane_agent_status_with_shells, App};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TerminalTarget {
