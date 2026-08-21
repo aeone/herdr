@@ -1664,29 +1664,34 @@ impl App {
         // their output before the layout arrived a moment later and corrected
         // it.
         let laid_out = !self.state.view.pane_infos.is_empty();
+        // Every tab of every mirrored space, since a space holds a tab per
+        // remote pane and each of them is watched at the size of the pane its
+        // frames land in.
         self.state
             .workspaces
             .iter()
-            .filter_map(|workspace| {
-                let mirror = workspace.remote_mirror.as_ref()?;
-                if mirror.target != target {
-                    return None;
-                }
+            .filter(|workspace| {
+                workspace
+                    .remote_mirror
+                    .as_ref()
+                    .is_some_and(|mirror| mirror.target == target)
+            })
+            .flat_map(|workspace| workspace.tabs.iter())
+            .filter_map(|tab| {
+                let mirror = tab.remote_mirror.as_ref()?;
                 let (rows, cols) = self
-                    .mirror_pane_size(workspace)
+                    .tab_pane_size(tab)
                     .unwrap_or((estimated_rows, estimated_cols));
                 // Whether this machine may size the terminal behind the mirror:
                 // only if someone is looking at the pane it lands in, here or
                 // through us. A hub with nobody at it has no pane to measure
                 // and must not impose its guess.
                 let resize = laid_out
-                    && workspace
-                        .terminal_id(workspace.root_pane)
-                        .is_some_and(|local| {
-                            self.state
-                                .watched_for_someone
-                                .contains(local.to_string().as_str())
-                        });
+                    && tab.terminal_id(tab.root_pane).is_some_and(|local| {
+                        self.state
+                            .watched_for_someone
+                            .contains(local.to_string().as_str())
+                    });
                 Some(crate::remote::mirror_stream::MirrorStreamTarget {
                     terminal_id: mirror.remote_terminal.clone(),
                     cols,
@@ -1700,17 +1705,28 @@ impl App {
     /// The size of the pane a host's terminal is mirrored into, found by the
     /// name that host knows it by.
     fn mirror_pane_size_for(&self, target: &str, remote_terminal: &str) -> Option<(u16, u16)> {
-        let workspace = self.state.workspaces.iter().find(|workspace| {
-            workspace.remote_mirror.as_ref().is_some_and(|mirror| {
-                mirror.target == target && mirror.remote_terminal == remote_terminal
+        let tab = self
+            .state
+            .workspaces
+            .iter()
+            .filter(|workspace| {
+                workspace
+                    .remote_mirror
+                    .as_ref()
+                    .is_some_and(|mirror| mirror.target == target)
             })
-        })?;
-        self.mirror_pane_size(workspace)
+            .flat_map(|workspace| workspace.tabs.iter())
+            .find(|tab| {
+                tab.remote_mirror
+                    .as_ref()
+                    .is_some_and(|mirror| mirror.remote_terminal == remote_terminal)
+            })?;
+        self.tab_pane_size(tab)
     }
 
-    /// The size of the local terminal a mirror's frames are written into.
-    fn mirror_pane_size(&self, workspace: &Workspace) -> Option<(u16, u16)> {
-        let terminal_id = workspace.terminal_id(workspace.root_pane)?;
+    /// The size of the local terminal one mirrored tab's frames are written into.
+    fn tab_pane_size(&self, tab: &crate::workspace::Tab) -> Option<(u16, u16)> {
+        let terminal_id = tab.terminal_id(tab.root_pane)?;
         Some(self.terminal_runtimes.get(terminal_id)?.current_size())
     }
 
@@ -1731,12 +1747,16 @@ impl App {
         let stamp = MirrorLayoutStamp {
             laid_out: !self.state.view.pane_infos.is_empty(),
             watched: self.state.watched_for_someone.len(),
+            // Every mirrored tab, since each is drawn at its own size and any
+            // of them moving is a reason to tell the host again.
             sizes: self
                 .state
                 .workspaces
                 .iter()
                 .filter(|workspace| workspace.remote_mirror.is_some())
-                .map(|workspace| self.mirror_pane_size(workspace).unwrap_or((0, 0)))
+                .flat_map(|workspace| workspace.tabs.iter())
+                .filter(|tab| tab.remote_mirror.is_some())
+                .map(|tab| self.tab_pane_size(tab).unwrap_or((0, 0)))
                 .collect(),
         };
         if self.mirror_layout_stamp == stamp {
@@ -2592,6 +2612,120 @@ mod tests {
             ),
             ("hub", Some("leaf")),
             "the ask goes to the hub, but the space belongs to the leaf"
+        );
+    }
+
+    /// A remote space with several panes is one space here, holding a tab per
+    /// pane -- not several unrelated spaces telling themselves apart with an
+    /// ordinal stuck on a shared name.
+    #[test]
+    fn a_remote_space_with_several_panes_is_one_space_with_several_tabs() {
+        let snapshot = snapshot(vec![
+            agent_pane("w1", "rycelia", "term-1"),
+            agent_pane("w1", "rycelia", "term-2"),
+            agent_pane("w1", "rycelia", "term-3"),
+        ]);
+
+        let plan = plan_remote_mirrors(&[], &space("workbox"), &snapshot);
+
+        assert_eq!(plan.len(), 1, "one space, not three: {plan:?}");
+        let MirrorAction::Create {
+            space_key,
+            label,
+            tabs,
+        } = &plan[0]
+        else {
+            panic!("expected a create, got {plan:?}");
+        };
+        assert_eq!(space_key, &space_key_of(key_for("workbox", "w1", "term-1")));
+        assert_eq!(
+            label, "rycelia",
+            "the space keeps its name; the ordinals were only ever telling tabs apart"
+        );
+        assert_eq!(
+            tabs.iter()
+                .map(|tab| tab.remote_terminal.as_str())
+                .collect::<Vec<_>>(),
+            vec!["term-1", "term-2", "term-3"],
+            "a tab per pane, in the order the host reported them"
+        );
+    }
+
+    /// Two panes of the same space that arrive in separate polls end up in the
+    /// same space, which is the case a plan built from nothing cannot show.
+    #[test]
+    fn a_pane_appearing_in_a_mirrored_space_opens_a_tab_rather_than_a_space() {
+        let mut workspaces = vec![mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "rycelia",
+        )];
+        let both = snapshot(vec![
+            agent_pane("w1", "rycelia", "term-1"),
+            agent_pane("w1", "rycelia", "term-2"),
+        ]);
+
+        let plan = plan_remote_mirrors(&workspaces, &space("workbox"), &both);
+        assert!(
+            matches!(plan.as_slice(), [MirrorAction::AddTab { ws_idx: 0, .. }]),
+            "the new pane belongs in the space already mirrored: {plan:?}"
+        );
+
+        // And once it is there, the next poll is content.
+        apply_creates(&mut workspaces, &space("workbox"), &plan);
+        assert_eq!(workspaces.len(), 1, "still one space");
+        assert_eq!(workspaces[0].tabs.len(), 2, "now two tabs deep");
+        let plan = plan_remote_mirrors(&workspaces, &space("workbox"), &both);
+        assert!(plan.is_empty(), "nothing left to do: {plan:?}");
+
+        // A pane going closes its tab and leaves the space alone.
+        let plan = plan_remote_mirrors(
+            &workspaces,
+            &space("workbox"),
+            &snapshot(vec![agent_pane("w1", "rycelia", "term-1")]),
+        );
+        assert!(
+            matches!(
+                plan.as_slice(),
+                [MirrorAction::CloseTab {
+                    ws_idx: 0,
+                    tab_idx: 1
+                }]
+            ),
+            "the space stays, the tab goes: {plan:?}"
+        );
+    }
+
+    /// Every tab of a mirrored space is watched, not just the one the space was
+    /// created from. Watching only the first would leave every other tab blank
+    /// with no way to notice.
+    #[tokio::test]
+    async fn every_tab_of_a_mirrored_space_is_watched() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+
+        let mut workspace = mirror("workbox", &key_for("workbox", "w1", "term-1"), "rycelia");
+        workspace.test_add_tab(None);
+        workspace.tabs[1].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
+            key: key_for("workbox", "w1", "term-2"),
+            remote_terminal: "term-2".to_string(),
+            disconnected: false,
+        });
+        app.state.workspaces.push(workspace);
+        app.state.active = Some(0);
+
+        let watching: Vec<String> = app
+            .mirror_stream_targets("workbox")
+            .into_iter()
+            .map(|target| target.terminal_id)
+            .collect();
+
+        assert_eq!(
+            watching,
+            vec!["term-remote".to_string(), "term-2".to_string()],
+            "both tabs of the space should be watched"
         );
     }
 
