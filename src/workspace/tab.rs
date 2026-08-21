@@ -37,6 +37,8 @@ enum SplitCommand<'a> {
 
 pub struct Tab {
     pub custom_name: Option<String>,
+    /// Which remote pane this tab mirrors, when its space is a mirror.
+    pub remote_mirror: Option<crate::workspace::RemoteMirrorTab>,
     pub number: usize,
     /// Identity source for this tab's pane tree.
     pub root_pane: PaneId,
@@ -144,6 +146,7 @@ impl Tab {
         Ok((
             Self {
                 custom_name: None,
+                remote_mirror: None,
                 number,
                 root_pane: root_id,
                 layout,
@@ -220,6 +223,7 @@ impl Tab {
         Ok((
             Self {
                 custom_name: None,
+                remote_mirror: None,
                 number,
                 root_pane: root_id,
                 layout,
@@ -496,6 +500,7 @@ impl Tab {
         panes.insert(pane_id, moved.pane_state);
         Self {
             custom_name,
+            remote_mirror: None,
             number,
             root_pane: pane_id,
             layout: TileLayout::from_saved(Node::Pane(pane_id), pane_id),

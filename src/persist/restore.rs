@@ -729,6 +729,8 @@ fn restore_tab(
         Some((
             crate::workspace::Tab {
                 custom_name: snap.custom_name.clone(),
+                // Mirrors are derived from a live remote, never restored.
+                remote_mirror: None,
                 number,
                 root_pane,
                 layout,

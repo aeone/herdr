@@ -173,7 +173,26 @@ pub struct Workspace {
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
 }
 
-/// Identity of the remote pane a mirrored workspace stands in for.
+/// What one tab of a mirrored space stands for on the host.
+///
+/// A mirrored space holds a tab per remote pane, so the identity that used to
+/// live on the workspace -- which pane this is, and which terminal to ask the
+/// host for -- belongs here. The workspace keeps only what is true of the whole
+/// space: which host, and which space on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteMirrorTab {
+    /// Stable identity of the remote pane, naming the machine that really runs
+    /// it. Built by `RemoteAgentPane::mirror_key`, so a pane reached through a
+    /// hop is the same tab as one reached directly.
+    pub key: String,
+    /// The terminal id on the host we poll, which is what that host answers to.
+    /// Distinct from the key, which names the origin.
+    pub remote_terminal: String,
+    /// Set when this tab's pane has died on the host but the tab was kept.
+    pub disconnected: bool,
+}
+
+/// Identity of the remote space a mirrored workspace stands in for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteMirror {
     /// Set when the mirror's ssh has died and the workspace was kept anyway, so
@@ -1287,6 +1306,7 @@ impl Workspace {
         panes.insert(root_id, PaneState::new(terminal_id));
         let tab = Tab {
             custom_name: None,
+            remote_mirror: None,
             number: 1,
             root_pane: root_id,
             layout,
@@ -1341,6 +1361,7 @@ impl Workspace {
         panes.insert(root_id, PaneState::new(TerminalId::alloc()));
         let tab = Tab {
             custom_name: name.map(str::to_string),
+            remote_mirror: None,
             number: self.next_public_tab_number,
             root_pane: root_id,
             layout,
