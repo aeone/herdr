@@ -1910,16 +1910,26 @@ impl App {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let streamed = self.mirrors_are_multiplexed(&space.target);
+        // A tab number and a pane number are counted separately and drift apart
+        // as tabs come and go, so the pane must be named with its own.
+        let (ws_id, tab_number, pane_number) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|workspace| {
+                (
+                    workspace.id.clone(),
+                    workspace.next_public_tab_number,
+                    workspace.next_public_pane_number,
+                )
+            })
+            .unwrap_or_else(|| (String::new(), 1, 1));
 
         let (tab, terminal, runtime) = if streamed {
             let (requests, request_rx) = tokio::sync::mpsc::channel(16);
             self.forward_mirror_requests(&space.target, &spec.remote_terminal, request_rx);
             crate::workspace::Tab::new_streamed(
-                self.state
-                    .workspaces
-                    .get(ws_idx)
-                    .map(|workspace| workspace.next_public_tab_number)
-                    .unwrap_or(1),
+                tab_number,
                 cwd,
                 rows,
                 cols,
@@ -1942,23 +1952,13 @@ impl App {
                     )]
                 })
                 .unwrap_or_default();
-            let (ws_id, number) = self
-                .state
-                .workspaces
-                .get(ws_idx)
-                .map(|workspace| (workspace.id.clone(), workspace.next_public_tab_number))
-                .unwrap_or_default();
             let launch_env = crate::pane::PaneLaunchEnv::from_extra(extra_env).with_identity(
                 ws_id.clone(),
-                crate::workspace::public_tab_id_for_number(&ws_id, number),
-                crate::workspace::public_pane_id_for_number(&ws_id, number),
+                crate::workspace::public_tab_id_for_number(&ws_id, tab_number),
+                crate::workspace::public_pane_id_for_number(&ws_id, pane_number),
             );
             crate::workspace::Tab::new_argv_command(
-                self.state
-                    .workspaces
-                    .get(ws_idx)
-                    .map(|workspace| workspace.next_public_tab_number)
-                    .unwrap_or(1),
+                tab_number,
                 cwd,
                 rows,
                 cols,
@@ -1975,9 +1975,8 @@ impl App {
         let Some(workspace) = self.state.workspaces.get_mut(ws_idx) else {
             return Ok(());
         };
-        workspace.tabs.push(tab);
+        let tab_idx = workspace.adopt_tab(tab, pane_number);
         workspace.next_public_tab_number += 1;
-        let tab_idx = workspace.tabs.len() - 1;
         Self::tag_mirror_tab(workspace, tab_idx, spec);
 
         self.terminal_runtimes.insert(terminal.id.clone(), runtime);
@@ -1997,20 +1996,14 @@ impl App {
         let Some(workspace) = self.state.workspaces.get_mut(ws_idx) else {
             return;
         };
-        if workspace.tabs.len() <= 1 || tab_idx >= workspace.tabs.len() {
+        let Some(tab) = workspace.take_tab(tab_idx) else {
             return;
-        }
-        let tab = workspace.tabs.remove(tab_idx);
+        };
         for pane in tab.panes.values() {
             self.state
                 .terminal_runtime_shutdowns
                 .push(pane.attached_terminal_id.clone());
             self.state.terminals.remove(&pane.attached_terminal_id);
-        }
-        if let Some(workspace) = self.state.workspaces.get_mut(ws_idx) {
-            if workspace.active_tab >= workspace.tabs.len() {
-                workspace.active_tab = workspace.tabs.len().saturating_sub(1);
-            }
         }
     }
 }
@@ -3080,6 +3073,86 @@ mod tests {
 
     /// Applies a plan's creates the way `reconcile_remote_mirrors` does, minus
     /// the PTY, so a plan can be fed back through the planner.
+    /// A pane the API cannot see is a pane the sidebar cannot show. A tab opened
+    /// in a mirrored space is built here rather than by the workspace itself, so
+    /// its pane is only counted if it is handed in through the workspace's own
+    /// door -- which it once was not, so a mirror of a four pane space arrived
+    /// on the hub reading `tabs=4 panes=1`.
+    #[tokio::test]
+    async fn a_tab_opened_in_a_mirrored_space_counts_its_pane() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+        app.state.workspaces.push(mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "rycelia",
+        ));
+
+        app.add_mirror_tab(
+            &space("workbox"),
+            0,
+            &MirrorTabSpec {
+                key: key_for("workbox", "w1", "term-2"),
+                remote_terminal: "term-2".to_string(),
+                label: None,
+                argv: Vec::new(),
+                agent: None,
+                origin: None,
+            },
+        )
+        .expect("a tab should open in a mirrored space");
+
+        let workspace = &app.state.workspaces[0];
+        assert_eq!(workspace.tabs.len(), 2, "the space should have two tabs");
+        assert_eq!(
+            workspace.public_pane_numbers.len(),
+            2,
+            "both tabs should count as panes"
+        );
+        workspace.assert_invariants_for_test();
+    }
+
+    /// The other half of the same door: a tab that closes has to give its pane
+    /// number back, or the workspace goes on claiming a pane that is gone.
+    #[tokio::test]
+    async fn a_tab_closing_in_a_mirrored_space_gives_its_pane_back() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+        app.state.workspaces.push(mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "rycelia",
+        ));
+        app.add_mirror_tab(
+            &space("workbox"),
+            0,
+            &MirrorTabSpec {
+                key: key_for("workbox", "w1", "term-2"),
+                remote_terminal: "term-2".to_string(),
+                label: None,
+                argv: Vec::new(),
+                agent: None,
+                origin: None,
+            },
+        )
+        .expect("a tab should open in a mirrored space");
+
+        app.close_mirror_tab_at(0, 1);
+
+        let workspace = &app.state.workspaces[0];
+        assert_eq!(workspace.tabs.len(), 1, "the space should have one tab left");
+        assert_eq!(
+            workspace.public_pane_numbers.len(),
+            1,
+            "the closed tab should not still count as a pane"
+        );
+        workspace.assert_invariants_for_test();
+    }
+
     fn apply_creates(
         workspaces: &mut Vec<Workspace>,
         space: &RemoteSpaceConfig,

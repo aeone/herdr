@@ -670,9 +670,21 @@ impl Workspace {
         Ok((self.tabs.len() - 1, terminal, runtime))
     }
 
-    pub fn close_tab(&mut self, idx: usize) -> bool {
+    /// Takes in a tab this workspace did not build itself and gives its pane a
+    /// public number. Mirrors assemble their own tabs, so this is the door they
+    /// come in through; without the number the pane is invisible to the API and
+    /// to the sidebar, which is how a four tab mirror once showed one pane.
+    pub(crate) fn adopt_tab(&mut self, tab: Tab, pane_number: usize) -> usize {
+        self.register_new_pane_with_number(tab.root_pane, pane_number);
+        self.tabs.push(tab);
+        self.tabs.len() - 1
+    }
+
+    /// Removes a tab and hands it back, so the caller can shut down whatever was
+    /// running in it. Leaves at least one tab standing.
+    pub(crate) fn take_tab(&mut self, idx: usize) -> Option<Tab> {
         if self.tabs.len() <= 1 || idx >= self.tabs.len() {
-            return false;
+            return None;
         }
         let tab = self.tabs.remove(idx);
         for pane_id in tab.panes.keys() {
@@ -683,7 +695,11 @@ impl Workspace {
         } else if idx <= self.active_tab && self.active_tab > 0 {
             self.active_tab -= 1;
         }
-        true
+        Some(tab)
+    }
+
+    pub fn close_tab(&mut self, idx: usize) -> bool {
+        self.take_tab(idx).is_some()
     }
 
     pub fn move_tab(&mut self, source_idx: usize, insert_idx: usize) -> bool {
