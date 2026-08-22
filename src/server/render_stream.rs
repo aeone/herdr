@@ -14,7 +14,11 @@ pub(crate) enum ClientRenderState {
     /// Semantic clients compare full frame data and skip identical frames.
     Semantic { last_frame: Option<FrameData> },
     /// Terminal-ANSI clients keep a terminal diff encoder and sequence number.
-    TerminalAnsi { blit_encoder: BlitEncoder, seq: u64 },
+    TerminalAnsi {
+        blit_encoder: BlitEncoder,
+        seq: u64,
+        repaint_pending: bool,
+    },
 }
 
 impl ClientRenderState {
@@ -24,6 +28,7 @@ impl ClientRenderState {
             RenderEncoding::TerminalAnsi => Self::TerminalAnsi {
                 blit_encoder: BlitEncoder::new(),
                 seq: 0,
+                repaint_pending: false,
             },
         }
     }
@@ -31,7 +36,23 @@ impl ClientRenderState {
     pub(crate) fn reset_baseline(&mut self) {
         match self {
             Self::Semantic { last_frame } => *last_frame = None,
-            Self::TerminalAnsi { blit_encoder, .. } => *blit_encoder = BlitEncoder::new(),
+            Self::TerminalAnsi {
+                blit_encoder,
+                repaint_pending,
+                ..
+            } => {
+                *blit_encoder = BlitEncoder::new();
+                *repaint_pending = false;
+            }
+        }
+    }
+
+    pub(crate) fn request_repaint(&mut self) {
+        match self {
+            Self::Semantic { last_frame } => *last_frame = None,
+            Self::TerminalAnsi {
+                repaint_pending, ..
+            } => *repaint_pending = true,
         }
     }
 
@@ -53,12 +74,16 @@ impl ClientRenderState {
                     message: ServerMessage::Frame(frame),
                 })
             }
-            Self::TerminalAnsi { blit_encoder, seq } => {
-                if blit_encoder.is_current(&frame) {
+            Self::TerminalAnsi {
+                blit_encoder,
+                seq,
+                repaint_pending,
+            } => {
+                if !*repaint_pending && blit_encoder.is_current(&frame) {
                     crate::render_prof::event("prepare_frame.ansi.skip_current");
                     return None;
                 }
-                let mut encoded = blit_encoder.encode(&frame, false);
+                let mut encoded = blit_encoder.encode(&frame, *repaint_pending);
                 crate::render_prof::event("prepare_frame.ansi.changed");
                 crate::render_prof::counter("prepare_frame.ansi.bytes", encoded.bytes.len() as u64);
                 if encoded.full {
@@ -102,7 +127,11 @@ impl ClientRenderState {
                 },
             ) => *last_frame = Some(frame),
             (
-                Self::TerminalAnsi { blit_encoder, seq },
+                Self::TerminalAnsi {
+                    blit_encoder,
+                    seq,
+                    repaint_pending,
+                },
                 PreparedRender::TerminalAnsi {
                     frame,
                     encoded: Some(encoded),
@@ -111,6 +140,7 @@ impl ClientRenderState {
             ) => {
                 blit_encoder.commit(frame, encoded);
                 *seq += 1;
+                *repaint_pending = false;
             }
             _ => {}
         }
@@ -125,28 +155,16 @@ impl ClientRenderState {
     }
 }
 
-const SYNC_OUTPUT_END: &[u8] = b"\x1b[?2026l";
-
 fn insert_graphics_before_sync_end(encoded: &mut Vec<u8>, graphics: &[u8]) {
     if graphics.is_empty() {
         return;
     }
 
-    if let Some(sync_end) = rfind_subslice(encoded, SYNC_OUTPUT_END) {
+    if let Some(sync_end) = crate::protocol::render_ansi::final_sync_output_end(encoded) {
         encoded.splice(sync_end..sync_end, graphics.iter().copied());
     } else {
         encoded.extend_from_slice(graphics);
     }
-}
-
-fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > haystack.len() {
-        return None;
-    }
-
-    haystack
-        .windows(needle.len())
-        .rposition(|window| window == needle)
 }
 
 /// A prepared client render message plus any baseline state needed after send.
@@ -448,4 +466,174 @@ fn focused_terminal_suppresses_host_cursor(
     app_state
         .runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         .is_some_and(crate::terminal::TerminalRuntime::synchronized_output_active)
+}
+
+#[cfg(test)]
+mod render_scale_benchmark {
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    use ratatui::layout::Direction;
+
+    use super::*;
+    use crate::app::Mode;
+    use crate::terminal::TerminalRuntime;
+    use crate::workspace::Workspace;
+
+    const AREA: Rect = Rect::new(0, 0, 120, 40);
+    const SAMPLE_COUNT: usize = 40;
+    const WARMUP_COUNT: usize = 5;
+
+    #[derive(Clone, Copy)]
+    struct RenderStats {
+        median_us: u128,
+        p95_us: u128,
+        max_us: u128,
+    }
+
+    fn history() -> String {
+        (0..2_000).map(|line| format!("line-{line}\r\n")).collect()
+    }
+
+    fn runtime(history: &str) -> TerminalRuntime {
+        TerminalRuntime::test_with_scrollback_bytes(
+            AREA.width,
+            AREA.height,
+            1024 * 1024,
+            history.as_bytes(),
+        )
+    }
+
+    fn app_with_workspaces(workspace_count: usize) -> AppState {
+        let history = history();
+        let workspaces = (0..workspace_count)
+            .map(|index| {
+                let mut workspace = Workspace::test_new(&format!("bench-{}", index + 1));
+                let root_pane = workspace.tabs[0].root_pane;
+                workspace.tabs[0]
+                    .runtimes
+                    .insert(root_pane, runtime(&history));
+                workspace
+            })
+            .collect();
+        app_with(workspaces)
+    }
+
+    fn app_with_active_panes(pane_count: usize) -> AppState {
+        let history = history();
+        let mut workspace = Workspace::test_new("bench");
+        let root_pane = workspace.tabs[0].root_pane;
+        workspace.tabs[0]
+            .runtimes
+            .insert(root_pane, runtime(&history));
+        let mut pane_ids = vec![root_pane];
+
+        for index in 1..pane_count {
+            let target = pane_ids[(index - 1) / 2];
+            workspace.tabs[0].layout.focus_pane(target);
+            let direction = if index % 2 == 0 {
+                Direction::Vertical
+            } else {
+                Direction::Horizontal
+            };
+            let pane_id = workspace.test_split(direction);
+            workspace.tabs[0]
+                .runtimes
+                .insert(pane_id, runtime(&history));
+            pane_ids.push(pane_id);
+        }
+
+        app_with(vec![workspace])
+    }
+
+    fn app_with(workspaces: Vec<Workspace>) -> AppState {
+        let mut app = AppState::test_new();
+        app.mode = Mode::Terminal;
+        app.pane_scrollbars = true;
+        app.workspaces = workspaces;
+        app.active = Some(0);
+        app.selected = 0;
+        app
+    }
+
+    fn profile(mut app: AppState) -> RenderStats {
+        for _ in 0..WARMUP_COUNT {
+            black_box(render_virtual(&mut app, AREA, true));
+        }
+
+        let mut samples = Vec::with_capacity(SAMPLE_COUNT);
+        for _ in 0..SAMPLE_COUNT {
+            let started = Instant::now();
+            black_box(render_virtual(&mut app, AREA, true));
+            samples.push(started.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+
+        RenderStats {
+            median_us: samples[SAMPLE_COUNT / 2],
+            p95_us: samples[(SAMPLE_COUNT - 1) * 95 / 100],
+            max_us: samples[SAMPLE_COUNT - 1],
+        }
+    }
+
+    fn profile_cardinalities(build: fn(usize) -> AppState) -> [(usize, RenderStats); 3] {
+        [1, 15, 50].map(|count| (count, profile(build(count))))
+    }
+
+    fn print_profiles(label: &str, profiles: [(usize, RenderStats); 3]) {
+        let baseline_median_us = profiles[0].1.median_us as f64;
+        let baseline_p95_us = profiles[0].1.p95_us as f64;
+        println!("{label}");
+        println!("     count  median_us  p95_us  max_us  median_vs_1x  p95_vs_1x");
+        for (count, stats) in profiles {
+            println!(
+                "{count:>10}  {:>9}  {:>6}  {:>6}  {:>12.2}  {:>9.2}",
+                stats.median_us,
+                stats.p95_us,
+                stats.max_us,
+                stats.median_us as f64 / baseline_median_us,
+                stats.p95_us as f64 / baseline_p95_us,
+            );
+        }
+    }
+
+    fn assert_full_render_avoids_aggregate_input_state(mut app: AppState, scenario: &str) {
+        crate::pane::reset_aggregate_input_state_reads();
+        black_box(render_virtual(&mut app, AREA, true));
+        assert_eq!(
+            crate::pane::aggregate_input_state_reads(),
+            0,
+            "full render collected aggregate input state for {scenario}",
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn aggregate_input_state_counter_records_reads() {
+        let runtime = TerminalRuntime::test_with_screen_bytes(80, 24, b"");
+        crate::pane::reset_aggregate_input_state_reads();
+        black_box(runtime.input_state());
+        assert_eq!(crate::pane::aggregate_input_state_reads(), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_render_avoids_aggregate_input_state_reads() {
+        assert_full_render_avoids_aggregate_input_state(
+            app_with_workspaces(15),
+            "background workspaces",
+        );
+        assert_full_render_avoids_aggregate_input_state(app_with_active_panes(15), "active panes");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "manual full-render scaling profile"]
+    async fn render_scale_profile() {
+        print_profiles(
+            "background-workspace resize/layout (one pane each)",
+            profile_cardinalities(app_with_workspaces),
+        );
+        print_profiles(
+            "active panes (one workspace)",
+            profile_cardinalities(app_with_active_panes),
+        );
+    }
 }

@@ -3,11 +3,12 @@ use bytes::Bytes;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, PaneClearAgentAuthorityParams, PaneCurrentParams,
     PaneDirection, PaneEdgesParams, PaneEdgesResult, PaneFocusDirectionParams,
-    PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneLayoutPane, PaneLayoutParams,
-    PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit, PaneListParams, PaneMoveDestination,
-    PaneMoveParams, PaneMoveReason, PaneMoveResult, PaneNeighborParams, PaneNeighborResult,
-    PaneProcessInfo, PaneProcessInfoParams, PaneProcessInfoProcess, PaneReadParams, PaneReadResult,
-    PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
+    PaneFocusDirectionReason, PaneFocusDirectionResult, PaneInfo, PaneInputSetParams,
+    PaneLayoutPane, PaneLayoutParams, PaneLayoutRect, PaneLayoutSnapshot, PaneLayoutSplit,
+    PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
+    PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
+    PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
+    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
     PaneSendInputParams, PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams,
     PaneSwapReason, PaneSwapResult, PaneTarget, PaneZoomMode, PaneZoomParams, PaneZoomReason,
@@ -57,6 +58,7 @@ impl App {
         let default_shell = self.state.default_shell.clone();
         let scrollback_limit_bytes = self.state.pane_scrollback_limit_bytes;
         let host_terminal_theme = self.state.host_terminal_theme;
+        let host_terminal_appearance = self.state.host_terminal_appearance;
         let previous_focus = self.state.current_pane_focus_target();
         let Some(ws) = self.state.workspaces.get_mut(ws_idx) else {
             return encode_error(id, "pane_not_found", "pane not found");
@@ -76,6 +78,7 @@ impl App {
                 split_cwd,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 shell_config,
                 extra_env,
                 params.focus,
@@ -88,6 +91,7 @@ impl App {
                 split_cwd,
                 scrollback_limit_bytes,
                 host_terminal_theme,
+                host_terminal_appearance,
                 shell_config,
                 extra_env,
                 params.focus,
@@ -98,6 +102,12 @@ impl App {
             Some(Err(err)) => return encode_error(id, "pane_split_failed", err.to_string()),
             None => return encode_error(id, "pane_not_found", "pane not found"),
         };
+        if let Some(pane) = self.state.workspaces[ws_idx].pane_state_mut(new_pane.pane_id) {
+            pane.right_click_passthrough = matches!(
+                params.right_click,
+                crate::api::schema::PaneRightClickTarget::Pane
+            );
+        }
         if params.focus {
             self.state.switch_workspace_tab(ws_idx, target_tab_idx);
             self.state
@@ -868,10 +878,6 @@ impl App {
                     self.recover_failed_pane_move(recovery_context, moved);
                     return encode_error(id, "pane_move_failed", "target tab disappeared");
                 };
-                let previous_target_focus = self.state.workspaces[target_ws_idx].tabs
-                    [target_tab_idx]
-                    .layout
-                    .focused();
                 let direction = split_direction_to_layout(split);
                 let moved_pane_id = match self.state.workspaces[target_ws_idx]
                     .insert_moved_pane_into_tab(
@@ -880,6 +886,7 @@ impl App {
                         moved,
                         direction,
                         ratio,
+                        focus,
                     ) {
                     Ok(pane_id) => pane_id,
                     Err(moved) => {
@@ -891,11 +898,6 @@ impl App {
                         );
                     }
                 };
-                if !focus {
-                    self.state.workspaces[target_ws_idx].tabs[target_tab_idx]
-                        .layout
-                        .focus_pane(previous_target_focus);
-                }
                 (target_ws_idx, target_tab_idx, moved_pane_id)
             }
             ResolvedPaneMoveDestination::NewTab {
@@ -1135,6 +1137,29 @@ impl App {
         )
     }
 
+    pub(super) fn handle_pane_input_set(
+        &mut self,
+        id: String,
+        params: PaneInputSetParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(pane) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|workspace| workspace.pane_state_mut(pane_id))
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        pane.right_click_passthrough = matches!(
+            params.right_click,
+            crate::api::schema::PaneRightClickTarget::Pane
+        );
+        encode_success(id, ResponseResult::Ok {})
+    }
+
     pub(super) fn handle_pane_rename(&mut self, id: String, params: PaneRenameParams) -> String {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
@@ -1179,7 +1204,7 @@ impl App {
         else {
             return pane_not_found(id, &params.pane_id);
         };
-        let text = crate::app::api_helpers::read_terminal_snapshot(
+        let snapshot = crate::app::api_helpers::read_terminal_snapshot(
             pane,
             params.source,
             params.format,
@@ -1195,9 +1220,9 @@ impl App {
                     tab_id: self.public_tab_id(ws_idx, tab_idx).unwrap(),
                     source: params.source,
                     format: params.format,
-                    text,
+                    text: snapshot.text,
                     revision: 0,
-                    truncated: false,
+                    truncated: snapshot.truncated,
                 },
             },
         )
@@ -1357,9 +1382,21 @@ impl App {
         let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        if terminal.metadata_report_blocked_by_process_exit(
+            &source,
+            agent_label.as_deref(),
+            applies_to_source.as_deref(),
+        ) {
+            return encode_success(id, ResponseResult::Ok {});
+        }
         if !terminal.metadata_report_sequence_is_fresh(&source, params.seq) {
             return encode_success(id, ResponseResult::Ok {});
         }
+        let metadata_agent = crate::terminal::TerminalState::metadata_report_agent(
+            &source,
+            agent_label.as_deref(),
+            applies_to_source.as_deref(),
+        );
         if let Some(tokens) = tokens.as_ref() {
             if terminal.metadata_tokens.key_count_after_patch(tokens)
                 > MAX_METADATA_TOKEN_KEYS_PER_RESOURCE
@@ -1373,7 +1410,8 @@ impl App {
                 );
             }
         }
-        match terminal.accept_metadata_report(&source, params.seq, tokens.is_some()) {
+        match terminal.accept_metadata_report(&source, params.seq, tokens.is_some(), metadata_agent)
+        {
             Ok(true) => {}
             Ok(false) => return encode_success(id, ResponseResult::Ok {}),
             Err(()) => {
@@ -1676,6 +1714,7 @@ impl App {
             tab.layout.panes(area),
             self.state.pane_borders,
             self.state.pane_gaps,
+            self.state.pane_outer_borders,
         )
         .into_iter()
         .filter_map(|pane| {
@@ -1885,6 +1924,36 @@ mod tests {
         (app, public_pane_id)
     }
 
+    #[test]
+    fn pane_input_set_changes_only_the_target_pane() {
+        let (mut app, public_pane_id) = app_with_test_workspace();
+        let target = app.state.workspaces[0].tabs[0].root_pane;
+        let other = app.state.workspaces[0].test_split(ratatui::layout::Direction::Horizontal);
+
+        let response = app.handle_pane_input_set(
+            "req".into(),
+            PaneInputSetParams {
+                pane_id: public_pane_id,
+                right_click: crate::api::schema::PaneRightClickTarget::Pane,
+            },
+        );
+
+        let response: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(response.result, ResponseResult::Ok {}));
+        assert!(
+            app.state.workspaces[0]
+                .pane_state(target)
+                .unwrap()
+                .right_click_passthrough
+        );
+        assert!(
+            !app.state.workspaces[0]
+                .pane_state(other)
+                .unwrap()
+                .right_click_passthrough
+        );
+    }
+
     fn app_with_send_key_runtime(
         capacity: usize,
     ) -> (App, String, tokio::sync::mpsc::Receiver<bytes::Bytes>) {
@@ -1963,6 +2032,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn api_pane_send_keys_encodes_shift_tab_as_backtab() {
+        let (mut app, pane_id, mut rx) = app_with_send_key_runtime(1);
+
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::PaneSendKeys(PaneSendKeysParams {
+                pane_id,
+                keys: vec!["shift+tab".into()],
+            }),
+        });
+
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(success.result, ResponseResult::Ok {});
+        assert_eq!(rx.try_recv().unwrap(), bytes::Bytes::from_static(b"\x1b[Z"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn api_pane_get_exposes_scroll_metrics() {
         let (mut app, public_pane_id, pane_id) = app_with_scrollback_runtime();
         let runtime = app
@@ -1986,6 +2073,29 @@ mod tests {
         assert_eq!(scroll.offset_from_bottom, 3);
         assert!(scroll.max_offset_from_bottom >= scroll.offset_from_bottom);
         assert_eq!(scroll.viewport_rows, 5);
+    }
+
+    #[tokio::test]
+    async fn api_pane_read_reports_when_older_rows_are_omitted() {
+        let (mut app, public_pane_id, _pane_id) = app_with_scrollback_runtime();
+
+        let response = app.handle_pane_read(
+            "req".into(),
+            PaneReadParams {
+                pane_id: public_pane_id,
+                source: crate::api::schema::ReadSource::Recent,
+                lines: Some(2),
+                format: crate::api::schema::ReadFormat::Text,
+                strip_ansi: true,
+                intent: crate::api::schema::ReadIntent::Interactive,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneRead { read } = success.result else {
+            panic!("expected pane read response");
+        };
+        assert!(read.text.contains("line 19"));
+        assert!(read.truncated);
     }
 
     #[tokio::test]
@@ -2642,7 +2752,7 @@ mod tests {
             rx.try_recv().expect("forwarded release after pane move"),
             bytes::Bytes::from_static(b"\x1b[106;1:3u")
         );
-        assert!(app.pressed_terminal_keys.is_empty());
+        assert!(app.input_leases.is_empty());
     }
 
     #[test]
@@ -3816,6 +3926,133 @@ mod tests {
             .metadata_tokens
             .values()
             .is_empty());
+    }
+
+    #[test]
+    fn pane_metadata_ignored_after_process_exit_does_not_poison_sequence() {
+        let (mut app, pane_id) = app_with_test_workspace();
+        let (_, internal_pane_id) = app.parse_pane_id(&pane_id).unwrap();
+        let terminal_id = app.state.workspaces[0]
+            .pane_state(internal_pane_id)
+            .unwrap()
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Idle);
+
+        let mut initial = metadata_params(pane_id.clone());
+        initial.source = "custom:pi-metadata".into();
+        initial.agent = Some("pi".into());
+        initial.seq = Some(100);
+        let response = app.handle_pane_report_metadata("initial".into(), initial);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let mut initial_tokens = metadata_params(pane_id.clone());
+        initial_tokens.source = "custom:pi-tokens".into();
+        initial_tokens.agent = Some("pi".into());
+        initial_tokens.title = None;
+        initial_tokens.tokens =
+            std::collections::HashMap::from([("generation".into(), Some("old".into()))]);
+        initial_tokens.seq = Some(100);
+        let response = app.handle_pane_report_metadata("initial-tokens".into(), initial_tokens);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let exit_at = std::time::Instant::now() + std::time::Duration::from_millis(1);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                true,
+                exit_at,
+            );
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                None,
+                AgentState::Unknown,
+                false,
+                false,
+                false,
+                false,
+                exit_at + std::time::Duration::from_millis(1),
+            );
+
+        let mut stale = metadata_params(pane_id.clone());
+        stale.source = "custom:pi-metadata".into();
+        stale.agent = Some("pi".into());
+        stale.title = Some("stale".into());
+        stale.seq = Some(200);
+        let response = app.handle_pane_report_metadata("stale".into(), stale);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let mut official = metadata_params(pane_id.clone());
+        official.source = "herdr:pi".into();
+        official.seq = Some(200);
+        let response = app.handle_pane_report_metadata("official".into(), official);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert!(terminal.metadata_report_sequence_is_fresh("custom:pi-metadata", Some(1)));
+        assert!(terminal.metadata_report_sequence_is_fresh("custom:pi-tokens", Some(1)));
+        assert!(terminal.metadata_report_sequence_is_fresh("herdr:pi", Some(1)));
+
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state_with_screen_signals_at(
+                Some(Agent::Pi),
+                AgentState::Idle,
+                false,
+                false,
+                false,
+                false,
+                exit_at + std::time::Duration::from_millis(2),
+            );
+        let mut fresh = metadata_params(pane_id.clone());
+        fresh.source = "custom:pi-metadata".into();
+        fresh.agent = Some("pi".into());
+        fresh.title = Some("fresh".into());
+        fresh.seq = Some(1);
+        let response = app.handle_pane_report_metadata("fresh".into(), fresh);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let mut fresh_tokens = metadata_params(pane_id);
+        fresh_tokens.source = "custom:pi-tokens".into();
+        fresh_tokens.agent = Some("pi".into());
+        fresh_tokens.title = None;
+        fresh_tokens.tokens =
+            std::collections::HashMap::from([("generation".into(), Some("new".into()))]);
+        fresh_tokens.seq = Some(1);
+        let response = app.handle_pane_report_metadata("fresh-tokens".into(), fresh_tokens);
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+
+        let terminal = &app.state.terminals[&terminal_id];
+        assert_eq!(
+            terminal.agent_metadata["custom:pi-metadata"]
+                .title
+                .as_deref(),
+            Some("fresh")
+        );
+        assert_eq!(
+            terminal
+                .metadata_tokens
+                .values()
+                .get("generation")
+                .map(String::as_str),
+            Some("new")
+        );
     }
 
     #[test]

@@ -130,6 +130,7 @@ impl App {
             terminal_area,
             self.state.pane_borders,
             self.state.pane_gaps,
+            self.state.pane_outer_borders,
         );
 
         if self.state.active == Some(ws_idx)
@@ -239,6 +240,7 @@ impl App {
             cwd,
             self.state.pane_scrollback_limit_bytes,
             host_terminal_theme,
+            self.state.host_terminal_appearance,
             crate::pane::PaneShellConfig::new(&self.state.default_shell, self.state.shell_mode),
             &launch_env,
             self.event_tx.clone(),
@@ -289,15 +291,21 @@ fn derived_pending_agent_resume_pane_infos(
     terminal_area: Rect,
     pane_borders: bool,
     pane_gaps: bool,
+    pane_outer_borders: bool,
 ) -> Vec<crate::layout::PaneInfo> {
-    crate::ui::apply_pane_chrome(tab.layout.panes(terminal_area), pane_borders, pane_gaps)
-        .into_iter()
-        .map(|mut info| {
-            let pane_inner = crate::ui::pane_inner_rect(info.rect, info.borders);
-            info.inner_rect = stable_terminal_inner_rect(pane_inner);
-            info
-        })
-        .collect()
+    crate::ui::apply_pane_chrome(
+        tab.layout.panes(terminal_area),
+        pane_borders,
+        pane_gaps,
+        pane_outer_borders,
+    )
+    .into_iter()
+    .map(|mut info| {
+        let pane_inner = crate::ui::pane_inner_rect(info.rect, info.borders);
+        info.inner_rect = stable_terminal_inner_rect(pane_inner);
+        info
+    })
+    .collect()
 }
 
 fn stable_terminal_inner_rect(pane_inner: Rect) -> Rect {
@@ -410,6 +418,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
 
         assert!(app.start_pending_agent_resumes(false));
@@ -511,6 +520,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         for terminal_id in [&active_terminal, &hidden_terminal] {
             app.state
@@ -575,6 +585,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         app.state
             .terminals
@@ -635,6 +646,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         app.state
             .terminals
@@ -692,6 +704,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         app.state
             .terminals
@@ -752,6 +765,7 @@ mod tests {
                 g: 20,
                 b: 20,
             }),
+            ..Default::default()
         };
         app.state
             .terminals

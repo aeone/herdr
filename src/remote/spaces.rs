@@ -15,7 +15,7 @@ use std::io::BufRead;
 use crate::api::schema::response::ResponseResult;
 use crate::config::RemoteSpaceConfig;
 
-use super::unix::RemoteSsh;
+use super::attach::RemoteSsh;
 
 /// The pane a remote mirror stands for, on the host that really runs it.
 #[derive(Debug, Clone, PartialEq, Eq)]

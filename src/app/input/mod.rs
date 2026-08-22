@@ -36,8 +36,10 @@ fn modified_url_click_modifier_matches_terminal_mouse_reporting() {
     assert_eq!(modified_url_click_modifier(), KeyModifiers::CONTROL);
 }
 
+mod clipboard;
 mod copy_mode;
 mod jump;
+mod lease;
 mod modal;
 mod mouse;
 mod navigate;
@@ -48,9 +50,11 @@ mod sidebar;
 mod terminal;
 
 pub(crate) use self::{
+    lease::{ConsumedInputLease, ForwardedInputLease, InputLeaseKey, InputLeaseTable, RepeatPlan},
     modal::{
         handle_global_menu_key, handle_keybind_help_key, handle_navigator_key,
-        insert_navigator_search_text, insert_rename_input_text, open_new_workspace_dialog,
+        insert_keybind_help_query_text, insert_navigator_search_text, insert_rename_input_text,
+        open_new_workspace_dialog,
     },
     navigate::{
         terminal_direct_indexed_navigation_action, terminal_direct_non_indexed_navigation_action,
@@ -112,7 +116,7 @@ impl App {
                 }
                 Mode::Settings => self.handle_settings_key(key_event),
                 Mode::GlobalMenu => handle_global_menu_key(&mut self.state, key_event),
-                Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key_event),
+                Mode::KeybindHelp => handle_keybind_help_key(&mut self.state, key),
                 Mode::Navigator => {
                     handle_navigator_key(&mut self.state, &self.terminal_runtimes, key_event)
                 }
@@ -120,6 +124,66 @@ impl App {
             },
         }
         None
+    }
+
+    pub(crate) fn handle_text_commit_headless(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.state.popup_pane.is_some() {
+            if let Some(runtime) = self.popup_runtime() {
+                let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
+            } else {
+                self.close_popup_pane();
+            }
+            return;
+        }
+        if self.state.mode != Mode::Terminal {
+            self.paste_into_active_text_input(text);
+            return;
+        }
+
+        self.state.clear_selection();
+        self.selection_autoscroll_deadline = None;
+        self.state.update_dismissed = true;
+        if let Some(ws_idx) = self.state.active {
+            if let Some(runtime) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
+                let _ = runtime.try_send_bytes(Bytes::copy_from_slice(text.as_bytes()));
+            }
+        }
+    }
+
+    pub(super) async fn handle_text_commit(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if self.state.popup_pane.is_some() {
+            if let Some(runtime) = self.popup_runtime() {
+                let _ = runtime.send_bytes(Bytes::from(text)).await;
+            } else {
+                self.close_popup_pane();
+            }
+            return;
+        }
+        if self.state.mode != Mode::Terminal {
+            self.paste_into_active_text_input(&text);
+            return;
+        }
+
+        self.state.clear_selection();
+        self.selection_autoscroll_deadline = None;
+        self.state.update_dismissed = true;
+        if let Some(ws_idx) = self.state.active {
+            if let Some(runtime) = self
+                .state
+                .focused_runtime_in_workspace(&self.terminal_runtimes, ws_idx)
+            {
+                let _ = runtime.send_bytes(Bytes::from(text)).await;
+            }
+        }
     }
 
     pub(super) async fn handle_paste(&mut self, text: String) {
@@ -173,6 +237,13 @@ impl App {
                     return false;
                 }
                 insert_navigator_search_text(&mut self.state, &self.terminal_runtimes, text);
+                true
+            }
+            Mode::KeybindHelp => {
+                if !self.state.keybind_help.search_focused {
+                    return false;
+                }
+                insert_keybind_help_query_text(&mut self.state, text);
                 true
             }
             Mode::Copy => {
@@ -259,6 +330,31 @@ impl App {
     }
 
     pub(super) fn handle_mouse(&mut self, mouse: MouseEvent) {
+        self.handle_mouse_from_input_source(super::LOCAL_INPUT_SOURCE, mouse);
+    }
+
+    pub(super) fn handle_mouse_from_input_source(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+    ) {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.pending_url_click_sources.remove(&source_id);
+            }
+            MouseEventKind::Drag(MouseButton::Left)
+                if self.pending_url_click_sources.contains(&source_id) =>
+            {
+                return;
+            }
+            MouseEventKind::Up(MouseButton::Left)
+                if self.pending_url_click_sources.remove(&source_id) =>
+            {
+                return;
+            }
+            _ => {}
+        }
+
         if self.state.popup_pane.is_some() {
             self.handle_popup_mouse(mouse);
             return;
@@ -287,7 +383,7 @@ impl App {
             }
         }
 
-        if self.handle_modified_url_click(mouse) {
+        if self.handle_modified_url_click(source_id, mouse) {
             return;
         }
 
@@ -299,7 +395,10 @@ impl App {
         let previous_agent_panel_sort = self.state.agent_panel_sort;
         let previous_settings_section = self.state.settings.section;
         if !handled_pane_double_click {
-            if let Some(action) = self.state.handle_mouse(&mut self.terminal_runtimes, mouse) {
+            if let Some(action) =
+                self.state
+                    .handle_mouse(&mut self.terminal_runtimes, source_id, mouse)
+            {
                 match action {
                     MouseAction::NewWorkspace => self.begin_tui_workspace_create_at(
                         "tui.mouse.workspace.create",
@@ -308,18 +407,15 @@ impl App {
                     ),
                     MouseAction::Settings(action) => match action {
                         SettingsAction::SaveTheme(name) => self.save_theme(&name),
+                        SettingsAction::SaveStatusIndicators(style) => {
+                            self.save_status_indicators(style)
+                        }
                         SettingsAction::SaveSound(enabled) => self.save_sound(enabled),
                         SettingsAction::SaveToastDelivery(delivery) => {
                             self.save_toast_delivery(delivery)
                         }
                         SettingsAction::SaveAgentBorderLabels(enabled) => {
                             self.save_agent_border_labels(enabled)
-                        }
-                        SettingsAction::SavePaneHistory(enabled) => {
-                            self.save_pane_history_persistence(enabled)
-                        }
-                        SettingsAction::SaveSwitchAsciiInputSourceInPrefix(enabled) => {
-                            self.save_switch_ascii_input_source_in_prefix(enabled)
                         }
                         SettingsAction::InstallRecommendedIntegrations => {
                             self.install_recommended_integrations()
@@ -337,6 +433,9 @@ impl App {
                         source_ws_idx,
                         insert_idx,
                     } => self.move_workspace_via_api(source_ws_idx, insert_idx),
+                    MouseAction::MoveWorkspaceBlock { params } => {
+                        self.move_workspace_block_via_api(params)
+                    }
                     MouseAction::MoveTab {
                         ws_idx,
                         source_tab_idx,
@@ -373,15 +472,7 @@ impl App {
             self.save_agent_panel_sort(self.state.agent_panel_sort);
         }
 
-        if let Some(content) = self.state.request_clipboard_write.take() {
-            if self
-                .event_tx
-                .try_send(crate::events::AppEvent::ClipboardWrite { content })
-                .is_err()
-            {
-                tracing::warn!("failed to queue clipboard write event");
-            }
-        }
+        self.dispatch_pending_clipboard_write();
 
         // Sync autoscroll deadline with state (mouse handler may have
         // set or cleared selection_autoscroll during handle_mouse).
@@ -410,15 +501,17 @@ impl App {
             self.close_popup_pane();
             return;
         };
-        let column = mouse.column.saturating_sub(inner.x);
-        let row = mouse.row.saturating_sub(inner.y);
+        let position = crate::input::mouse::Position::Cell {
+            column: mouse.column.saturating_sub(inner.x),
+            row: mouse.row.saturating_sub(inner.y),
+        };
         let bytes = match mouse.kind {
             MouseEventKind::ScrollUp
             | MouseEventKind::ScrollDown
             | MouseEventKind::ScrollLeft
             | MouseEventKind::ScrollRight => match rt.wheel_routing() {
                 Some(crate::pane::WheelRouting::MouseReport) => {
-                    rt.encode_mouse_wheel(mouse.kind, column, row, mouse.modifiers)
+                    rt.encode_mouse_wheel(mouse.kind, position, mouse.modifiers)
                 }
                 Some(crate::pane::WheelRouting::AlternateScroll) => {
                     rt.encode_alternate_scroll(mouse.kind)
@@ -434,16 +527,16 @@ impl App {
                 }
             },
             MouseEventKind::Down(_) | MouseEventKind::Up(_) | MouseEventKind::Drag(_) => {
-                rt.encode_mouse_button(mouse.kind, column, row, mouse.modifiers)
+                rt.encode_mouse_button(mouse.kind, position, mouse.modifiers)
             }
-            MouseEventKind::Moved => {
-                rt.encode_mouse_motion(mouse.kind, column, row, mouse.modifiers)
-            }
+            MouseEventKind::Moved => rt.encode_mouse_motion(mouse.kind, position, mouse.modifiers),
         };
         let Some(bytes) = bytes else {
             return;
         };
-        rt.scroll_reset();
+        if !matches!(mouse.kind, MouseEventKind::Moved) {
+            rt.scroll_reset();
+        }
         if let Err(err) = rt.try_send_bytes(Bytes::from(bytes)) {
             warn!(err = %err, kind = ?mouse.kind, "failed to forward popup mouse event");
         }
@@ -474,7 +567,20 @@ impl App {
         self.focus_pane_internal_via_api(ws_idx, pane_id);
     }
 
-    fn handle_modified_url_click(&mut self, mouse: MouseEvent) -> bool {
+    fn handle_modified_url_click(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+    ) -> bool {
+        self.handle_modified_url_click_with(source_id, mouse, crate::platform::open_url)
+    }
+
+    fn handle_modified_url_click_with(
+        &mut self,
+        source_id: super::InputSourceId,
+        mouse: MouseEvent,
+        open_url: impl FnOnce(&str) -> std::io::Result<Option<std::process::Child>>,
+    ) -> bool {
         if self.state.mode != Mode::Terminal
             || !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
             || !mouse.modifiers.contains(modified_url_click_modifier())
@@ -495,6 +601,7 @@ impl App {
         };
 
         self.last_pane_click = None;
+        self.pending_url_click_sources.insert(source_id);
         match self.invoke_plugin_link_handler_for_url(&url, info.id) {
             Ok(true) => return true,
             Ok(false) => {}
@@ -502,8 +609,12 @@ impl App {
                 tracing::warn!(err = %err, url = %url, "failed to invoke plugin link handler");
             }
         }
-        if let Err(err) = crate::platform::open_url(&url) {
-            tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+        match open_url(&url) {
+            Ok(Some(child)) => self.detached_process_children.push(child),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(err = %err, url = %url, "failed to open pane URL");
+            }
         }
         true
     }
@@ -536,14 +647,12 @@ impl App {
         };
 
         // Require the second click to land near the first click in the same pane
-        // and within the double-click window so adjacent interactions do not copy.
+        // and within the double-click window so adjacent interactions do not select a word.
         if !self.take_pane_double_click(click) {
             return false;
         }
 
-        // Preserve a short highlight after copying so the user gets visible
-        // confirmation without leaving a persistent selection behind.
-        self.copy_double_clicked_word(click)
+        self.select_double_clicked_word(click)
     }
 
     fn pane_click_candidate(&mut self, mouse: MouseEvent) -> Option<PaneClickState> {
@@ -587,18 +696,20 @@ impl App {
         true
     }
 
-    fn copy_double_clicked_word(&mut self, click: PaneClickState) -> bool {
-        let copied = self.state.copy_word_at_pane_cell(
+    fn select_double_clicked_word(&mut self, click: PaneClickState) -> bool {
+        let selected = self.state.select_word_at_pane_cell(
             &self.terminal_runtimes,
             click.pane_id,
             click.viewport_row,
             click.col,
         );
-        if copied {
-            self.selection_highlight_clear_deadline =
-                Some(std::time::Instant::now() + super::PANE_COPY_HIGHLIGHT_DURATION);
+        if selected {
+            self.selection_highlight_clear_deadline = self
+                .state
+                .copy_on_select
+                .then(|| std::time::Instant::now() + super::PANE_COPY_HIGHLIGHT_DURATION);
         }
-        copied
+        selected
     }
 }
 
@@ -628,6 +739,7 @@ pub(crate) fn modal_paste_target_active(state: &AppState) -> bool {
             .as_ref()
             .is_some_and(|open| open.search_focused),
         Mode::Navigator => state.navigator.search_focused,
+        Mode::KeybindHelp => state.keybind_help.search_focused,
         Mode::Copy => state
             .copy_mode
             .as_ref()
@@ -684,6 +796,7 @@ impl AppState {
                 cwd,
                 self.pane_scrollback_limit_bytes,
                 self.host_terminal_theme,
+                self.host_terminal_appearance,
                 crate::pane::PaneShellConfig::new(&self.default_shell, self.shell_mode),
                 Vec::new(),
             ) {
@@ -810,6 +923,18 @@ fn wait_for_file(path: &std::path::Path) -> String {
 }
 
 #[cfg(test)]
+#[cfg(unix)]
+async fn wait_for_detached_process_reap(app: &mut App, pid: u32) -> bool {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    while crate::platform::process_exists(pid) && tokio::time::Instant::now() < deadline {
+        app.reap_finished_detached_processes();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    app.reap_finished_detached_processes();
+    !crate::platform::process_exists(pid)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -837,6 +962,21 @@ mod tests {
 
         assert_eq!(app.state.name_input, "feature/logs");
         assert!(!app.state.name_input_replace_on_type);
+    }
+
+    #[tokio::test]
+    async fn paste_routes_to_keybind_help_query_only_when_searching() {
+        let mut app = test_app();
+        app.state.mode = Mode::KeybindHelp;
+        app.handle_paste("ignored".into()).await;
+        assert!(app.state.keybind_help.query.is_empty());
+
+        app.state.keybind_help.search_focused = true;
+        app.state.keybind_help.scroll = 3;
+        app.handle_paste("work\nspace".into()).await;
+
+        assert_eq!(app.state.keybind_help.query, "workspace");
+        assert_eq!(app.state.keybind_help.scroll, 0);
     }
 
     #[tokio::test]
@@ -902,6 +1042,12 @@ mod tests {
         state.navigator.search_focused = false;
         assert!(!modal_paste_target_active(&state));
         state.navigator.search_focused = true;
+        assert!(modal_paste_target_active(&state));
+
+        state.mode = Mode::KeybindHelp;
+        state.keybind_help.search_focused = false;
+        assert!(!modal_paste_target_active(&state));
+        state.keybind_help.search_focused = true;
         assert!(modal_paste_target_active(&state));
 
         state.mode = Mode::ConfirmClose;

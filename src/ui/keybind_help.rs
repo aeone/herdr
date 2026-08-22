@@ -177,6 +177,8 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.rename_tab), "rename tab"),
         help_entry(keybind_label(&kb.previous_tab), "previous tab"),
         help_entry(keybind_label(&kb.next_tab), "next tab"),
+        help_entry(keybind_label(&kb.move_tab_previous), "move tab left"),
+        help_entry(keybind_label(&kb.move_tab_next), "move tab right"),
         help_entry(indexed_label(&kb.switch_tab), "switch tab 1-9"),
         help_entry(keybind_label(&kb.close_tab), "close tab"),
     ]);
@@ -191,6 +193,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
         help_entry(keybind_label(&kb.copy_mode), "copy mode"),
         help_entry(keybind_label(&kb.zoom), "zoom pane"),
         help_entry(keybind_label(&kb.resize_mode), "resize mode"),
+        help_entry(keybind_label(&kb.resize_pane_left), "resize pane left"),
+        help_entry(keybind_label(&kb.resize_pane_down), "resize pane down"),
+        help_entry(keybind_label(&kb.resize_pane_up), "resize pane up"),
+        help_entry(keybind_label(&kb.resize_pane_right), "resize pane right"),
         help_entry(keybind_label(&kb.toggle_sidebar), "toggle sidebar"),
         help_entry(keybind_label(&kb.focus_pane_left), "focus pane left"),
         help_entry(keybind_label(&kb.focus_pane_down), "focus pane down"),
@@ -225,6 +231,26 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
     }
 
     groups
+}
+
+fn filter_keybind_help_groups(groups: Vec<HelpGroup>, query: &str) -> Vec<HelpGroup> {
+    if query.is_empty() {
+        return groups;
+    }
+
+    let query = query.to_lowercase();
+    groups
+        .into_iter()
+        .filter_map(|(group, entries)| {
+            let entries = entries
+                .into_iter()
+                .filter(|(key, label)| {
+                    key.to_lowercase().contains(&query) || label.to_lowercase().contains(&query)
+                })
+                .collect::<Vec<_>>();
+            (!entries.is_empty()).then_some((group, entries))
+        })
+        .collect()
 }
 
 /// How many body lines the mirrors section takes: a heading, a row per host,
@@ -313,7 +339,7 @@ pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> 
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(app.palette.text);
 
-    let groups = keybind_help_groups(app);
+    let groups = filter_keybind_help_groups(keybind_help_groups(app), &app.keybind_help.query);
     let key_width = groups
         .iter()
         .flat_map(|(_, entries)| entries.iter().map(|(key, _)| key.chars().count()))
@@ -321,6 +347,17 @@ pub(crate) fn keybind_help_lines(app: &AppState) -> Vec<(usize, Line<'static>)> 
         .unwrap_or(8);
 
     let mut lines = mirror_switch_lines(app);
+
+    if groups.is_empty() {
+        let message = " no matching keybinds";
+        return vec![(
+            message.chars().count(),
+            Line::from(Span::styled(
+                message,
+                Style::default().fg(app.palette.overlay1),
+            )),
+        )];
+    }
 
     for (group, entries) in groups {
         lines.push((
@@ -363,12 +400,39 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         frame,
         release_notes_close_button_rect(header_rows[0]),
         Some("esc"),
-        "close",
+        if app.keybind_help.search_focused {
+            "back"
+        } else {
+            "close"
+        },
         Style::default()
             .fg(panel_contrast_fg(&app.palette))
             .bg(app.palette.accent)
             .add_modifier(Modifier::BOLD),
     );
+    let search_line = if app.keybind_help.search_focused {
+        Line::from(vec![
+            Span::styled(
+                " / ",
+                Style::default()
+                    .fg(app.palette.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                app.keybind_help.query.as_str(),
+                Style::default()
+                    .fg(app.palette.text)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            " press / to filter by command or shortcut",
+            Style::default().fg(app.palette.overlay0),
+        ))
+    };
+    frame.render_widget(Paragraph::new(search_line), header_rows[1]);
+
     frame.render_widget(
         Paragraph::new(" available commands and configured shortcuts")
             .style(Style::default().fg(app.palette.overlay1)),
@@ -433,37 +497,48 @@ pub(super) fn render_keybind_help_overlay(app: &AppState, frame: &mut Frame) {
         );
     }
 
-    let mut footer = vec![
-        Span::styled(" scroll ", Style::default().fg(app.palette.overlay0)),
-        Span::styled("wheel ↑↓", Style::default().fg(app.palette.text)),
-        Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
-        Span::styled("jump", Style::default().fg(app.palette.overlay0)),
-        Span::styled(" pgup / pgdn ", Style::default().fg(app.palette.text)),
-        Span::styled("  ·  ", Style::default().fg(app.palette.overlay0)),
-        Span::styled("close", Style::default().fg(app.palette.overlay0)),
-        Span::styled(" esc / enter ", Style::default().fg(app.palette.text)),
-    ];
-    if !app.mirror_hosts.is_empty() {
-        footer.push(Span::styled(
-            "  ·  ",
-            Style::default().fg(app.palette.overlay0),
-        ));
-        footer.push(Span::styled(
-            "mirrors",
-            Style::default().fg(app.palette.overlay0),
-        ));
-        footer.push(Span::styled(
-            format!(
-                " 1-{} / {MIRRORS_TOGGLE_KEY} ",
-                app.mirror_hosts.len().min(9)
-            ),
-            Style::default().fg(app.palette.text),
-        ));
-    }
-    frame.render_widget(
-        Paragraph::new(Line::from(footer)),
-        stack.footer.unwrap_or_default(),
-    );
+    let footer = if app.keybind_help.search_focused {
+        Line::from(vec![
+            Span::styled(" filter ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("type/backspace", Style::default().fg(app.palette.text)),
+            Span::styled(" · ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("clear ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("ctrl+u", Style::default().fg(app.palette.text)),
+            Span::styled(" · ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("scroll ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("↑↓/pgup/pgdn", Style::default().fg(app.palette.text)),
+            Span::styled(" · ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("back ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("esc", Style::default().fg(app.palette.text)),
+        ])
+    } else {
+        let mut spans = vec![
+            Span::styled(" search ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("/", Style::default().fg(app.palette.text)),
+            Span::styled(" · ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("scroll ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("j/k/↑↓/pgup/pgdn", Style::default().fg(app.palette.text)),
+            Span::styled(" · ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("close ", Style::default().fg(app.palette.overlay0)),
+            Span::styled("esc/enter", Style::default().fg(app.palette.text)),
+        ];
+        if !app.mirror_hosts.is_empty() {
+            spans.push(Span::styled(
+                " · ",
+                Style::default().fg(app.palette.overlay0),
+            ));
+            spans.push(Span::styled(
+                "mirrors ",
+                Style::default().fg(app.palette.overlay0),
+            ));
+            spans.push(Span::styled(
+                format!("1-{} / {MIRRORS_TOGGLE_KEY}", app.mirror_hosts.len().min(9)),
+                Style::default().fg(app.palette.text),
+            ));
+        }
+        Line::from(spans)
+    };
+    frame.render_widget(Paragraph::new(footer), stack.footer.unwrap_or_default());
 }
 
 /// The key that flips mirroring while the keybind overlay is open, and only
@@ -503,4 +578,50 @@ pub(crate) fn keybind_help_mirrors_button_rect(area: Rect, app: &AppState) -> Re
         width.min(area.width),
         1,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn groups() -> Vec<HelpGroup> {
+        vec![
+            (
+                "workspaces / tabs",
+                vec![
+                    help_entry("w", "workspace navigation"),
+                    help_entry("c", "new tab"),
+                ],
+            ),
+            (
+                "panes",
+                vec![
+                    help_entry("v", "split vertical"),
+                    help_entry("x", "close pane"),
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn keybind_help_filter_matches_labels_case_insensitively() {
+        let filtered = filter_keybind_help_groups(groups(), "WoRk");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "workspaces / tabs");
+        assert_eq!(filtered[0].1.len(), 1);
+        assert_eq!(filtered[0].1[0].1, "workspace navigation");
+    }
+
+    #[test]
+    fn keybind_help_filter_matches_shortcuts_without_matching_group_headings() {
+        let filtered = filter_keybind_help_groups(groups(), "x");
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0, "panes");
+        assert_eq!(filtered[0].1.len(), 1);
+        assert_eq!(filtered[0].1[0].1, "close pane");
+
+        assert!(filter_keybind_help_groups(groups(), "panes").is_empty());
+    }
 }

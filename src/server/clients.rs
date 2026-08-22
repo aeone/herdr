@@ -55,7 +55,6 @@ pub(crate) type RenderTarget = (
 pub(crate) enum DeferredRender {
     #[default]
     None,
-    Graphics,
     Full,
 }
 
@@ -89,14 +88,18 @@ pub(crate) struct ClientConnection {
     pub(crate) observed: Vec<ObservedTerminal>,
     /// Client-local host Kitty graphics cache.
     pub(crate) graphics_cache: crate::kitty_graphics::HostGraphicsCache,
+    /// Passive eligibility for audited local Kitty regular-file graphics.
+    pub(crate) direct_graphics: bool,
+    /// Whether this frontend preserves exact SGR pixel reports.
+    pub(crate) pixel_mouse: bool,
     /// Whether the next graphics frame must clear and rebuild host-side Kitty state.
     pub(crate) graphics_surface_reset_pending: bool,
     /// Whether an ordinary render was skipped because the render channel was full.
     pub(crate) render_pending: bool,
-    /// Whether a pane-graphics-only render was skipped because the channel was full.
-    pane_graphics_render_pending: bool,
     /// Last host mouse capture mode sent to this client.
     pub(crate) host_mouse_capture_active: Option<bool>,
+    /// Last SGR pixel provenance mode sent to this client.
+    pub(crate) host_sgr_pixels_active: Option<bool>,
     /// Last Kitty report-all mode sent to this client's host terminal.
     pub(crate) host_keyboard_report_all_active: Option<bool>,
     /// Temporary files staged from this client's local clipboard image pastes.
@@ -159,27 +162,25 @@ impl ClientConnection {
             last_activity,
             render_state: ClientRenderState::new(render_encoding),
             graphics_cache: crate::kitty_graphics::HostGraphicsCache::default(),
+            direct_graphics: false,
+            pixel_mouse: false,
             graphics_surface_reset_pending: false,
             render_pending: false,
-            pane_graphics_render_pending: false,
             host_mouse_capture_active: None,
+            host_sgr_pixels_active: None,
             host_keyboard_report_all_active: None,
             staged_clipboard_files: Vec::new(),
             writer,
         }
     }
 
-    pub(crate) fn request_full_redraw(&mut self) {
-        self.render_state.reset_baseline();
-        self.graphics_surface_reset_pending = true;
-        self.pane_graphics_render_pending = false;
+    pub(crate) fn request_repaint(&mut self) {
+        self.render_state.request_repaint();
     }
 
     pub(crate) fn deferred_render(&self) -> DeferredRender {
         if self.render_pending {
             DeferredRender::Full
-        } else if self.pane_graphics_render_pending {
-            DeferredRender::Graphics
         } else {
             DeferredRender::None
         }
@@ -187,18 +188,10 @@ impl ClientConnection {
 
     pub(crate) fn clear_deferred_render(&mut self) {
         self.render_pending = false;
-        self.pane_graphics_render_pending = false;
     }
 
     pub(crate) fn defer_full_render(&mut self) {
         self.render_pending = true;
-        self.pane_graphics_render_pending = false;
-    }
-
-    pub(crate) fn defer_pane_graphics_render(&mut self) {
-        if !self.render_pending {
-            self.pane_graphics_render_pending = true;
-        }
     }
 
     pub(crate) fn take_deferred_render(&mut self) -> DeferredRender {
@@ -230,6 +223,11 @@ impl ClientConnection {
                     {
                         changed |=
                             self.set_host_appearance(Some(color.inferred_appearance()), false);
+                    }
+                }
+                crate::raw_input::RawInputEvent::HostPaletteColors { colors } => {
+                    for &(index, color) in colors {
+                        next_theme = next_theme.with_palette_color(index, color);
                     }
                 }
                 crate::raw_input::RawInputEvent::HostColorSchemeChanged(appearance) => {
@@ -287,6 +285,7 @@ pub(crate) fn events_include_interaction(events: &[crate::raw_input::RawInputEve
         matches!(
             event,
             crate::raw_input::RawInputEvent::Key(_)
+                | crate::raw_input::RawInputEvent::Text(_)
                 | crate::raw_input::RawInputEvent::Mouse(_)
                 | crate::raw_input::RawInputEvent::Paste(_)
                 | crate::raw_input::RawInputEvent::OuterFocusGained

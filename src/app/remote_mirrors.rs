@@ -223,7 +223,7 @@ pub(crate) fn plan_remote_mirrors(
         .enumerate()
         .filter(|(_, workspace)| {
             workspace.remote_mirror.as_ref().is_some_and(|mirror| {
-                mirror.target == space.target && !space_order.iter().any(|key| *key == mirror.key)
+                mirror.target == space.target && !space_order.contains(&mirror.key)
             })
         })
         .map(|(ws_idx, _)| MirrorAction::Close { ws_idx })
@@ -1880,6 +1880,7 @@ impl App {
             argv,
             self.state.pane_scrollback_limit_bytes,
             self.state.host_terminal_theme,
+            self.state.host_terminal_appearance,
             self.event_tx.clone(),
             self.render_notify.clone(),
             self.render_dirty.clone(),
@@ -1979,6 +1980,7 @@ impl App {
                 &spec.argv,
                 self.state.pane_scrollback_limit_bytes,
                 self.state.host_terminal_theme,
+                self.state.host_terminal_appearance,
                 &launch_env,
                 self.event_tx.clone(),
                 self.render_notify.clone(),
@@ -3158,7 +3160,11 @@ mod tests {
         app.close_mirror_tab_at(0, 1);
 
         let workspace = &app.state.workspaces[0];
-        assert_eq!(workspace.tabs.len(), 1, "the space should have one tab left");
+        assert_eq!(
+            workspace.tabs.len(),
+            1,
+            "the space should have one tab left"
+        );
         assert_eq!(
             workspace.public_pane_numbers.len(),
             1,

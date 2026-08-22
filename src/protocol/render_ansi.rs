@@ -34,6 +34,13 @@ use unicode_width::UnicodeWidthStr;
 use crate::protocol::{underline_style_from_modifier, CellData, FrameData};
 
 const REVERSED_MODIFIER: u16 = 1 << 6;
+const SYNC_OUTPUT_END: &[u8] = b"\x1b[?2026l";
+
+pub(crate) fn final_sync_output_end(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(SYNC_OUTPUT_END.len())
+        .rposition(|window| window == SYNC_OUTPUT_END)
+}
 
 /// Bytes produced by a [`BlitEncoder`] for one terminal frame.
 pub(crate) struct EncodedBlit {
@@ -58,44 +65,44 @@ impl BlitEncoder {
         Self::default()
     }
 
-    pub(crate) fn encode(&self, frame: &FrameData, force_full: bool) -> EncodedBlit {
-        self.encode_inner(frame, force_full, false)
+    pub(crate) fn encode(&self, frame: &FrameData, repaint: bool) -> EncodedBlit {
+        self.encode_inner(frame, repaint, false)
     }
 
     pub(crate) fn encode_with_suppressed_visible_cursor(
         &self,
         frame: &FrameData,
-        force_full: bool,
+        repaint: bool,
     ) -> EncodedBlit {
-        self.encode_inner(frame, force_full, true)
+        self.encode_inner(frame, repaint, true)
     }
 
     fn encode_inner(
         &self,
         frame: &FrameData,
-        force_full: bool,
+        repaint: bool,
         suppress_visible_cursor: bool,
     ) -> EncodedBlit {
-        let prev = if force_full {
-            None
-        } else {
-            self.last_frame.as_ref()
-        };
-        let full = force_full
+        let previous_frame = self.last_frame.as_ref();
+        let prev = if repaint { None } else { previous_frame };
+        let full = repaint
             || prev.is_none()
             || prev.is_some_and(|p| p.width != frame.width || p.height != frame.height);
+        let clear_before_full_redraw = previous_frame.is_none();
         let prof_stats =
             crate::render_prof::enabled().then(|| compute_prof_blit_stats(frame, prev, full));
         let prof_started = crate::render_prof::timer();
         let mut bytes = Vec::new();
         let mut next_last_visible_cursor = self.last_visible_cursor;
         let mut next_last_cursor_shape = self.last_cursor_shape;
-        blit_frame_to_with_cursor_memory(
+        blit_frame_to_with_cursor_memory_and_clear_policy(
             &mut bytes,
             frame,
             prev,
             &mut next_last_visible_cursor,
             &mut next_last_cursor_shape,
+            repeat_ime_anchor_after_sync(),
+            clear_before_full_redraw,
             suppress_visible_cursor,
         );
         if let Some(stats) = prof_stats {
@@ -395,8 +402,9 @@ fn blit_frame_to(writer: impl Write, frame: &FrameData, prev: Option<&FrameData>
     );
 }
 
+#[cfg(test)]
 fn blit_frame_to_with_cursor_memory(
-    mut writer: impl Write,
+    writer: impl Write,
     frame: &FrameData,
     prev: Option<&FrameData>,
     last_visible_cursor: &mut Option<(u16, u16)>,
@@ -404,7 +412,7 @@ fn blit_frame_to_with_cursor_memory(
     suppress_visible_cursor: bool,
 ) {
     blit_frame_to_with_cursor_memory_and_policy(
-        &mut writer,
+        writer,
         frame,
         prev,
         last_visible_cursor,
@@ -414,13 +422,36 @@ fn blit_frame_to_with_cursor_memory(
     );
 }
 
+#[cfg(test)]
 fn blit_frame_to_with_cursor_memory_and_policy(
+    writer: impl Write,
+    frame: &FrameData,
+    prev: Option<&FrameData>,
+    last_visible_cursor: &mut Option<(u16, u16)>,
+    last_cursor_shape: &mut u8,
+    repeat_ime_anchor: bool,
+    suppress_visible_cursor: bool,
+) {
+    blit_frame_to_with_cursor_memory_and_clear_policy(
+        writer,
+        frame,
+        prev,
+        last_visible_cursor,
+        last_cursor_shape,
+        repeat_ime_anchor,
+        true,
+        suppress_visible_cursor,
+    );
+}
+
+fn blit_frame_to_with_cursor_memory_and_clear_policy(
     mut writer: impl Write,
     frame: &FrameData,
     prev: Option<&FrameData>,
     last_visible_cursor: &mut Option<(u16, u16)>,
     last_cursor_shape: &mut u8,
     repeat_ime_anchor: bool,
+    clear_before_full_redraw: bool,
     suppress_visible_cursor: bool,
 ) {
     // On first frame or size change, do a full redraw.
@@ -442,8 +473,9 @@ fn blit_frame_to_with_cursor_memory_and_policy(
     let _ = writer.write_all(b"\x1b]8;;\x1b\\");
 
     if full_redraw {
-        // Clear the screen and write all cells.
-        let _ = writer.write_all(b"\x1b[2J\x1b[H");
+        if clear_before_full_redraw {
+            let _ = writer.write_all(b"\x1b[2J");
+        }
         write_all_cells(&mut writer, frame);
     } else {
         // Diff-based update: only write changed cells.
@@ -490,7 +522,23 @@ fn repeat_ime_anchor_after_sync() -> bool {
 
 /// Writes all cells in the frame (full redraw).
 fn cell_width(cell: &CellData) -> usize {
+    if is_halfwidth_katakana_voiced_grapheme(&cell.symbol) {
+        return 2;
+    }
     cell.symbol.width()
+}
+
+fn is_halfwidth_katakana_voiced_grapheme(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    let Some(base) = chars.next() else {
+        return false;
+    };
+    let Some(mark) = chars.next() else {
+        return false;
+    };
+    chars.next().is_none()
+        && ('\u{ff66}'..='\u{ff9d}').contains(&base)
+        && matches!(mark, '\u{ff9e}' | '\u{ff9f}')
 }
 
 #[derive(Clone, Copy)]
@@ -585,9 +633,11 @@ fn write_ime_anchor_cursor_state(writer: &mut impl Write, cursor: HostCursorStat
 }
 
 fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
+    let mut last_sgr = String::new();
     let mut active_hyperlink = None;
     for row in 0..frame.height {
         let mut to_skip = 0usize;
+        let mut next_inline_col = None;
         for col in 0..frame.width {
             if to_skip > 0 {
                 to_skip -= 1;
@@ -598,25 +648,23 @@ fn write_all_cells(writer: &mut impl Write, frame: &FrameData) {
             let cell = &frame.cells[idx];
 
             if cell.skip {
+                next_inline_col = None;
                 continue;
             }
 
-            // Move cursor to position (1-based).
-            let _ = write!(writer, "\x1b[{};{}H", row + 1, col + 1);
-
-            // Set style.
-            let sgr = build_sgr(cell.fg, cell.bg, cell.modifier);
-            let _ = writer.write_all(sgr.as_bytes());
-
-            write_hyperlink_if_changed(
+            let cursor_position = (next_inline_col != Some(col)).then_some((col, row));
+            write_cell(
                 writer,
+                cursor_position,
+                cell,
+                &mut last_sgr,
                 &mut active_hyperlink,
-                cell_hyperlink_uri(frame, cell),
+                frame,
             );
-
-            // Write the symbol.
-            let _ = writer.write_all(cell.symbol.as_bytes());
-            to_skip = cell_width(cell).saturating_sub(1);
+            let width = cell_width(cell);
+            next_inline_col =
+                (cell.symbol.is_ascii() && width == 1).then_some(col.saturating_add(1));
+            to_skip = width.saturating_sub(1);
         }
     }
 
@@ -787,6 +835,7 @@ mod tests {
     use crate::protocol::{CellData, CursorState};
 
     const WIDE_GRAPHEME: &str = "💡";
+    const HALFWIDTH_VOICED_KANA: &str = "ｶ\u{ff9e}";
 
     fn make_cell(symbol: &str, fg: u32, bg: u32, modifier: u16) -> CellData {
         CellData {
@@ -797,6 +846,12 @@ mod tests {
             skip: false,
             hyperlink: None,
         }
+    }
+
+    fn make_skip_cell(symbol: &str, fg: u32, bg: u32, modifier: u16) -> CellData {
+        let mut cell = make_cell(symbol, fg, bg, modifier);
+        cell.skip = true;
+        cell
     }
 
     fn make_frame(width: u16, height: u16, cells: Vec<CellData>) -> FrameData {
@@ -1459,19 +1514,34 @@ mod tests {
     }
 
     #[test]
-    fn blit_frame_size_change_triggers_full_redraw() {
+    fn encoder_size_change_repaints_without_clearing() {
         let prev = make_frame(2, 2, vec![make_cell("A", 0, 0, 0); 4]);
-
         let curr = make_frame(3, 2, vec![make_cell("B", 0, 0, 0); 6]);
+        let mut encoder = BlitEncoder::new();
+        let initial = encoder.encode(&prev, false);
+        encoder.commit(prev, initial);
 
-        let mut output = Vec::new();
-        blit_frame_to(&mut output, &curr, Some(&prev));
+        let encoded = encoder.encode(&curr, false);
+        assert!(encoded.full);
+        let output = String::from_utf8(encoded.bytes).unwrap();
 
-        let output_str = String::from_utf8(output).unwrap();
-        assert!(
-            output_str.contains("\x1b[2J"),
-            "size change should trigger full redraw"
-        );
+        assert!(!output.contains("\x1b[2J"));
+        assert!(output.bytes().filter(|byte| *byte == b'B').count() >= 6);
+    }
+
+    #[test]
+    fn encoder_forced_repaint_writes_all_cells_without_clearing() {
+        let frame = make_frame(3, 2, vec![make_cell("A", 0, 0, 0); 6]);
+        let mut encoder = BlitEncoder::new();
+        let initial = encoder.encode(&frame, false);
+        encoder.commit(frame.clone(), initial);
+
+        let encoded = encoder.encode(&frame, true);
+        assert!(encoded.full);
+        let output = String::from_utf8(encoded.bytes).unwrap();
+
+        assert!(!output.contains("\x1b[2J"));
+        assert!(output.bytes().filter(|byte| *byte == b'A').count() >= 6);
     }
 
     #[test]
@@ -1782,6 +1852,30 @@ mod tests {
     }
 
     #[test]
+    fn full_redraw_skips_trailing_cells_covered_by_halfwidth_voiced_kana() {
+        let frame = FrameData {
+            cells: vec![
+                make_cell(HALFWIDTH_VOICED_KANA, 0, 0, 0),
+                make_skip_cell(" ", 0, 0, 0),
+                make_cell("Z", 0, 0, 0),
+            ],
+            width: 3,
+            height: 1,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &frame, None);
+        let output_str = String::from_utf8(output).unwrap();
+
+        assert!(output_str.contains("\x1b[1;1H"));
+        assert!(!output_str.contains("\x1b[1;2H"));
+        assert!(output_str.contains("\x1b[1;3H"));
+    }
+
+    #[test]
     fn diff_redraw_reveals_cells_hidden_by_previous_wide_graphemes() {
         let prev = FrameData {
             cells: vec![
@@ -1852,5 +1946,43 @@ mod tests {
 
         assert!(output_str.contains("\x1b[1;1H"));
         assert!(!output_str.contains("\x1b[1;2H"));
+    }
+
+    #[test]
+    fn diff_redraw_reveals_cells_hidden_by_previous_halfwidth_voiced_kana() {
+        let prev = FrameData {
+            cells: vec![
+                make_cell(HALFWIDTH_VOICED_KANA, 0, 0, 0),
+                make_skip_cell(" ", 0, 0, 0),
+                make_cell("Z", 0, 0, 0),
+            ],
+            width: 3,
+            height: 1,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+        let curr = FrameData {
+            cells: vec![
+                make_cell("A", 0, 0, 0),
+                make_cell(" ", 0, 0, 0),
+                make_cell("Z", 0, 0, 0),
+            ],
+            width: 3,
+            height: 1,
+            cursor: None,
+            hyperlinks: Vec::new(),
+            graphics: Vec::new(),
+        };
+
+        let mut output = Vec::new();
+        blit_frame_to(&mut output, &curr, Some(&prev));
+        let output_str = String::from_utf8(output).unwrap();
+
+        assert!(output_str.contains("\x1b[1;1H"));
+        assert!(
+            output_str.contains("\x1b[1;2H"),
+            "cells hidden by a previous halfwidth voiced kana must be redrawn when visible"
+        );
     }
 }
