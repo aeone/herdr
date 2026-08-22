@@ -1014,6 +1014,31 @@ impl App {
     /// The mirror's own screen detection only ever sees the attached copy and
     /// reports idle forever, so the remote — which has hook-level authority
     /// over its agents — is the trustworthy source of state here.
+    /// Finds the tab standing for one remote pane. A mirrored space holds a tab
+    /// per pane, so the key naming a pane lives on the tab; the space around it
+    /// is named by the space it mirrors and matches no pane at all.
+    fn mirror_tab_for_key(&self, target: &str, key: &str) -> Option<(usize, usize)> {
+        self.state
+            .workspaces
+            .iter()
+            .enumerate()
+            .find_map(|(ws_idx, workspace)| {
+                workspace
+                    .remote_mirror
+                    .as_ref()
+                    .filter(|mirror| mirror.target == target)?;
+                workspace
+                    .tabs
+                    .iter()
+                    .position(|tab| {
+                        tab.remote_mirror
+                            .as_ref()
+                            .is_some_and(|mirrored| mirrored.key == key)
+                    })
+                    .map(|tab_idx| (ws_idx, tab_idx))
+            })
+    }
+
     fn report_remote_agent_states(
         &mut self,
         space: &RemoteSpaceConfig,
@@ -1031,17 +1056,15 @@ impl App {
 
         for pane in &snapshot.panes {
             let key = pane.mirror_key(&space.target);
-            let Some(pane_id) =
-                self.state
-                    .workspaces
-                    .iter()
-                    .find(|workspace| {
-                        workspace.remote_mirror.as_ref().is_some_and(|mirror| {
-                            mirror.target == space.target && mirror.key == key
-                        })
-                    })
-                    .and_then(|workspace| workspace.tabs.first())
-                    .map(|tab| tab.root_pane)
+            let Some((ws_idx, tab_idx)) = self.mirror_tab_for_key(&space.target, &key) else {
+                continue;
+            };
+            let Some(pane_id) = self
+                .state
+                .workspaces
+                .get(ws_idx)
+                .and_then(|workspace| workspace.tabs.get(tab_idx))
+                .map(|tab| tab.root_pane)
             else {
                 continue;
             };
@@ -1087,17 +1110,14 @@ impl App {
                 }
             };
             if apply_unseen {
-                if let Some(workspace) = self.state.workspaces.iter_mut().find(|workspace| {
-                    workspace
-                        .tabs
-                        .first()
-                        .is_some_and(|tab| tab.root_pane == pane_id)
-                }) {
-                    if let Some(tab) = workspace.tabs.first_mut() {
-                        if let Some(pane_state) = tab.panes.get_mut(&pane_id) {
-                            pane_state.seen = seen;
-                        }
-                    }
+                if let Some(pane_state) = self
+                    .state
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .and_then(|workspace| workspace.tabs.get_mut(tab_idx))
+                    .and_then(|tab| tab.panes.get_mut(&pane_id))
+                {
+                    pane_state.seen = seen;
                 }
             }
 
@@ -1109,14 +1129,8 @@ impl App {
                 let terminal_id = self
                     .state
                     .workspaces
-                    .iter()
-                    .find(|workspace| {
-                        workspace
-                            .tabs
-                            .first()
-                            .is_some_and(|tab| tab.root_pane == pane_id)
-                    })
-                    .and_then(|workspace| workspace.tabs.first())
+                    .get(ws_idx)
+                    .and_then(|workspace| workspace.tabs.get(tab_idx))
                     .and_then(|tab| tab.terminal_id(pane_id))
                     .cloned();
                 if let Some(terminal) =
@@ -3208,8 +3222,7 @@ mod tests {
             let pane = agent_pane("w1", "api", "term-1");
             pane.mirror_key(&space.target)
         };
-        let mut workspace = Workspace::test_new("api");
-        workspace.remote_mirror = Some(remote_mirror_record(&space, &key, "term-remote"));
+        let workspace = mirror("workbox", &key, "api");
         let pane_id = workspace.tabs[0].root_pane;
         app.state.workspaces.push(workspace);
 
@@ -3238,6 +3251,56 @@ mod tests {
         // Output the reader has not seen is a change, and marks it unread again.
         app.report_remote_agent_states(&space, &done_at(2_000));
         assert!(!seen(&app), "newer remote output should mark it unread");
+    }
+
+    /// What a host says about a pane has to reach the tab standing for that
+    /// pane. A mirrored space is named by the space it mirrors, and its panes
+    /// are named on its tabs, so looking a pane up by the name on the space --
+    /// and then reaching for its first tab -- finds nothing for the first pane
+    /// and the wrong pane for the rest. On the hub that showed as a third of
+    /// the fleet's agents quietly going missing.
+    #[test]
+    fn a_hosts_word_about_a_pane_reaches_the_tab_standing_for_it() {
+        let space = space("workbox");
+        let first = agent_pane("w1", "api", "term-1");
+        let second = agent_pane("w1", "web", "term-2");
+        let second_key = second.mirror_key(&space.target);
+
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces.clear();
+        let mut workspace = mirror("workbox", &first.mirror_key(&space.target), "api");
+        workspace.test_add_tab(None);
+        workspace.tabs[1].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
+            key: second_key,
+            remote_terminal: "term-2".to_string(),
+            disconnected: false,
+        });
+        let second_pane = workspace.tabs[1].root_pane;
+        app.state.workspaces.push(workspace);
+        // Start both read, so an unread mark can only come from the host being
+        // heard rather than from whatever a fresh pane happens to begin as.
+        for tab in &mut app.state.workspaces[0].tabs {
+            for pane in tab.panes.values_mut() {
+                pane.seen = true;
+            }
+        }
+
+        let mut reported = second.clone();
+        reported.status = crate::api::schema::AgentStatus::Done;
+        reported.state_changed_at_ms = Some(1_000);
+        app.report_remote_agent_states(&space, &snapshot(vec![first, reported]));
+
+        assert!(
+            !app.state.workspaces[0].tabs[1].panes[&second_pane].seen,
+            "the second pane's unread output should land on the second tab"
+        );
+        assert!(
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .values()
+                .all(|pane| pane.seen),
+            "the first tab's pane should be untouched by the second pane's news"
+        );
     }
 
     #[test]
