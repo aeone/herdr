@@ -3405,6 +3405,61 @@ mod tests {
         }
     }
 
+    /// The whole way through: a host says a pane is a claude, and this machine
+    /// says so too, for every tab of the mirrored space. Nothing runs in a
+    /// mirror -- the pane is a parser fed by another machine -- so a rule that
+    /// only believes a hook while the process it names is running refuses
+    /// everything a host says about its own panes, and a third of the fleet's
+    /// agents quietly become plain shells.
+    #[tokio::test]
+    async fn a_hosts_word_about_a_pane_reaches_the_api() {
+        let space = space("workbox");
+        let mut app = crate::app::tests::test_app();
+        mirror_of_two_panes(&mut app, "workbox");
+        // The API describes a pane through the terminal behind it, so each
+        // mirror needs one registered before it can be asked about.
+        for tab in &app.state.workspaces[0].tabs {
+            for pane in tab.panes.values() {
+                app.state.terminals.insert(
+                    pane.attached_terminal_id.clone(),
+                    crate::terminal::TerminalState::new(
+                        pane.attached_terminal_id.clone(),
+                        std::path::PathBuf::from("/mirror"),
+                    ),
+                );
+            }
+        }
+
+        let reported = |terminal: &str, label: &str| {
+            let mut pane = agent_pane("w1", label, terminal);
+            pane.status = crate::api::schema::AgentStatus::Idle;
+            pane.agent = Some("claude".to_string());
+            pane
+        };
+        app.report_remote_agent_states(
+            &space,
+            &snapshot(vec![
+                reported("term-remote", "api"),
+                reported("term-2", "web"),
+            ]),
+        );
+
+        for tab_idx in [0, 1] {
+            let pane_id = app.state.workspaces[0].tabs[tab_idx].root_pane;
+            let info = app.pane_info(0, pane_id).expect("pane info");
+            assert_eq!(
+                info.agent.as_deref(),
+                Some("claude"),
+                "tab {tab_idx} should carry the agent its host reported"
+            );
+            assert_eq!(
+                info.agent_status,
+                crate::api::schema::AgentStatus::Idle,
+                "tab {tab_idx} should carry the state its host reported"
+            );
+        }
+    }
+
     /// What a host says about a pane has to reach the tab standing for that
     /// pane. A mirrored space is named by the space it mirrors, and its panes
     /// are named on its tabs, so looking a pane up by the name on the space --

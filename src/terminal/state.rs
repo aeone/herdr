@@ -882,6 +882,18 @@ impl TerminalState {
                 reanchor_sequence: false,
             };
         }
+        // A mirror has no local process to protect: its pane is a parser fed by
+        // another machine, and that machine -- which does have the process, and
+        // hook-level authority over it -- is the only thing that can say what
+        // its agent is doing. Every test below turns on a live local process
+        // matching the report, so applied to a mirror they refuse every word a
+        // host says about its own panes, and a whole fleet's agents stop being
+        // agents.
+        if source == crate::detect::REMOTE_MIRROR_HOOK_SOURCE {
+            return FullLifecycleHookReportRoute::Accept {
+                reanchor_sequence: false,
+            };
+        }
         if self.full_lifecycle_hook_report_matches_stale_session(source, agent_label, session_ref) {
             return FullLifecycleHookReportRoute::Ignore;
         }
@@ -1800,6 +1812,13 @@ impl TerminalState {
     }
 
     fn hook_authority_is_effective(&self, authority: &HookAuthority) -> bool {
+        // A mirror's authority is the machine that runs the pane. Nothing runs
+        // in the pane here -- it is a parser fed by that machine -- so there is
+        // no local process to agree with what it says, and requiring one leaves
+        // the authority stored and permanently ineffective.
+        if authority.source == crate::detect::REMOTE_MIRROR_HOOK_SOURCE {
+            return true;
+        }
         !crate::detect::full_lifecycle_hook_authority(&authority.source, &authority.agent_label)
             || crate::detect::parse_agent_label(&authority.agent_label).is_none_or(|agent| {
                 self.detected_agent == Some(agent) && self.recent_agent_process_exit.is_none()
