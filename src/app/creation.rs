@@ -545,13 +545,26 @@ impl App {
         // Only the pane the attach actually runs in is a reflection. A split
         // someone made inside a mirror is a local shell like any other, and
         // claiming otherwise would hide it from a host mirroring this one.
+        //
+        // Which pane that is, and which remote pane it stands for, are both the
+        // tab's to say: a mirrored space holds a tab per remote pane, and the
+        // space's own key names the space rather than any pane in it. Asked of
+        // the space, this reported no origin at all -- the key was a segment
+        // short and split to nothing -- and a host cannot recognise a
+        // reflection of itself it is never told about, so two machines
+        // mirroring each other grew copies of each other without bound.
         let mirror_origin = ws
-            .remote_mirror
-            .as_ref()
-            .filter(|_| ws.tabs.first().is_some_and(|tab| tab.root_pane == pane_id))
-            .and_then(|mirror| {
+            .tabs
+            .get(tab_idx)
+            .and_then(|tab| {
+                tab.remote_mirror
+                    .as_ref()
+                    .filter(|_| tab.root_pane == pane_id)
+            })
+            .zip(ws.remote_mirror.as_ref())
+            .and_then(|(mirrored, mirror)| {
                 let (workspace_id, terminal_id) =
-                    crate::remote::spaces::RemoteAgentPane::split_key(&mirror.key)?;
+                    crate::remote::spaces::RemoteAgentPane::split_key(&mirrored.key)?;
                 Some(crate::api::schema::MirrorOriginInfo {
                     // The machine that really runs the pane, which is the hop
                     // only when we heard about it first-hand. Reporting the hop

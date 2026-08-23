@@ -3365,6 +3365,46 @@ mod tests {
         workspace.assert_invariants_for_test();
     }
 
+    /// A host mirroring us has to be told which of our panes are really its own
+    /// panes coming back, and that is reported per pane. Asked of the space
+    /// instead, it answered for no pane at all: the space's key names a space,
+    /// which is one segment short of naming a pane, so it split to nothing and
+    /// every mirror reported no origin. Two machines mirroring each other then
+    /// had nothing to recognise, and each grew a copy of the other's copies on
+    /// every poll -- lute went from 87 panes to 429 in a quarter of an hour.
+    #[test]
+    fn every_mirrored_tab_reports_the_remote_pane_it_stands_for() {
+        let mut app = crate::app::tests::test_app();
+        mirror_of_two_panes(&mut app, "workbox");
+        // The API describes a pane through the terminal behind it, so each
+        // mirror needs one registered before it can be asked about.
+        for tab in &app.state.workspaces[0].tabs {
+            for pane in tab.panes.values() {
+                app.state.terminals.insert(
+                    pane.attached_terminal_id.clone(),
+                    crate::terminal::TerminalState::new(
+                        pane.attached_terminal_id.clone(),
+                        std::path::PathBuf::from("/mirror"),
+                    ),
+                );
+            }
+        }
+
+        for (tab_idx, remote_terminal) in [(0, "term-remote"), (1, "term-2")] {
+            let pane_id = app.state.workspaces[0].tabs[tab_idx].root_pane;
+            let origin = app
+                .pane_info(0, pane_id)
+                .expect("pane info")
+                .mirror_origin
+                .unwrap_or_else(|| panic!("tab {tab_idx} should report the pane it mirrors"));
+            assert_eq!(
+                origin.terminal_id, remote_terminal,
+                "tab {tab_idx} should name the remote terminal it stands for"
+            );
+            assert_eq!(origin.target, "workbox", "and the host running it");
+        }
+    }
+
     /// What a host says about a pane has to reach the tab standing for that
     /// pane. A mirrored space is named by the space it mirrors, and its panes
     /// are named on its tabs, so looking a pane up by the name on the space --
