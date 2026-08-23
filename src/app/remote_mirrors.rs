@@ -1009,15 +1009,18 @@ impl App {
         self.report_remote_agent_states(space, snapshot);
     }
 
-    /// Pushes each remote pane's reported status onto its mirror.
+    /// Finds the tab standing for one remote pane, by whatever names it.
     ///
-    /// The mirror's own screen detection only ever sees the attached copy and
-    /// reports idle forever, so the remote — which has hook-level authority
-    /// over its agents — is the trustworthy source of state here.
-    /// Finds the tab standing for one remote pane. A mirrored space holds a tab
-    /// per pane, so the key naming a pane lives on the tab; the space around it
-    /// is named by the space it mirrors and matches no pane at all.
-    fn mirror_tab_for_key(&self, target: &str, key: &str) -> Option<(usize, usize)> {
+    /// A mirrored space holds a tab per pane, so what names a pane -- the key
+    /// naming the pane itself, or the terminal id its host answers to -- lives
+    /// on the tab. The space around it is named for the space it mirrors and
+    /// carries only the first pane's terminal, so looking a pane up there finds
+    /// the first tab or nothing at all.
+    fn mirror_tab_matching(
+        &self,
+        target: &str,
+        names_the_pane: impl Fn(&crate::workspace::RemoteMirrorTab) -> bool,
+    ) -> Option<(usize, usize)> {
         self.state
             .workspaces
             .iter()
@@ -1030,15 +1033,39 @@ impl App {
                 workspace
                     .tabs
                     .iter()
-                    .position(|tab| {
-                        tab.remote_mirror
-                            .as_ref()
-                            .is_some_and(|mirrored| mirrored.key == key)
-                    })
+                    .position(|tab| tab.remote_mirror.as_ref().is_some_and(&names_the_pane))
                     .map(|tab_idx| (ws_idx, tab_idx))
             })
     }
 
+    /// The tab standing for one remote pane, by the key naming that pane.
+    fn mirror_tab_for_key(&self, target: &str, key: &str) -> Option<(usize, usize)> {
+        self.mirror_tab_matching(target, |mirrored| mirrored.key == key)
+    }
+
+    /// The tab standing for one remote pane, by the terminal id its host knows
+    /// it by -- which is how frames and endings arrive.
+    fn mirror_tab_for_terminal(&self, target: &str, terminal_id: &str) -> Option<(usize, usize)> {
+        self.mirror_tab_matching(target, |mirrored| mirrored.remote_terminal == terminal_id)
+    }
+
+    /// The local terminal a host's frames for one of its terminals are written
+    /// into: the pane of the tab standing for it.
+    fn mirror_local_terminal_for(
+        &self,
+        target: &str,
+        terminal_id: &str,
+    ) -> Option<crate::terminal::TerminalId> {
+        let (ws_idx, tab_idx) = self.mirror_tab_for_terminal(target, terminal_id)?;
+        let tab = self.state.workspaces.get(ws_idx)?.tabs.get(tab_idx)?;
+        tab.terminal_id(tab.root_pane).cloned()
+    }
+
+    /// Pushes each remote pane's reported status onto its mirror.
+    ///
+    /// The mirror's own screen detection only ever sees the attached copy and
+    /// reports idle forever, so the remote — which has hook-level authority
+    /// over its agents — is the trustworthy source of state here.
     fn report_remote_agent_states(
         &mut self,
         space: &RemoteSpaceConfig,
@@ -1142,31 +1169,19 @@ impl App {
         }
     }
 
-    /// Finds the mirror of one remote terminal, by the host and the id that
-    /// host knows it by.
-    fn mirror_index_for_terminal(&self, target: &str, terminal_id: &str) -> Option<usize> {
-        self.state.workspaces.iter().position(|workspace| {
-            workspace.remote_mirror.as_ref().is_some_and(|mirror| {
-                mirror.target == target && mirror.remote_terminal == terminal_id
-            })
-        })
-    }
-
     /// Draws a frame that arrived over a host's shared connection.
     pub(crate) fn apply_mirror_frame(&mut self, target: &str, terminal_id: &str, bytes: &[u8]) {
         // Hearing from the host at all is what proves it is answering, whether
         // or not this particular frame still has a pane to land in, so the next
         // failure starts counting from nothing again.
         self.mirror_stream_retry.remove(target);
-        let Some(ws_idx) = self.mirror_index_for_terminal(target, terminal_id) else {
+        // Into the tab standing for this terminal, not the space around it: a
+        // space holds a tab per remote pane and is named only for the first of
+        // them, so drawing into the space's own pane put every frame a host
+        // sent into tab one and left the rest of the tabs blank.
+        let Some(local_terminal) = self.mirror_local_terminal_for(target, terminal_id) else {
             // A frame for a mirror that has since been closed. The host is told
             // the new set on the next reconcile, so this settles by itself.
-            return;
-        };
-        let Some(local_terminal) = self.state.workspaces.get(ws_idx).and_then(|workspace| {
-            let pane_id = workspace.root_pane;
-            workspace.terminal_id(pane_id).cloned()
-        }) else {
             return;
         };
         let Some(runtime) = self.terminal_runtimes.get(&local_terminal) else {
@@ -1191,22 +1206,37 @@ impl App {
         terminal_id: &str,
         reason: Option<&str>,
     ) {
-        let Some(ws_idx) = self.mirror_index_for_terminal(target, terminal_id) else {
+        let Some((ws_idx, tab_idx)) = self.mirror_tab_for_terminal(target, terminal_id) else {
             return;
         };
         tracing::debug!(target = %target, terminal_id, reason, "a mirrored terminal ended");
+        // One pane of the space has gone, not the space: the others share a
+        // connection with it, not a fate.
         if self.state.keeps_offline_mirrors() {
-            if let Some(mirror) = self
+            if let Some(mirrored) = self
                 .state
                 .workspaces
                 .get_mut(ws_idx)
-                .and_then(|workspace| workspace.remote_mirror.as_mut())
+                .and_then(|workspace| workspace.tabs.get_mut(tab_idx))
+                .and_then(|tab| tab.remote_mirror.as_mut())
             {
-                mirror.disconnected = true;
+                mirrored.disconnected = true;
                 return;
             }
         }
-        self.close_mirror_at(ws_idx);
+        // A space always keeps a tab, so the last one going takes the space
+        // with it -- which is what the host stopping reporting it would do
+        // anyway, one snapshot later.
+        let last_tab = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .is_some_and(|workspace| workspace.tabs.len() <= 1);
+        if last_tab {
+            self.close_mirror_at(ws_idx);
+        } else {
+            self.close_mirror_tab_at(ws_idx, tab_idx);
+        }
         self.shutdown_detached_terminal_runtimes();
     }
 
@@ -1354,11 +1384,8 @@ impl App {
             .mirror_controls
             .iter()
             .filter(|(target, control)| {
-                !self.state.workspaces.iter().any(|workspace| {
-                    workspace.remote_mirror.as_ref().is_some_and(|mirror| {
-                        mirror.target == **target && mirror.remote_terminal == control.controlling()
-                    })
-                })
+                self.mirror_tab_for_terminal(target, control.controlling())
+                    .is_none()
             })
             .map(|(target, _)| target.clone())
             .collect();
@@ -3257,6 +3284,85 @@ mod tests {
         // Output the reader has not seen is a change, and marks it unread again.
         app.report_remote_agent_states(&space, &done_at(2_000));
         assert!(!seen(&app), "newer remote output should mark it unread");
+    }
+
+    /// Builds a mirrored space of two tabs, the host knowing their terminals as
+    /// `term-remote` and `term-2`.
+    fn mirror_of_two_panes(app: &mut App, target: &str) {
+        let space = space(target);
+        let first = agent_pane("w1", "api", "term-remote");
+        let second = agent_pane("w1", "web", "term-2");
+        app.state.workspaces.clear();
+        let mut workspace = mirror(target, &first.mirror_key(&space.target), "api");
+        workspace.test_add_tab(None);
+        workspace.tabs[1].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
+            key: second.mirror_key(&space.target),
+            remote_terminal: "term-2".to_string(),
+            disconnected: false,
+        });
+        app.state.workspaces.push(workspace);
+    }
+
+    /// Frames arrive named by the terminal the host knows, and a mirrored space
+    /// holds a tab per pane. Looking that name up on the space finds the first
+    /// pane's terminal and nothing else, so every frame for every other pane
+    /// was drawn into tab one -- or, once tab one had a name of its own,
+    /// dropped. Either way the rest of the tabs sat blank.
+    #[test]
+    fn a_frame_is_drawn_into_the_tab_standing_for_the_terminal_it_names() {
+        let mut app = crate::app::tests::test_app();
+        mirror_of_two_panes(&mut app, "workbox");
+        let terminal_of = |app: &App, tab_idx: usize| {
+            let tab = &app.state.workspaces[0].tabs[tab_idx];
+            tab.terminal_id(tab.root_pane).cloned().expect("terminal")
+        };
+        let first = terminal_of(&app, 0);
+        let second = terminal_of(&app, 1);
+        assert_ne!(first, second, "each tab has a terminal of its own");
+
+        assert_eq!(
+            app.mirror_local_terminal_for("workbox", "term-remote"),
+            Some(first),
+            "the first pane's frames belong in the first tab"
+        );
+        assert_eq!(
+            app.mirror_local_terminal_for("workbox", "term-2"),
+            Some(second),
+            "a later pane's frames belong in the tab standing for it"
+        );
+        assert_eq!(
+            app.mirror_local_terminal_for("workbox", "term-nobody"),
+            None,
+            "a terminal nothing here mirrors has nowhere to be drawn"
+        );
+    }
+
+    /// One pane of a mirrored space ending is one tab closing. Treating it as
+    /// the space ending shut every other pane of that space with it.
+    #[tokio::test]
+    async fn a_pane_ending_on_the_host_closes_its_tab_and_leaves_the_space() {
+        let mut app = crate::app::tests::test_app();
+        mirror_of_two_panes(&mut app, "workbox");
+        app.state.keep_offline_mirrors = Some(false);
+
+        app.handle_mirror_terminal_ended("workbox", "term-2", Some("terminal is gone"));
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "the space should outlive one of its panes"
+        );
+        let workspace = &app.state.workspaces[0];
+        assert_eq!(workspace.tabs.len(), 1, "only the ended pane's tab closes");
+        assert_eq!(
+            workspace.tabs[0]
+                .remote_mirror
+                .as_ref()
+                .map(|mirrored| mirrored.remote_terminal.as_str()),
+            Some("term-remote"),
+            "the tab left standing should be the one that did not end"
+        );
+        workspace.assert_invariants_for_test();
     }
 
     /// What a host says about a pane has to reach the tab standing for that
