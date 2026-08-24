@@ -102,15 +102,39 @@ impl AgentGroup {
 /// group of `entries[i]`. Keeping entries a flat list matters — the indexed
 /// switch keys and click handling address agents by position, and they must not
 /// have to know about headings.
+/// Where a mark puts a row inside its group: marked rows rise loudest-first,
+/// then the unmarked ones, and the parked grey sinks to the bottom.
+///
+/// `Background` is the level that means "not now", so it is the one level that
+/// sorts *below* no mark at all -- parking a row and having it stay where it
+/// was is the same as not parking it.
+fn mark_rank(level: Option<crate::app::MarkLevel>) -> u8 {
+    use crate::app::MarkLevel;
+    match level {
+        Some(MarkLevel::High) => 0,
+        Some(MarkLevel::Medium) => 1,
+        Some(MarkLevel::Low) => 2,
+        None => 3,
+        Some(MarkLevel::Background) => 4,
+    }
+}
+
 pub(crate) fn group_by_status(
     entries: &mut [AgentPanelEntry],
     now_ms: u64,
     offline: &dyn Fn(&AgentPanelEntry) -> bool,
+    mark: &dyn Fn(&AgentPanelEntry) -> Option<crate::app::MarkLevel>,
 ) -> Vec<AgentGroup> {
     entries.sort_by_key(|entry| {
         let group = AgentGroup::of_with_offline(entry, now_ms, offline(entry));
         (
             group,
+            // Then by the mark, which is the one ordering the user set by hand:
+            // what they marked rises within its group, loudest first, and what
+            // they parked sinks below even the unmarked rows. A mark that only
+            // recoloured a row left the user hunting for their own colour in a
+            // list of a hundred.
+            mark_rank(mark(entry)),
             // Unread output first inside a group: there is something to look at.
             entry.seen,
             // Then most recently changed first, so a group reads newest-down.
@@ -144,7 +168,13 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
                 .and_then(|ws| ws.remote_mirror.as_ref())
                 .is_some_and(|mirror| app.remote_offline_hosts.contains(&mirror.target))
         };
-        group_by_status(entries, crate::app::state::unix_millis_now(), &offline);
+        let mark = |entry: &AgentPanelEntry| app.entry_mark(entry.ws_idx, Some(entry.pane_id));
+        group_by_status(
+            entries,
+            crate::app::state::unix_millis_now(),
+            &offline,
+            &mark,
+        );
         return;
     }
 
@@ -753,6 +783,55 @@ mod tests {
         );
     }
 
+    /// A mark is the one ordering the user set by hand, so inside a group it
+    /// outranks recency: what they marked rises, loudest first, and what they
+    /// parked sinks below even the rows carrying no mark at all. Recolouring a
+    /// row without moving it left them hunting for their own colour.
+    #[test]
+    fn marked_agents_rise_within_their_group_and_parked_ones_sink() {
+        let now = 100 * DAY_MS;
+        let mut entries = vec![
+            idle_entry("unmarked", HOUR_MS, now),
+            idle_entry("parked", HOUR_MS, now),
+            idle_entry("low", HOUR_MS, now),
+            idle_entry("high", HOUR_MS, now),
+            idle_entry("medium", HOUR_MS, now),
+        ];
+        let mark = |entry: &AgentPanelEntry| match entry.primary_label.as_str() {
+            "high" => Some(crate::app::MarkLevel::High),
+            "medium" => Some(crate::app::MarkLevel::Medium),
+            "low" => Some(crate::app::MarkLevel::Low),
+            "parked" => Some(crate::app::MarkLevel::Background),
+            _ => None,
+        };
+
+        group_by_status(&mut entries, now, &|_| false, &mark);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
+        assert_eq!(order, ["high", "medium", "low", "unmarked", "parked"]);
+    }
+
+    /// The mark orders rows inside a group, never across one: a parked blocked
+    /// agent is still blocked, and burying it under the idle rows would hide
+    /// the thing the panel exists to surface.
+    #[test]
+    fn a_mark_never_moves_a_row_out_of_its_group() {
+        let now = 100 * DAY_MS;
+        let mut entries = vec![
+            idle_entry("idle-marked", HOUR_MS, now),
+            entry_at("blocked-parked", AgentState::Blocked, true, Some(now)),
+        ];
+        let mark = |entry: &AgentPanelEntry| match entry.primary_label.as_str() {
+            "idle-marked" => Some(crate::app::MarkLevel::High),
+            _ => Some(crate::app::MarkLevel::Background),
+        };
+
+        group_by_status(&mut entries, now, &|_| false, &mark);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
+        assert_eq!(order, ["blocked-parked", "idle-marked"]);
+    }
+
     #[test]
     fn status_grouping_orders_blocked_then_working_then_idle_by_age() {
         let now = 100 * DAY_MS;
@@ -764,7 +843,7 @@ mod tests {
             entry_at("unknown-state", AgentState::Unknown, true, Some(now)),
         ];
 
-        let groups = group_by_status(&mut entries, now, &|_| false);
+        let groups = group_by_status(&mut entries, now, &|_| false, &|_| None);
 
         let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
         assert_eq!(
@@ -798,7 +877,7 @@ mod tests {
             ),
         ];
 
-        group_by_status(&mut entries, now, &|_| false);
+        group_by_status(&mut entries, now, &|_| false, &|_| None);
 
         assert_eq!(entries[0].primary_label, "unseen-older");
     }
@@ -818,7 +897,7 @@ mod tests {
         ];
         let offline = |entry: &AgentPanelEntry| entry.primary_label.starts_with("remote-");
 
-        let groups = group_by_status(&mut entries, now, &offline);
+        let groups = group_by_status(&mut entries, now, &offline, &|_| None);
 
         let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
         assert_eq!(
@@ -863,7 +942,7 @@ mod tests {
             idle_entry("c", HOUR_MS, now),
         ];
 
-        let groups = group_by_status(&mut entries, now, &|_| false);
+        let groups = group_by_status(&mut entries, now, &|_| false, &|_| None);
 
         assert_eq!(groups.len(), entries.len());
         for (entry, group) in entries.iter().zip(&groups) {

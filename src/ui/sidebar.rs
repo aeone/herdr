@@ -563,9 +563,7 @@ pub(crate) fn entry_mark(
     ws_idx: usize,
     pane_id: Option<crate::layout::PaneId>,
 ) -> Option<MarkLevel> {
-    let space = app.space_mark(ws_idx);
-    let agent = pane_id.and_then(|pane_id| app.agent_mark(pane_id));
-    space.max(agent)
+    app.entry_mark(ws_idx, pane_id)
 }
 
 /// Name style for a row carrying `level`.

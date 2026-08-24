@@ -2011,6 +2011,22 @@ impl AppState {
         self.agent_marks.get(&pane_id.raw()).copied()
     }
 
+    /// The mark a row carries, taking the louder of the space's and the agent's.
+    ///
+    /// A marked agent also reads as marked in the Space list, and vice versa:
+    /// the mark says how much this thing matters, and splitting that by surface
+    /// would just make it easy to lose. A space parked at `Background` still
+    /// shows an urgent agent inside it at its own level.
+    ///
+    /// One definition, because both the colour a row is drawn in and the order
+    /// it sorts to are this answer: two would drift, and the row would sort by
+    /// a mark other than the one it is wearing.
+    pub fn entry_mark(&self, ws_idx: usize, pane_id: Option<PaneId>) -> Option<MarkLevel> {
+        let space = self.space_mark(ws_idx);
+        let agent = pane_id.and_then(|pane_id| self.agent_mark(pane_id));
+        space.max(agent)
+    }
+
     /// Colour for a mark at this level. A slot left unset by config falls back
     /// to the palette's own grey, which is what `Background` uses so it reads
     /// at the same weight as the agent and status text.
