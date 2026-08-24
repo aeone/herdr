@@ -173,6 +173,15 @@ pub struct PaneSnapshot {
     /// form with a stable serialisation, and it carries `seen` with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_status: Option<crate::api::schema::AgentStatus>,
+    /// The pane's terminal title as it last stood.
+    ///
+    /// An agent sets this itself and only says it again when it next speaks, so
+    /// an idle one never does. Without it a handoff left every quiet pane
+    /// nameless -- and since a mirrored tab is named by the title of the pane it
+    /// stands for, a whole space of agents came back as one repeated name with
+    /// nothing to tell them apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -486,6 +495,7 @@ fn capture_tab(
                 state => Some(crate::app::pane_agent_status(state, seen)),
             }
         });
+        let terminal_title = terminal.and_then(|terminal| terminal.terminal_title.clone());
         let agent_session = terminal.and_then(|terminal| {
             if let Some(authority) = terminal.hook_authority.as_ref() {
                 if let Some(session_ref) = authority.session_ref.as_ref() {
@@ -518,6 +528,7 @@ fn capture_tab(
                 launch_argv,
                 agent_state_changed_at_ms,
                 agent_status,
+                terminal_title,
             },
         );
     }
@@ -814,6 +825,60 @@ mod tests {
         }
     }
 
+    /// An agent names its own pane and only says the name again when it next
+    /// speaks, so a quiet one never repeats it. Dropping the title on the way
+    /// through a handoff therefore left every idle agent nameless -- and a
+    /// mirrored tab takes its name from the pane it stands for, so a whole
+    /// space of agents came back as one name repeated, with nothing to tell
+    /// them apart.
+    #[test]
+    fn a_panes_title_survives_being_captured_and_read_back() {
+        let mut state = state_with_workspaces(&["one"]);
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&pane]
+            .attached_terminal_id
+            .clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .expect("terminal")
+            .terminal_title = Some("* fix the mirror rework".to_string());
+
+        let snapshot = capture_from_state(&state);
+        let captured = snapshot.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("a captured pane");
+        assert_eq!(
+            captured.terminal_title.as_deref(),
+            Some("* fix the mirror rework")
+        );
+
+        let json = serde_json::to_string(&snapshot).expect("snapshot serialises");
+        let restored = super::parse_snapshot(&json).expect("snapshot parses");
+        let read_back = restored.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .expect("a restored pane");
+        assert_eq!(
+            read_back.terminal_title.as_deref(),
+            Some("* fix the mirror rework"),
+            "the name has to come back with the pane"
+        );
+    }
+
+    /// A pane that never had a title writes none, rather than a null that every
+    /// older reader would have to know to ignore.
+    #[test]
+    fn a_pane_without_a_title_writes_no_title_field() {
+        let state = state_with_workspaces(&["one"]);
+        let snapshot = capture_from_state(&state);
+        let json = serde_json::to_string(&snapshot).expect("snapshot serialises");
+        assert!(!json.contains("terminal_title"), "{json}");
+    }
+
     fn test_session_path(name: &str) -> String {
         std::env::current_dir()
             .unwrap()
@@ -974,6 +1039,7 @@ mod tests {
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
                 agent_status: None,
+                terminal_title: None,
             },
         );
         panes.insert(
@@ -987,6 +1053,7 @@ mod tests {
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
                 agent_status: None,
+                terminal_title: None,
             },
         );
 
@@ -1617,6 +1684,7 @@ mod tests {
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
                 agent_status: None,
+                terminal_title: None,
             },
         );
         panes.insert(
@@ -1632,6 +1700,7 @@ mod tests {
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
                 agent_status: None,
+                terminal_title: None,
             },
         );
 

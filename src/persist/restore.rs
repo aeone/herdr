@@ -499,6 +499,7 @@ fn restore_tab(
             .and_then(crate::detect::parse_canonical_agent_label);
         let saved_launch_argv = saved_pane.and_then(|p| p.launch_argv.clone());
         let saved_state_changed_at_ms = saved_pane.and_then(|p| p.agent_state_changed_at_ms);
+        let saved_terminal_title = saved_pane.and_then(|p| p.terminal_title.clone());
         // The state the agent was actually in, rather than assuming idle. A
         // quiet agent gives detection nothing to re-read from, so whatever is
         // seeded here is what shows until it next prints — and a blocked agent
@@ -655,6 +656,14 @@ fn restore_tab(
                 // just now" and collapse every idle agent into the newest
                 // bucket.
                 terminal.agent_state_changed_at_ms = saved_state_changed_at_ms;
+                // And the name it was wearing. An agent sets its own title and
+                // only says it again when it next speaks, so a quiet one would
+                // come back nameless -- taking the name off every mirrored tab
+                // that stands for it, since that is where a mirror's tab name
+                // comes from.
+                if let Some(title) = saved_terminal_title {
+                    terminal.terminal_title = Some(title);
+                }
                 if let Some(session) = restored_agent_session {
                     terminal.set_persisted_agent_session(session);
                 }
@@ -1222,6 +1231,7 @@ mod tests {
                             launch_argv: None,
                             agent_state_changed_at_ms: None,
                             agent_status: None,
+                            terminal_title: None,
                         },
                     )]),
                     zoomed: false,
@@ -1311,6 +1321,7 @@ mod tests {
                                 launch_argv: None,
                                 agent_state_changed_at_ms: None,
                                 agent_status: None,
+                                terminal_title: None,
                             },
                         ),
                         (
@@ -1324,6 +1335,7 @@ mod tests {
                                 launch_argv: None,
                                 agent_state_changed_at_ms: None,
                                 agent_status: None,
+                                terminal_title: None,
                             },
                         ),
                     ]),
@@ -1385,6 +1397,7 @@ mod tests {
                     launch_argv: None,
                     agent_state_changed_at_ms: None,
                     agent_status: None,
+                    terminal_title: None,
                 },
             )
         };
@@ -1402,6 +1415,7 @@ mod tests {
             launch_argv: None,
             agent_state_changed_at_ms: None,
             agent_status: None,
+            terminal_title: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1561,6 +1575,7 @@ mod tests {
                             launch_argv: None,
                             agent_state_changed_at_ms: None,
                             agent_status: None,
+                            terminal_title: None,
                         },
                     )]),
                     zoomed: false,
@@ -1730,6 +1745,7 @@ mod tests {
                 launch_argv: None,
                 agent_state_changed_at_ms: None,
                 agent_status: None,
+                terminal_title: None,
             },
         );
         let history = SessionHistorySnapshot {
