@@ -504,8 +504,8 @@ fn restore_tab(
         // quiet agent gives detection nothing to re-read from, so whatever is
         // seeded here is what shows until it next prints — and a blocked agent
         // shown as idle is the one that gets missed.
-        let (saved_state, saved_seen) = saved_pane
-            .and_then(|p| p.agent_status)
+        let saved_status = saved_pane.and_then(|p| p.agent_status);
+        let (saved_state, saved_seen) = saved_status
             .map(crate::app::pane_state_and_seen)
             .unwrap_or((AgentState::Idle, true));
         let saved_agent_session = saved_pane.and_then(|p| p.agent_session.as_ref());
@@ -573,6 +573,10 @@ fn restore_tab(
                     std::time::Instant::now(),
                 );
             }
+            // A pane waiting to resume its agent is the same agent that was
+            // sitting there before, so it keeps the clock it was sitting on.
+            // Without this it came back with no age at all and read as unknown.
+            terminal.agent_state_changed_at_ms = saved_state_changed_at_ms;
             let mut pane = PaneState::new(terminal_id);
             pane.seen = saved_seen;
             panes.insert(*id, pane);
@@ -655,6 +659,18 @@ fn restore_tab(
                 // state, which would otherwise stamp everything as "changed
                 // just now" and collapse every idle agent into the newest
                 // bucket.
+                // Seed the state it was in as well as when it changed, so the
+                // first look at the screen is not itself a change. A handoff has
+                // no restore plan -- its processes are alive already -- so the
+                // seeding below never ran for one, and the terminal came back
+                // Unknown. Detection then read Unknown -> idle as a change and
+                // stamped the clock to now, which is how every agent on the
+                // fleet came to say it had gone idle today, however long it had
+                // really sat.
+                if saved_status.is_some() {
+                    terminal.state = saved_state;
+                    terminal.fallback_state = saved_state;
+                }
                 terminal.agent_state_changed_at_ms = saved_state_changed_at_ms;
                 // And the name it was wearing. An agent sets its own title and
                 // only says it again when it next speaks, so a quiet one would
@@ -1285,6 +1301,93 @@ mod tests {
         assert_eq!(session.source, "herdr:opencode");
         assert_eq!(session.agent, "opencode");
         assert_eq!(session.session_ref.value, "opencode-session");
+    }
+
+    /// The sidebar buckets idle agents by age, and the age has to be the one
+    /// the agent has really been sitting on. Restore re-detects state, so
+    /// unless the state it was in comes back with it, the first look at the
+    /// screen reads as a change and stamps the clock to now -- which put every
+    /// agent on the fleet in "today" however long it had really sat.
+    #[tokio::test]
+    async fn restore_keeps_the_idle_clock_and_the_state_it_was_measured_from() {
+        let cwd = std::env::current_dir().unwrap();
+        let long_ago = 1_700_000_000_000u64;
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            cwd,
+                            label: None,
+                            agent_name: None,
+                            managed_agent_kind: None,
+                            agent_session: None,
+                            launch_argv: None,
+                            agent_state_changed_at_ms: Some(long_ago),
+                            agent_status: Some(crate::api::schema::AgentStatus::Idle),
+                            terminal_title: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            space_marks: Default::default(),
+            agent_marks: Default::default(),
+            legacy_agent_marks: Default::default(),
+            keep_offline_mirrors: None,
+            mirrors_off: None,
+            hide_spaces_in_agents: None,
+        };
+        let (events, _event_rx) = mpsc::channel(4);
+
+        let (_workspaces, terminals, _runtimes) = restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        let terminal = terminals
+            .values()
+            .next()
+            .expect("restored terminal should exist");
+        assert_eq!(
+            terminal.agent_state_changed_at_ms,
+            Some(long_ago),
+            "the clock the agent was sitting on has to come back with it"
+        );
+        assert_eq!(
+            terminal.state,
+            AgentState::Idle,
+            "and the state it was measured from, or the next look is a change"
+        );
     }
 
     #[tokio::test]
