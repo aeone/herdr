@@ -97,6 +97,10 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
                 "mark agent: pink, purple, blue, grey, off",
             ),
             help_entry(
+                keybind_label(&kb.rename_agent),
+                "rename agent: on its own host, if it is a mirror",
+            ),
+            help_entry(
                 keybind_label(&kb.toggle_spaces_in_agents),
                 "spaces listed under agents: hide or show",
             ),

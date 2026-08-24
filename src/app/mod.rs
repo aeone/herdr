@@ -477,7 +477,27 @@ impl App {
         self.state.mark_session_dirty();
     }
 
-    /// Steps the focused pane's agent mark down one level.
+    /// Opens the rename prompt for the agent in the focused pane.
+    ///
+    /// The same prompt as renaming a pane, but aimed at the agent panel: what a
+    /// space full of agents needs is a name per agent, and until one is set they
+    /// all read as the space they are in.
+    pub(crate) fn open_rename_focused_agent(&mut self) {
+        let Some(ws_idx) = self.state.active else {
+            return;
+        };
+        let Some(pane_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .map(|ws| ws.tabs[ws.active_tab].layout.focused())
+        else {
+            return;
+        };
+        crate::app::input::open_rename_agent(&mut self.state, pane_id);
+    }
+
+    /// Steps the focused pane's agent mark down one level.    /// Steps the focused pane's agent mark down one level.
     pub(crate) fn cycle_focused_agent_mark(&mut self) {
         let Some(ws_idx) = self.state.active else {
             return;
@@ -658,6 +678,8 @@ impl App {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
             wheel_events: std::collections::HashMap::new(),
+            renaming_agent: false,
+            pending_agent_rename: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
@@ -1170,6 +1192,32 @@ impl App {
                         env: Default::default(),
                     },
                 );
+                needs_render = true;
+            }
+
+            // A mirrored agent's new name goes to the machine that runs the
+            // pane; the name comes back on the next poll as the host's answer.
+            if let Some((ws_idx, pane_id, label)) = self.state.pending_agent_rename.take() {
+                #[cfg(unix)]
+                let sent = self.request_remote_agent_rename(ws_idx, pane_id, label.clone());
+                #[cfg(not(unix))]
+                let sent = false;
+                if !sent {
+                    // Not a mirror after all, or its host is unknown: name it
+                    // here rather than dropping what was typed.
+                    if let Some(terminal_id) = self
+                        .state
+                        .workspaces
+                        .get(ws_idx)
+                        .and_then(|ws| ws.pane_state(pane_id))
+                        .map(|pane| pane.attached_terminal_id.clone())
+                    {
+                        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                            terminal.set_manual_label(label);
+                            self.state.mark_session_dirty();
+                        }
+                    }
+                }
                 needs_render = true;
             }
 

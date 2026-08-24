@@ -53,6 +53,10 @@ impl MirrorOrigin {
 pub(crate) struct RemoteAgentPane {
     /// Remote terminal id, the argument `herdr terminal attach` takes.
     pub(crate) terminal_id: String,
+    /// What the host calls this pane in its own API -- the name a rename has to
+    /// be addressed to, since a host resolves panes by public id and not by the
+    /// terminal behind them.
+    pub(crate) pane_id: String,
     /// Remote workspace id, used to keep mirrors stable across polls.
     pub(crate) workspace_id: String,
     /// Remote workspace name, or the workspace id when the name is unknown.
@@ -709,6 +713,7 @@ fn parse_mirror_panes(
         RemoteAgentPane {
             status: pane.agent_status,
             terminal_id: pane.terminal_id,
+            pane_id: pane.pane_id,
             tab_id: pane.tab_id,
             pane_label: pane.label.or(pane.title),
             workspace_id: pane.workspace_id,
@@ -868,6 +873,43 @@ pub(crate) fn rename_remote_workspace(
     Ok(())
 }
 
+/// Renames a pane on the host that runs it.
+///
+/// A mirror's tab is named by the label the host holds for the pane, so this is
+/// the only rename that lasts: one made on this side alone is overwritten the
+/// next time the mirror is rebuilt, which is every handoff and every reconnect.
+pub(crate) fn rename_remote_pane(
+    space: &RemoteSpaceConfig,
+    manage_ssh_config: bool,
+    pane_id: &str,
+    label: &str,
+) -> io::Result<()> {
+    let script = rename_pane_script(space.session.as_deref(), space.is_local(), pane_id, label);
+    let output = if space.is_local() {
+        local_sh_output(&script)?
+    } else {
+        RemoteSsh::new(space.target.clone(), manage_ssh_config).sh_output(&script)?
+    };
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "renaming a pane on {} failed: {}",
+            space.target,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn rename_pane_script(session: Option<&str>, local: bool, pane_id: &str, label: &str) -> String {
+    let mut script = script_prologue(session, local);
+    script.push_str(&format!(
+        "\"$herdr_bin\" pane rename {} {}\n",
+        shell_quote(pane_id),
+        shell_quote(label)
+    ));
+    script
+}
+
 fn rename_workspace_script(
     session: Option<&str>,
     local: bool,
@@ -928,6 +970,7 @@ fn parse_created_workspace(stdout: &str) -> io::Result<CreatedRemoteSpace> {
         pane: RemoteAgentPane {
             status: root_pane.agent_status,
             terminal_id: root_pane.terminal_id,
+            pane_id: root_pane.pane_id,
             tab_id: root_pane.tab_id,
             pane_label: root_pane.label.or(root_pane.title),
             workspace_id: root_pane.workspace_id,
@@ -995,6 +1038,7 @@ fn parse_created_tab(stdout: &str) -> io::Result<CreatedRemoteSpace> {
         pane: RemoteAgentPane {
             status: root_pane.agent_status,
             terminal_id: root_pane.terminal_id,
+            pane_id: root_pane.pane_id,
             tab_id: root_pane.tab_id,
             pane_label: root_pane.label.or(root_pane.title),
             workspace_id: root_pane.workspace_id,
@@ -1128,6 +1172,7 @@ mod tests {
         assert_eq!(
             snapshot.panes,
             vec![RemoteAgentPane {
+                pane_id: "w1t1p1".to_string(),
                 terminal_id: "term-1".into(),
                 tab_id: "w1t1".into(),
                 pane_label: None,
@@ -1161,6 +1206,7 @@ mod tests {
             snapshot.panes,
             vec![
                 RemoteAgentPane {
+                    pane_id: "w1:p1".to_string(),
                     terminal_id: "term_656ccaeee911e1".into(),
                     tab_id: "w1:t1".into(),
                     pane_label: None,
@@ -1172,6 +1218,7 @@ mod tests {
                     state_changed_at_ms: None,
                 },
                 RemoteAgentPane {
+                    pane_id: "w3:p1".to_string(),
                     terminal_id: "term_656e5c429826d3".into(),
                     tab_id: "w3:t1".into(),
                     pane_label: None,
@@ -1258,6 +1305,7 @@ mod tests {
 
     fn pane(workspace_id: &str, workspace_label: &str, terminal_id: &str) -> RemoteAgentPane {
         RemoteAgentPane {
+            pane_id: "w1:p1".to_string(),
             terminal_id: terminal_id.into(),
             tab_id: "t1".into(),
             pane_label: None,
@@ -1307,6 +1355,7 @@ mod tests {
     #[test]
     fn mirror_identity_is_stable_per_host_workspace_and_terminal() {
         let pane = RemoteAgentPane {
+            pane_id: "w1:p1".to_string(),
             terminal_id: "term-1".into(),
             tab_id: "w1:t1".into(),
             pane_label: None,
@@ -1326,6 +1375,7 @@ mod tests {
     #[test]
     fn attach_argv_targets_the_remote_terminal_through_a_pty() {
         let pane = RemoteAgentPane {
+            pane_id: "w1:p1".to_string(),
             terminal_id: "term-1".into(),
             tab_id: "w1:t1".into(),
             pane_label: None,
@@ -1400,6 +1450,7 @@ mod tests {
         let mut space = space("workbox");
         space.session = Some("agents".into());
         let pane = RemoteAgentPane {
+            pane_id: "w1:p1".to_string(),
             terminal_id: "term-1".into(),
             tab_id: "w1:t1".into(),
             pane_label: None,

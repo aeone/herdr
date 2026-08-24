@@ -227,6 +227,10 @@ pub struct RemoteMirrorTab {
     /// The terminal id on the host we poll, which is what that host answers to.
     /// Distinct from the key, which names the origin.
     pub remote_terminal: String,
+    /// What the polled host calls this pane in its own API. A rename has to be
+    /// addressed to the host by this: a mirror's tab is named by the label the
+    /// host holds, so renaming it here alone would last until the next rebuild.
+    pub remote_pane: String,
     /// Set when this tab's pane has died on the host but the tab was kept.
     pub disconnected: bool,
 }

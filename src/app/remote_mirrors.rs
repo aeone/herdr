@@ -75,6 +75,9 @@ pub(crate) struct MirrorTabSpec {
     /// The terminal id the polled host knows this pane by, which is not the key
     /// when the pane reached us through another host.
     pub(crate) remote_terminal: String,
+    /// What the polled host calls this pane in its own API, so a rename can be
+    /// addressed to it there.
+    pub(crate) remote_pane: String,
     /// What to call the tab.
     pub(crate) label: Option<String>,
     pub(crate) argv: Vec<String>,
@@ -233,6 +236,7 @@ pub(crate) fn plan_remote_mirrors(
     let tab_spec = |pane: &RemoteAgentPane| MirrorTabSpec {
         key: pane.mirror_key(&space.target),
         remote_terminal: pane.terminal_id.clone(),
+        remote_pane: pane.pane_id.clone(),
         label: pane.pane_label.clone(),
         argv: attach_argv(space, pane, &snapshot.remote_herdr),
         agent: pane.agent.clone(),
@@ -730,6 +734,60 @@ impl App {
     /// back to the remote, so the next snapshot restores what the host still
     /// calls it rather than leaving a name that only exists here. A success is
     /// left pending until a snapshot carries the new label.
+    /// Renames the agent in a mirrored pane on the machine that runs it.
+    ///
+    /// A mirror's tab takes its name from the label the host holds, so a rename
+    /// made only here lasts until the next rebuild -- every handoff, every
+    /// reconnect. Sent to the host, it is the name every machine mirroring that
+    /// pane will show.
+    pub(crate) fn request_remote_agent_rename(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        label: String,
+    ) -> bool {
+        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
+            return false;
+        };
+        let Some(target) = workspace
+            .remote_mirror
+            .as_ref()
+            .map(|mirror| mirror.target.clone())
+        else {
+            return false;
+        };
+        let Some(remote_pane) = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.panes.contains_key(&pane_id))
+            .and_then(|tab| tab.remote_mirror.as_ref())
+            .map(|mirrored| mirrored.remote_pane.clone())
+        else {
+            return false;
+        };
+        let Some(space) = self
+            .config_remote_spaces()
+            .into_iter()
+            .find(|space| space.target == target)
+        else {
+            return false;
+        };
+        let manage_ssh_config = self.manage_ssh_config;
+        // Off the render thread: this is an ssh round trip, and the rename shows
+        // up here anyway on the next poll, as the host's own answer.
+        std::thread::spawn(move || {
+            if let Err(err) = crate::remote::spaces::rename_remote_pane(
+                &space,
+                manage_ssh_config,
+                &remote_pane,
+                &label,
+            ) {
+                tracing::warn!(target = %space.target, %err, "could not rename a mirrored agent");
+            }
+        });
+        true
+    }
+
     pub(crate) fn handle_remote_space_renamed(
         &mut self,
         target: String,
@@ -816,6 +874,7 @@ impl App {
         let tab = MirrorTabSpec {
             key,
             remote_terminal: created.pane.terminal_id.clone(),
+            remote_pane: created.pane.pane_id.clone(),
             label: created.pane.pane_label.clone(),
             argv,
             agent: None,
@@ -1983,6 +2042,7 @@ impl App {
             tab.remote_mirror = Some(crate::workspace::RemoteMirrorTab {
                 key: spec.key.clone(),
                 remote_terminal: spec.remote_terminal.clone(),
+                remote_pane: spec.remote_pane.clone(),
                 disconnected: false,
             });
             if let Some(label) = spec.label.clone() {
@@ -2799,6 +2859,7 @@ mod tests {
         workspace.tabs[1].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
             key: key_for("workbox", "w1", "term-2"),
             remote_terminal: "term-2".to_string(),
+            remote_pane: "w1:p1".to_string(),
             disconnected: false,
         });
         app.state.workspaces.push(workspace);
@@ -3110,6 +3171,7 @@ mod tests {
 
     fn agent_pane(workspace_id: &str, label: &str, terminal_id: &str) -> RemoteAgentPane {
         RemoteAgentPane {
+            pane_id: "w1:p1".to_string(),
             terminal_id: terminal_id.into(),
             // One tab per pane unless a test says otherwise, which is what the
             // host reports for the ordinary one-pane space.
@@ -3161,6 +3223,7 @@ mod tests {
         workspace.tabs[0].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
             key: key.to_string(),
             remote_terminal: "term-remote".to_string(),
+            remote_pane: "w1:p1".to_string(),
             disconnected: false,
         });
         workspace
@@ -3191,6 +3254,7 @@ mod tests {
             &MirrorTabSpec {
                 key: key_for("workbox", "w1", "term-2"),
                 remote_terminal: "term-2".to_string(),
+                remote_pane: "w1:p1".to_string(),
                 label: None,
                 argv: Vec::new(),
                 agent: None,
@@ -3228,6 +3292,7 @@ mod tests {
             &MirrorTabSpec {
                 key: key_for("workbox", "w1", "term-2"),
                 remote_terminal: "term-2".to_string(),
+                remote_pane: "w1:p1".to_string(),
                 label: None,
                 argv: Vec::new(),
                 agent: None,
@@ -3276,6 +3341,7 @@ mod tests {
                         Some(crate::workspace::RemoteMirrorTab {
                             key: spec.key.clone(),
                             remote_terminal: spec.remote_terminal.clone(),
+                            remote_pane: "w1:p1".to_string(),
                             disconnected: false,
                         });
                 }
@@ -3288,6 +3354,7 @@ mod tests {
                 workspace.tabs[tab_idx].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
                     key: tab.key.clone(),
                     remote_terminal: tab.remote_terminal.clone(),
+                    remote_pane: "w1:p1".to_string(),
                     disconnected: false,
                 });
             }
@@ -3350,6 +3417,7 @@ mod tests {
         workspace.tabs[1].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
             key: second.mirror_key(&space.target),
             remote_terminal: "term-2".to_string(),
+            remote_pane: "w1:p1".to_string(),
             disconnected: false,
         });
         app.state.workspaces.push(workspace);
@@ -3546,6 +3614,51 @@ mod tests {
         assert_eq!(app.focused_mirror_terminal(), None);
     }
 
+    /// Renaming a mirrored agent has to be addressed to the machine that runs
+    /// it, by the name that machine calls the pane. A mirror's tab is named by
+    /// the label the host holds, so a rename made only here is discarded by the
+    /// next rebuild -- which is every handoff and every reconnect.
+    #[tokio::test]
+    async fn renaming_a_mirrored_agent_is_addressed_to_the_host_that_runs_it() {
+        let mut app = crate::app::tests::test_app();
+        mirror_of_two_panes(&mut app, "workbox");
+        // Each tab carries the name its host knows the pane by.
+        for (tab_idx, remote_pane) in [(0, "w9:p1"), (1, "w9:p2")] {
+            if let Some(mirrored) = app.state.workspaces[0].tabs[tab_idx].remote_mirror.as_mut() {
+                mirrored.remote_pane = remote_pane.to_string();
+            }
+        }
+
+        for (tab_idx, expected) in [(0, "w9:p1"), (1, "w9:p2")] {
+            let pane_id = app.state.workspaces[0].tabs[tab_idx].root_pane;
+            let addressed = app.state.workspaces[0]
+                .tabs
+                .iter()
+                .find(|tab| tab.panes.contains_key(&pane_id))
+                .and_then(|tab| tab.remote_mirror.as_ref())
+                .map(|mirrored| mirrored.remote_pane.as_str());
+            assert_eq!(
+                addressed,
+                Some(expected),
+                "tab {tab_idx} should name the remote pane the host would rename"
+            );
+        }
+    }
+
+    /// A pane of this machine's own is renamed here, so nothing is sent anywhere.
+    #[tokio::test]
+    async fn renaming_a_local_agent_asks_no_host() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = vec![Workspace::test_new("here")];
+        app.state.active = Some(0);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        assert!(
+            !app.request_remote_agent_rename(0, pane_id, "api".to_string()),
+            "a local pane has no host to ask"
+        );
+    }
+
     /// What a host says about a pane has to reach the tab standing for that
     /// pane. A mirrored space is named by the space it mirrors, and its panes
     /// are named on its tabs, so looking a pane up by the name on the space --
@@ -3566,6 +3679,7 @@ mod tests {
         workspace.tabs[1].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
             key: second_key,
             remote_terminal: "term-2".to_string(),
+            remote_pane: "w1:p1".to_string(),
             disconnected: false,
         });
         let second_pane = workspace.tabs[1].root_pane;
@@ -3885,6 +3999,7 @@ mod tests {
                 tab: MirrorTabSpec {
                     key: key_for("workbox", "w1", "term-2"),
                     remote_terminal: "term-2".into(),
+                    remote_pane: "w1:p1".to_string(),
                     label: None,
                     argv: attach_argv(
                         &space("workbox"),
@@ -3972,6 +4087,7 @@ mod tests {
                 tabs: vec![MirrorTabSpec {
                     key: key_for("workbox", "w7", "term-7"),
                     remote_terminal: "term-7".into(),
+                    remote_pane: "w1:p1".to_string(),
                     label: None,
                     argv: attach_argv(
                         &space("workbox"),
@@ -4259,6 +4375,7 @@ mod tests {
                     tabs: vec![MirrorTabSpec {
                         key: key_for("workbox", "w2", "term-2"),
                         remote_terminal: "term-2".into(),
+                        remote_pane: "w1:p1".to_string(),
                         label: None,
                         argv: attach_argv(
                             &space("workbox"),

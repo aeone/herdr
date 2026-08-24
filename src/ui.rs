@@ -1652,6 +1652,7 @@ mod tests {
                 "jump: label every space and agent, press one",
                 "mark space: pink, purple, blue, grey, off",
                 "mark agent: pink, purple, blue, grey, off",
+                "rename agent: on its own host, if it is a mirror",
                 "spaces listed under agents: hide or show",
                 "offline mirrors: keep or hide",
             ]

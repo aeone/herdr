@@ -425,6 +425,16 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
     state.mode = Mode::RenamePane;
 }
 
+/// Opens the rename prompt aimed at an agent rather than a pane.
+///
+/// The prompt is the same one; what differs is where the name lands when it is
+/// committed. A mirrored agent's name has to be set on the machine that runs
+/// it, or the next rebuild takes it away again.
+pub(super) fn open_rename_agent(state: &mut AppState, pane_id: crate::layout::PaneId) {
+    open_rename_pane(state, pane_id);
+    state.renaming_agent = state.mode == Mode::RenamePane;
+}
+
 fn workspace_create_label(input: &str, suggested_name: &str) -> Option<String> {
     let name = input.trim();
     (!name.is_empty() && name != suggested_name).then(|| name.to_string())
@@ -567,7 +577,18 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 Mode::RenamePane => {
                     if let (Some(ws_idx), Some(pane_id)) = (state.active, state.rename_pane_target)
                     {
-                        if let Some(ws) = state.workspaces.get(ws_idx) {
+                        // A mirrored agent is named on the machine that runs it,
+                        // and the name comes back on the next poll as the host's
+                        // own answer. Naming it here instead would last only
+                        // until the next rebuild.
+                        let mirrored = state.renaming_agent
+                            && state
+                                .workspaces
+                                .get(ws_idx)
+                                .is_some_and(|ws| ws.remote_mirror.is_some());
+                        if mirrored {
+                            state.pending_agent_rename = Some((ws_idx, pane_id, new_name));
+                        } else if let Some(ws) = state.workspaces.get(ws_idx) {
                             if let Some(pane) = ws.pane_state(pane_id) {
                                 let terminal_id = pane.attached_terminal_id.clone();
                                 if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
@@ -1410,6 +1431,7 @@ fn cancel_rename_modal(state: &mut AppState) {
     state.requested_new_tab_name = None;
     state.pending_workspace_create_cwd = None;
     state.rename_pane_target = None;
+    state.renaming_agent = false;
     state.name_input.clear();
     state.name_input_replace_on_type = false;
     leave_modal(state);

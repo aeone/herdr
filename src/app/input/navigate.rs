@@ -185,6 +185,9 @@ impl App {
             NavigateAction::ToggleAgentHighlight => {
                 self.cycle_focused_agent_mark();
             }
+            NavigateAction::RenameAgent => {
+                self.open_rename_focused_agent();
+            }
             NavigateAction::Jump => {
                 self.open_jump();
             }
@@ -1430,6 +1433,7 @@ pub(crate) enum NavigateAction {
     RenameWorkspace,
     ToggleSpaceHighlight,
     ToggleAgentHighlight,
+    RenameAgent,
     Jump,
     ToggleSpacesInAgents,
     ToggleOfflineMirrors,
@@ -1592,6 +1596,7 @@ fn non_indexed_action_for_key(
             &kb.toggle_agent_highlight,
             NavigateAction::ToggleAgentHighlight,
         ),
+        (&kb.rename_agent, NavigateAction::RenameAgent),
         (&kb.jump, NavigateAction::Jump),
         (
             &kb.toggle_spaces_in_agents,
@@ -1715,6 +1720,8 @@ pub(super) fn execute_navigate_action_in_context(
             state.request_new_workspace = true;
             leave_navigate_mode(state);
         }
+        // Renaming reaches a host, which the harness has no way to do.
+        NavigateAction::RenameAgent => {}
         // State-only variants of the mark cycles, for the test harness that
         // drives actions without an App.
         NavigateAction::ToggleSpaceHighlight => {

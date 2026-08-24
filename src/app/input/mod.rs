@@ -41,6 +41,16 @@ mod copy_mode;
 mod jump;
 mod lease;
 mod modal;
+
+/// Opens the rename prompt for one agent. Lives here because `modal` is this
+/// module's own.
+pub(crate) fn open_rename_agent(
+    state: &mut crate::app::state::AppState,
+    pane_id: crate::layout::PaneId,
+) {
+    modal::open_rename_agent(state, pane_id);
+}
+
 mod mouse;
 mod navigate;
 mod overlays;

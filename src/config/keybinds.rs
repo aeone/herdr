@@ -315,6 +315,7 @@ pub struct Keybinds {
     pub rename_workspace: ActionKeybinds,
     pub toggle_space_highlight: ActionKeybinds,
     pub toggle_agent_highlight: ActionKeybinds,
+    pub rename_agent: ActionKeybinds,
     pub jump: ActionKeybinds,
     pub toggle_spaces_in_agents: ActionKeybinds,
     pub toggle_offline_mirrors: ActionKeybinds,
@@ -488,6 +489,7 @@ impl Config {
             rename_workspace: empty_action!(),
             toggle_space_highlight: empty_action!(),
             toggle_agent_highlight: empty_action!(),
+            rename_agent: empty_action!(),
             jump: empty_action!(),
             toggle_spaces_in_agents: empty_action!(),
             toggle_offline_mirrors: empty_action!(),
@@ -629,6 +631,7 @@ impl Config {
                 toggle_agent_highlight,
                 source
             );
+            apply_action!(keybinds.rename_agent, rename_agent, source);
             apply_action!(keybinds.jump, jump, source);
             apply_action!(
                 keybinds.toggle_spaces_in_agents,
