@@ -1311,6 +1311,13 @@ enum TerminalControlCommand {
         #[serde(default)]
         modifiers: u8,
     },
+    /// An image to stage here and paste into the controlled terminal.
+    ///
+    /// A mirror sends the bytes rather than a path: the file was staged on the
+    /// machine that took the paste, and an agent on this one has nothing to
+    /// open. Staged here it becomes an ordinary attached-client paste.
+    #[serde(rename = "terminal.image")]
+    Image { extension: String, data: String },
     #[serde(rename = "terminal.release")]
     Release {},
 }
@@ -1400,6 +1407,22 @@ fn terminal_control_command_from_json(raw: &str) -> Result<ClientMessage, String
                 column,
                 row,
                 modifiers,
+            })
+        }
+        TerminalControlCommand::Image { extension, data } => {
+            let extension = extension.trim().trim_start_matches('.');
+            if extension.is_empty() {
+                return Err("terminal.image needs an extension".into());
+            }
+            let data = base64::engine::general_purpose::STANDARD
+                .decode(data.as_bytes())
+                .map_err(|err| format!("terminal.image data is not base64: {err}"))?;
+            if data.is_empty() {
+                return Err("terminal.image needs data".into());
+            }
+            Ok(ClientMessage::ClipboardImage {
+                extension: extension.to_owned(),
+                data,
             })
         }
         TerminalControlCommand::Release {} => Ok(ClientMessage::Detach),
@@ -3880,6 +3903,36 @@ mod tests {
             action,
             ClientMessage::ControlTerminal { ref target, takeover: true } if target == "term_b"
         ));
+    }
+
+    /// An image pasted into a mirror arrives here as bytes, not as a path: the
+    /// file was staged on the machine that took the paste, and the agent
+    /// reading it runs on this one. Staged here it becomes an ordinary
+    /// attached-client paste, which is what makes an agent see a picture
+    /// instead of a dead path.
+    #[test]
+    fn a_mirrored_image_arrives_as_bytes_to_stage_here() {
+        let action = terminal_control_command_from_json(
+            r#"{"type":"terminal.image","extension":"png","data":"aGk="}"#,
+        )
+        .unwrap();
+        let ClientMessage::ClipboardImage { extension, data } = action else {
+            panic!("expected a clipboard image");
+        };
+        assert_eq!(extension, "png");
+        assert_eq!(data, b"hi");
+    }
+
+    #[test]
+    fn a_mirrored_image_without_usable_bytes_is_refused() {
+        for raw in [
+            r#"{"type":"terminal.image","extension":"","data":"aGk="}"#,
+            r#"{"type":"terminal.image","extension":"png","data":"not base64!"}"#,
+            r#"{"type":"terminal.image","extension":"png","data":""}"#,
+        ] {
+            terminal_control_command_from_json(raw)
+                .expect_err("an unusable image should be refused, not pasted as nothing");
+        }
     }
 
     #[test]

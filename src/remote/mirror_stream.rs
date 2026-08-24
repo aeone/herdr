@@ -392,27 +392,38 @@ impl MirrorControl {
     }
 
     /// Sends one request, moving the claim first if it is for another terminal.
+    /// Points this connection at `terminal_id` if it is not already there.
+    ///
+    /// What is usually holding a mirrored pane is an older mirror of ours, and
+    /// the machine being typed at should win.
+    fn take_control_of(&mut self, terminal_id: &str) -> std::io::Result<()> {
+        if self.controlling == terminal_id {
+            return Ok(());
+        }
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(std::io::Error::other("control stream stdin is closed"));
+        };
+        let line = serde_json::json!({
+            "type": "terminal.control",
+            "target": terminal_id,
+            "takeover": true,
+        })
+        .to_string();
+        stdin.write_all(line.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        self.controlling = terminal_id.to_owned();
+        Ok(())
+    }
+
     pub(crate) fn send(
         &mut self,
         terminal_id: &str,
         request: &crate::pane::StreamedPaneRequest,
     ) -> std::io::Result<()> {
+        self.take_control_of(terminal_id)?;
         let Some(stdin) = self.stdin.as_mut() else {
             return Err(std::io::Error::other("control stream stdin is closed"));
         };
-        if self.controlling != terminal_id {
-            // Takeover: what is usually holding a mirrored pane is an older
-            // mirror of ours, and the machine being typed at should win.
-            let line = serde_json::json!({
-                "type": "terminal.control",
-                "target": terminal_id,
-                "takeover": true,
-            })
-            .to_string();
-            stdin.write_all(line.as_bytes())?;
-            stdin.write_all(b"\n")?;
-            self.controlling = terminal_id.to_owned();
-        }
         let line = match request {
             crate::pane::StreamedPaneRequest::Input(bytes) => serde_json::json!({
                 "type": "terminal.input",
@@ -437,6 +448,35 @@ impl MirrorControl {
                 "source": "wheel",
             }),
         }
+        .to_string();
+        stdin.write_all(line.as_bytes())?;
+        stdin.write_all(b"\n")?;
+        stdin.flush()
+    }
+
+    /// Hands the host an image to stage on itself and paste into the terminal
+    /// this connection controls.
+    ///
+    /// The bytes go to the host rather than the path, because the path is the
+    /// one thing that cannot travel: the file is staged on whichever machine
+    /// took the paste, and an agent on another machine has nothing to open. The
+    /// host stages its own copy and types its own path, which is the same thing
+    /// it does for any attached client.
+    pub(crate) fn send_image(
+        &mut self,
+        terminal_id: &str,
+        extension: &str,
+        data: &[u8],
+    ) -> std::io::Result<()> {
+        self.take_control_of(terminal_id)?;
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Err(std::io::Error::other("control stream stdin is closed"));
+        };
+        let line = serde_json::json!({
+            "type": "terminal.image",
+            "extension": extension,
+            "data": base64::engine::general_purpose::STANDARD.encode(data),
+        })
         .to_string();
         stdin.write_all(line.as_bytes())?;
         stdin.write_all(b"\n")?;

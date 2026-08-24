@@ -1282,6 +1282,58 @@ impl App {
         }
     }
 
+    /// The host and terminal behind the pane being worked in, when that pane is
+    /// a mirror of another machine's.
+    pub(crate) fn focused_mirror_terminal(&self) -> Option<(String, String)> {
+        let ws_idx = self.state.active?;
+        let workspace = self.state.workspaces.get(ws_idx)?;
+        let target = workspace.remote_mirror.as_ref()?.target.clone();
+        let focused = workspace.focused_pane_id()?;
+        let tab = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.panes.contains_key(&focused))?;
+        Some((target, tab.remote_mirror.as_ref()?.remote_terminal.clone()))
+    }
+
+    /// Hands an image to the host that runs a mirrored pane, so it stages the
+    /// file on itself and pastes its own path.
+    ///
+    /// The path is the one thing that cannot be forwarded: it names a file on
+    /// whichever machine took the paste, and the agent reading it is on another
+    /// one. Sending the path anyway is what put a dead path in front of an
+    /// agent instead of a picture.
+    pub(crate) fn send_mirror_image(
+        &mut self,
+        target: &str,
+        terminal_id: &str,
+        extension: &str,
+        data: &[u8],
+    ) {
+        if !self.claim_mirror_control(target, terminal_id) {
+            return;
+        }
+        let send = |app: &mut Self| {
+            app.mirror_controls
+                .get_mut(target)
+                .ok_or_else(|| std::io::Error::other("no control connection"))
+                .and_then(|control| control.send_image(terminal_id, extension, data))
+        };
+        if let Err(err) = send(self) {
+            // The same one clean retry a keystroke gets: a control connection
+            // dies on the far side without warning, and the first this side
+            // hears of it is a broken pipe on the way out.
+            tracing::debug!(target, terminal_id, %err, "mirror image failed; claiming again");
+            if !self.claim_mirror_control(target, terminal_id) {
+                return;
+            }
+            if let Err(err) = send(self) {
+                tracing::warn!(target, terminal_id, %err, "mirror image failed twice; giving up on it");
+                self.release_mirror_control(target);
+            }
+        }
+    }
+
     /// Ensures this machine holds `target`'s writable connection, opening one if
     /// it does not. Returns whether it now holds a usable one.
     fn claim_mirror_control(&mut self, target: &str, terminal_id: &str) -> bool {
@@ -3458,6 +3510,40 @@ mod tests {
                 "tab {tab_idx} should carry the state its host reported"
             );
         }
+    }
+
+    /// An image pasted into a mirror has to go to the machine that runs the
+    /// pane, and which machine that is depends on the tab in front: a mirrored
+    /// space holds a tab per remote pane, each with a terminal of its own.
+    #[tokio::test]
+    async fn an_image_pasted_into_a_mirror_names_the_host_and_its_terminal() {
+        let mut app = crate::app::tests::test_app();
+        mirror_of_two_panes(&mut app, "workbox");
+        app.state.active = Some(0);
+
+        app.state.workspaces[0].active_tab = 0;
+        assert_eq!(
+            app.focused_mirror_terminal(),
+            Some(("workbox".to_string(), "term-remote".to_string())),
+        );
+
+        app.state.workspaces[0].active_tab = 1;
+        assert_eq!(
+            app.focused_mirror_terminal(),
+            Some(("workbox".to_string(), "term-2".to_string())),
+            "the tab in front is the pane being pasted into"
+        );
+    }
+
+    /// A pane of this machine's own stages its image here, as it always has.
+    /// Sending it to a host would be sending it nowhere.
+    #[tokio::test]
+    async fn an_image_pasted_into_a_local_pane_names_no_host() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = vec![Workspace::test_new("here")];
+        app.state.active = Some(0);
+        assert!(app.state.workspaces[0].remote_mirror.is_none());
+        assert_eq!(app.focused_mirror_terminal(), None);
     }
 
     /// What a host says about a pane has to reach the tab standing for that

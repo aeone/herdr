@@ -3642,6 +3642,17 @@ impl HeadlessServer {
                 ) {
                     return false;
                 }
+                // A mirror's pane runs on another machine, so staging the file
+                // here and pasting its path hands the agent a path to a file it
+                // cannot see. Give the host the bytes instead and let it do
+                // what it does for any attached client: stage its own copy and
+                // paste its own path.
+                #[cfg(unix)]
+                if let Some((target, terminal_id)) = self.app.focused_mirror_terminal() {
+                    self.app
+                        .send_mirror_image(&target, &terminal_id, &extension, &data);
+                    return true;
+                }
                 match self.write_client_clipboard_image(client_id, &extension, &data) {
                     Ok(path) => self.paste_client_clipboard_image_path(client_id, path),
                     Err(err) => {
