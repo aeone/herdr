@@ -1727,9 +1727,10 @@ pub(super) fn execute_navigate_action_in_context(
             if let Some(ws_idx) = state.active {
                 let pane_id = state.workspaces[ws_idx].tabs[state.workspaces[ws_idx].active_tab]
                     .layout
-                    .focused()
-                    .raw();
-                crate::app::cycle_mark_entry(&mut state.agent_marks, pane_id);
+                    .focused();
+                if let Some(key) = state.agent_mark_key(ws_idx, pane_id) {
+                    crate::app::cycle_mark_entry(&mut state.agent_marks, key);
+                }
             }
         }
         NavigateAction::Jump => {

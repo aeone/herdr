@@ -3150,7 +3150,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(entry_mark(&app, 0, None), Some(MarkLevel::High));
         assert_eq!(entry_mark(&app, 1, Some(pane)), None);
 
-        app.agent_marks.insert(pane.raw(), MarkLevel::Low);
+        let key = app.agent_mark_key(1, pane).expect("a pane has a mark key");
+        app.agent_marks.insert(key, MarkLevel::Low);
         assert_eq!(entry_mark(&app, 1, Some(pane)), Some(MarkLevel::Low));
     }
 
@@ -3165,7 +3166,8 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         let id = app.workspaces[0].id.clone();
 
         app.space_marks.insert(id, MarkLevel::Background);
-        app.agent_marks.insert(pane.raw(), MarkLevel::High);
+        let key = app.agent_mark_key(0, pane).expect("a pane has a mark key");
+        app.agent_marks.insert(key, MarkLevel::High);
 
         assert_eq!(entry_mark(&app, 0, Some(pane)), Some(MarkLevel::High));
         assert_eq!(entry_mark(&app, 0, None), Some(MarkLevel::Background));

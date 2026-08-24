@@ -29,9 +29,21 @@ pub struct SessionSnapshot {
     /// Marks on spaces, by workspace id.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub space_marks: HashMap<String, crate::app::MarkLevel>,
-    /// Marks on agents, by pane id.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub agent_marks: HashMap<u32, crate::app::MarkLevel>,
+    /// Marks on agents, by the name a mark outlives its pane under: the remote
+    /// pane a mirror stands for, or the space and pane number the API already
+    /// calls a local one.
+    #[serde(
+        default,
+        rename = "agent_marks_by_name",
+        skip_serializing_if = "HashMap::is_empty"
+    )]
+    pub agent_marks: HashMap<String, crate::app::MarkLevel>,
+    /// Marks as they were when a pane id was their key. Read once so an
+    /// existing session keeps its marks, never written back: the id is a
+    /// counter that restarts with the process, so these can only be resolved
+    /// against the layout they were written beside.
+    #[serde(default, rename = "agent_marks", skip_serializing)]
+    pub legacy_agent_marks: HashMap<u32, crate::app::MarkLevel>,
     /// Whether mirrors of an unreachable host stay in the sidebar, greyed,
     /// once the user has answered. Absent means the config value still
     /// decides. Written under a new key: the old one was a plain bool that
@@ -61,7 +73,7 @@ pub struct SessionSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct SessionMarks {
     pub space_marks: HashMap<String, crate::app::MarkLevel>,
-    pub agent_marks: HashMap<u32, crate::app::MarkLevel>,
+    pub agent_marks: HashMap<String, crate::app::MarkLevel>,
     pub keep_offline_mirrors: Option<bool>,
     pub mirrors_off: Option<std::collections::BTreeSet<String>>,
     pub hide_spaces_in_agents: Option<bool>,
@@ -242,6 +254,8 @@ struct RawSessionSnapshot {
     space_marks: HashMap<String, crate::app::MarkLevel>,
     #[serde(default)]
     agent_marks: HashMap<u32, crate::app::MarkLevel>,
+    #[serde(default)]
+    agent_marks_by_name: HashMap<String, crate::app::MarkLevel>,
     /// Marks as they were before levels existed: a plain set, all one colour.
     /// Read once so an existing session keeps its marks, never written back.
     #[serde(default)]
@@ -273,7 +287,8 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         // what the top level means now, so they land there. Any level already
         // recorded for the same key wins — the levelled field is the newer one.
         space_marks: merge_legacy_marks(raw.space_marks, raw.highlighted_workspaces),
-        agent_marks: merge_legacy_marks(raw.agent_marks, raw.highlighted_panes),
+        agent_marks: raw.agent_marks_by_name,
+        legacy_agent_marks: merge_legacy_marks(raw.agent_marks, raw.highlighted_panes),
         keep_offline_mirrors: raw.keep_offline_mirrors,
         mirrors_off: raw.mirrors_off,
         hide_spaces_in_agents: raw.hide_spaces_in_agents,
@@ -377,6 +392,7 @@ pub fn capture(
         collapsed_space_keys,
         space_marks: marks.space_marks,
         agent_marks: marks.agent_marks,
+        legacy_agent_marks: HashMap::new(),
         keep_offline_mirrors: marks.keep_offline_mirrors,
         mirrors_off: marks.mirrors_off,
         hide_spaces_in_agents: marks.hide_spaces_in_agents,
@@ -636,7 +652,7 @@ mod tests {
         let snapshot = super::parse_snapshot(content).expect("snapshot parses");
 
         assert_eq!(snapshot.space_marks.get("ws-a"), Some(&MarkLevel::High));
-        assert_eq!(snapshot.agent_marks.get(&7), Some(&MarkLevel::High));
+        assert_eq!(snapshot.legacy_agent_marks.get(&7), Some(&MarkLevel::High));
     }
 
     /// Written by a build that has both fields, the levelled one is the one
@@ -669,16 +685,24 @@ mod tests {
         snapshot
             .space_marks
             .insert("ws-a".to_string(), MarkLevel::Low);
-        snapshot.agent_marks.insert(7, MarkLevel::Background);
+        snapshot
+            .agent_marks
+            .insert("w3:p1".to_string(), MarkLevel::Background);
 
         let json = serde_json::to_string(&snapshot).expect("snapshot serialises");
         assert!(json.contains(r#""space_marks":{"ws-a":1}"#), "{json}");
-        assert!(json.contains(r#""agent_marks":{"7":0}"#), "{json}");
+        assert!(
+            json.contains(r#""agent_marks_by_name":{"w3:p1":0}"#),
+            "{json}"
+        );
         assert!(!json.contains("highlighted_workspaces"), "{json}");
 
         let restored = super::parse_snapshot(&json).expect("snapshot parses");
         assert_eq!(restored.space_marks.get("ws-a"), Some(&MarkLevel::Low));
-        assert_eq!(restored.agent_marks.get(&7), Some(&MarkLevel::Background));
+        assert_eq!(
+            restored.agent_marks.get("w3:p1"),
+            Some(&MarkLevel::Background)
+        );
     }
 
     /// Every earlier session wrote `keep_offline_mirrors` whether or not the
@@ -718,6 +742,7 @@ mod tests {
             collapsed_space_keys: Default::default(),
             space_marks: Default::default(),
             agent_marks: Default::default(),
+            legacy_agent_marks: Default::default(),
             keep_offline_mirrors: None,
             mirrors_off: None,
             hide_spaces_in_agents: None,
@@ -900,6 +925,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             space_marks: Default::default(),
             agent_marks: Default::default(),
+            legacy_agent_marks: Default::default(),
             keep_offline_mirrors: None,
             mirrors_off: None,
             hide_spaces_in_agents: None,
@@ -997,6 +1023,7 @@ mod tests {
             version: SNAPSHOT_VERSION,
             space_marks: Default::default(),
             agent_marks: Default::default(),
+            legacy_agent_marks: Default::default(),
             keep_offline_mirrors: None,
             mirrors_off: None,
             hide_spaces_in_agents: None,
@@ -1641,6 +1668,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             space_marks: Default::default(),
             agent_marks: Default::default(),
+            legacy_agent_marks: Default::default(),
             keep_offline_mirrors: None,
             mirrors_off: None,
             hide_spaces_in_agents: None,

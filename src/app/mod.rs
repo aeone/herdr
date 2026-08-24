@@ -490,7 +490,10 @@ impl App {
         else {
             return;
         };
-        cycle_mark_entry(&mut self.state.agent_marks, pane_id.raw());
+        let Some(key) = self.state.agent_mark_key(ws_idx, pane_id) else {
+            return;
+        };
+        cycle_mark_entry(&mut self.state.agent_marks, key);
         self.state.mark_session_dirty();
     }
 
@@ -1027,6 +1030,23 @@ impl App {
         app.state.collapsed_space_keys = snapshot.collapsed_space_keys.clone();
         app.state.space_marks = snapshot.space_marks.clone();
         app.state.agent_marks = snapshot.agent_marks.clone();
+        // Marks written when a pane id was their key. The ids they name are the
+        // ones this snapshot was captured beside, so they can be resolved here
+        // -- against the layout just restored, through the same aliases that
+        // carry an old id to the pane it became -- and nowhere later.
+        for (raw, level) in &snapshot.legacy_agent_marks {
+            let pane_id = app
+                .state
+                .pane_id_aliases
+                .get(raw)
+                .copied()
+                .unwrap_or_else(|| crate::layout::PaneId::from_raw(*raw));
+            let key = (0..app.state.workspaces.len())
+                .find_map(|ws_idx| app.state.agent_mark_key(ws_idx, pane_id));
+            if let Some(key) = key {
+                app.state.agent_marks.entry(key).or_insert(*level);
+            }
+        }
         app.state.keep_offline_mirrors = snapshot.keep_offline_mirrors;
         app.state.mirrors_off = snapshot.mirrors_off.clone().unwrap_or_default();
         app.state.hide_spaces_in_agents = snapshot.hide_spaces_in_agents;

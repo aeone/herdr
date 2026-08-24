@@ -209,6 +209,7 @@ mod tests {
             collapsed_space_keys: std::collections::HashSet::new(),
             space_marks: Default::default(),
             agent_marks: Default::default(),
+            legacy_agent_marks: Default::default(),
             keep_offline_mirrors: None,
             mirrors_off: None,
             hide_spaces_in_agents: None,

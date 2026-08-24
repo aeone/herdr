@@ -1653,7 +1653,7 @@ pub struct AppState {
     pub space_marks: std::collections::HashMap<String, MarkLevel>,
     /// Marks the user put on agents, by pane id. Pane ids are restored from the
     /// snapshot rather than reallocated, so these survive a restart too.
-    pub agent_marks: std::collections::HashMap<u32, MarkLevel>,
+    pub agent_marks: std::collections::HashMap<String, MarkLevel>,
     /// Whether mirrors of an unreachable host stay in the sidebar, greyed.
     /// Whether mirrors of an unreachable host are kept, greyed, once the user
     /// has answered. Absent means `remote.keep_offline_mirrors` still decides.
@@ -2006,9 +2006,36 @@ impl AppState {
         self.space_marks.get(&ws.id).copied()
     }
 
+    /// The name a mark on this pane is remembered by, across restarts and
+    /// rebuilds.
+    ///
+    /// Not the pane id: that is a counter which restarts with the process and
+    /// is handed out again in restore order, so a mark keyed by one came back
+    /// worn by whichever pane now held that number -- someone else's row
+    /// carrying your priority. A mirror is named by the remote pane it stands
+    /// for, since it is rebuilt under new ids on every handoff and reconnect,
+    /// and a local pane by the space and pane number the API already calls it.
+    pub fn agent_mark_key(&self, ws_idx: usize, pane_id: PaneId) -> Option<String> {
+        let workspace = self.workspaces.get(ws_idx)?;
+        if workspace.remote_mirror.is_some() {
+            return workspace
+                .tabs
+                .iter()
+                .find(|tab| tab.panes.contains_key(&pane_id))
+                .and_then(|tab| tab.remote_mirror.as_ref())
+                .map(|mirrored| mirrored.key.clone());
+        }
+        let number = workspace.public_pane_number(pane_id)?;
+        Some(crate::workspace::public_pane_id_for_number(
+            &workspace.id,
+            number,
+        ))
+    }
+
     /// The mark on the agent in this pane, if any.
-    pub fn agent_mark(&self, pane_id: PaneId) -> Option<MarkLevel> {
-        self.agent_marks.get(&pane_id.raw()).copied()
+    pub fn agent_mark(&self, ws_idx: usize, pane_id: PaneId) -> Option<MarkLevel> {
+        let key = self.agent_mark_key(ws_idx, pane_id)?;
+        self.agent_marks.get(&key).copied()
     }
 
     /// The mark a row carries, taking the louder of the space's and the agent's.
@@ -2023,7 +2050,7 @@ impl AppState {
     /// a mark other than the one it is wearing.
     pub fn entry_mark(&self, ws_idx: usize, pane_id: Option<PaneId>) -> Option<MarkLevel> {
         let space = self.space_mark(ws_idx);
-        let agent = pane_id.and_then(|pane_id| self.agent_mark(pane_id));
+        let agent = pane_id.and_then(|pane_id| self.agent_mark(ws_idx, pane_id));
         space.max(agent)
     }
 
@@ -2700,6 +2727,67 @@ impl AppState {
 mod tests {
     use super::*;
     use crossterm::event::KeyEvent;
+
+    /// A pane id is a counter that restarts with the process and is handed out
+    /// again in restore order, so a mark keyed by one came back worn by
+    /// whichever pane now held that number. The name a mark is kept under has
+    /// to outlive the id, or the mark is not merely lost but moved -- onto
+    /// somebody else's agent, wearing a priority they never set.
+    #[test]
+    fn a_mark_outlives_the_pane_id_it_was_set_on() {
+        let mut state = AppState::test_new();
+        state.workspaces = vec![crate::workspace::Workspace::test_new("one")];
+        let pane = state.workspaces[0].tabs[0].root_pane;
+        let key = state
+            .agent_mark_key(0, pane)
+            .expect("a pane has a mark key");
+        state.agent_marks.insert(key, MarkLevel::High);
+        assert_eq!(state.agent_mark(0, pane), Some(MarkLevel::High));
+
+        // The same space, rebuilt: same identity, same pane number, new pane id.
+        let mut rebuilt = crate::workspace::Workspace::test_new("one");
+        rebuilt.id = state.workspaces[0].id.clone();
+        state.workspaces = vec![rebuilt];
+        let rebuilt_pane = state.workspaces[0].tabs[0].root_pane;
+
+        assert_ne!(rebuilt_pane, pane, "a rebuild allocates a fresh pane id");
+        assert_eq!(
+            state.agent_mark(0, rebuilt_pane),
+            Some(MarkLevel::High),
+            "the mark should follow the pane it was set on"
+        );
+    }
+
+    /// A mirror is rebuilt under new ids on every handoff and reconnect, which
+    /// is most of them, so it is named by the remote pane it stands for rather
+    /// than by anything this machine allocated.
+    #[test]
+    fn a_mirrors_mark_is_kept_under_the_remote_pane_it_stands_for() {
+        let mut state = AppState::test_new();
+        let mut workspace = crate::workspace::Workspace::test_new("mirrored");
+        workspace.remote_mirror = Some(crate::workspace::RemoteMirror {
+            disconnected: false,
+            target: "workbox".to_string(),
+            origin_target: None,
+            host_label: "wb".to_string(),
+            host_color: None,
+            key: "workbox\u{1f}w1".to_string(),
+            remote_terminal: "term-1".to_string(),
+        });
+        workspace.tabs[0].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
+            key: "workbox\u{1f}w1\u{1f}term-1".to_string(),
+            remote_terminal: "term-1".to_string(),
+            disconnected: false,
+        });
+        let pane = workspace.tabs[0].root_pane;
+        state.workspaces = vec![workspace];
+
+        assert_eq!(
+            state.agent_mark_key(0, pane).as_deref(),
+            Some("workbox\u{1f}w1\u{1f}term-1"),
+            "a mirror is named by the pane its host runs"
+        );
+    }
 
     /// A mirror pane is created at this size and asks its host to render at it,
     /// and a host does what it is asked. Guessing 80x24 on a machine whose panes
