@@ -1308,8 +1308,9 @@ mod tests {
         let line1 = buffer_row_text(buffer, card, card.y);
         let line2 = buffer_row_text(buffer, card, card.y + 1);
 
-        assert!(line1.starts_with(" · one"));
-        assert!(!line1.contains("1 one"));
+        // The icon hugs the name now: " ·one", not " · one".
+        assert!(line1.starts_with(" ·one"), "got {line1:?}");
+        assert!(!line1.contains("1one") && !line1.contains("1 one"));
         assert_eq!(line2, "   main");
 
         std::fs::remove_dir_all(repo).ok();

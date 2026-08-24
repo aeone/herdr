@@ -232,10 +232,15 @@ pub(super) fn separator(previous: &ResolvedToken, current: &ResolvedToken) -> &'
     if matches!(
         previous.kind,
         ResolvedTokenKind::StateIcon | ResolvedTokenKind::Number(_)
-    ) || matches!(current.kind, ResolvedTokenKind::GitStatus { .. })
-    {
-        // The number reads as a label on the row, like the state icon, so it
-        // gets a plain space rather than the " · " separator.
+    ) {
+        // The icon and the number are marks in columns of their own rather than
+        // words in a sentence, so they need no gap at all: "*2pan" rather than
+        // "* 2 pan". Two columns a row, over a sidebar of a hundred rows, is
+        // the difference between a name that fits and one that is cut. The
+        // number still holds its column when there is no label for it, so the
+        // rows past the ninth stay aligned with the ones above them.
+        ""
+    } else if matches!(current.kind, ResolvedTokenKind::GitStatus { .. }) {
         " "
     } else if matches!(previous.kind, ResolvedTokenKind::RemoteHost { .. }) {
         // The host reads as a tight prefix on the name that follows it, so the
@@ -564,10 +569,15 @@ mod tests {
     }
 
     #[test]
-    fn number_gets_a_plain_space_not_a_dot() {
+    fn the_icon_and_number_columns_take_no_separator_at_all() {
         let number = ResolvedToken::unstyled(ResolvedTokenKind::Number("3".into()));
         let icon = ResolvedToken::unstyled(ResolvedTokenKind::StateIcon);
-        assert_eq!(separator(&number, &icon), " ");
+        let host = ResolvedToken::unstyled(ResolvedTokenKind::RemoteHost {
+            text: "pan".into(),
+            color: None,
+        });
+        assert_eq!(separator(&icon, &number), "", "the icon hugs the number");
+        assert_eq!(separator(&number, &host), "", "and the number the name");
     }
 
     #[test]
