@@ -870,7 +870,6 @@ impl App {
         let label = created.pane.mirror_label();
         let argv = attach_argv(&space, &created.pane, &created.remote_herdr);
         let space_key = created.pane.mirror_space_key(&target);
-        let mirror = remote_mirror_record(&space, &space_key, &created.pane.terminal_id);
         let tab = MirrorTabSpec {
             key,
             remote_terminal: created.pane.terminal_id.clone(),
@@ -880,13 +879,41 @@ impl App {
             agent: None,
             origin: created.pane.origin.clone(),
         };
-        if let Err(err) = self.create_remote_mirror(mirror, &label, &tab) {
-            tracing::warn!(target = %target, %err, "mirroring a new remote space failed");
-            return;
-        }
+
+        // A mirror is one local space per remote *space*, so a pane made in a
+        // space this side already mirrors belongs in that space, as one more
+        // tab. Building a second workspace for it leaves two mirrors wearing
+        // the same key, and reconcile stops at the first: the new pane then
+        // arrives *again* as a tab of that one, and the tab the user asked for
+        // sits in a duplicate space beside it. Which is what "I made a tab and
+        // it turned into a space on the host" looked like from the outside.
+        let focus = match self.mirror_workspace_for_space(&target, &space_key) {
+            Some(ws_idx) => {
+                if let Err(err) = self.add_mirror_tab(&space, ws_idx, &tab) {
+                    tracing::warn!(target = %target, %err, "opening a tab in a mirror failed");
+                    return;
+                }
+                if let Some((_, tab_idx)) = self.mirror_tab_for_key(&target, &tab.key) {
+                    if let Some(workspace) = self.state.workspaces.get_mut(ws_idx) {
+                        workspace.switch_tab(tab_idx);
+                    }
+                }
+                Some(ws_idx)
+            }
+            None => {
+                let mirror = remote_mirror_record(&space, &space_key, &created.pane.terminal_id);
+                match self.create_remote_mirror(mirror, &label, &tab) {
+                    Ok(ws_idx) => Some(ws_idx),
+                    Err(err) => {
+                        tracing::warn!(target = %target, %err, "mirroring a new remote space failed");
+                        None
+                    }
+                }
+            }
+        };
         // Focus it, since the user just asked for it. Creating a local space
         // focuses it too, so this keeps the two paths feeling the same.
-        if let Some(ws_idx) = self.state.workspaces.len().checked_sub(1) {
+        if let Some(ws_idx) = focus {
             self.state.switch_workspace(ws_idx);
             self.state.mode = crate::app::state::Mode::Terminal;
         }
@@ -1100,6 +1127,20 @@ impl App {
     /// The tab standing for one remote pane, by the key naming that pane.
     fn mirror_tab_for_key(&self, target: &str, key: &str) -> Option<(usize, usize)> {
         self.mirror_tab_matching(target, |mirrored| mirrored.key == key)
+    }
+
+    /// The space mirroring one remote space, by the key naming that space.
+    ///
+    /// The same lookup `plan_remote_mirrors` reconciles by, so anything that
+    /// builds a mirror outside reconcile can ask the question reconcile will
+    /// ask later and get the same answer.
+    fn mirror_workspace_for_space(&self, target: &str, space_key: &str) -> Option<usize> {
+        self.state.workspaces.iter().position(|workspace| {
+            workspace
+                .remote_mirror
+                .as_ref()
+                .is_some_and(|mirror| mirror.target == target && mirror.key == space_key)
+        })
     }
 
     /// The tab standing for one remote pane, by the terminal id its host knows
@@ -2760,6 +2801,144 @@ mod tests {
             ),
             ("hub", Some("leaf")),
             "the ask goes to the hub, but the space belongs to the leaf"
+        );
+    }
+
+    /// The ask travels to the host, and what comes back is a pane in the space
+    /// that asked for it -- so it belongs in that space, as one more tab.
+    ///
+    /// It used to be mirrored as a whole new workspace regardless, which is
+    /// what "I made a tab and it made one on the host instead" was: the tab did
+    /// arrive, wearing a space of its own beside the one it was asked from.
+    #[tokio::test]
+    async fn a_tab_created_on_a_host_joins_the_space_that_asked_for_it() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+        app.state.workspaces.push(mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "rycelia",
+        ));
+
+        app.handle_remote_tab_created(
+            "workbox".to_string(),
+            Ok(Box::new(crate::remote::spaces::CreatedRemoteSpace {
+                remote_herdr: "/usr/bin/herdr".to_string(),
+                // A tab just made runs a shell, not an agent.
+                pane: shell_pane("w1", "rycelia", "term-2"),
+            })),
+        );
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            1,
+            "the tab belongs to the space that asked for it, not to a new one"
+        );
+        let workspace = &app.state.workspaces[0];
+        assert_eq!(workspace.tabs.len(), 2, "the space should have two tabs");
+        assert_eq!(
+            workspace.active_tab, 1,
+            "the tab just asked for should be the one in front"
+        );
+        assert_eq!(
+            workspace.tabs[1]
+                .remote_mirror
+                .as_ref()
+                .map(|mirrored| mirrored.remote_terminal.as_str()),
+            Some("term-2"),
+            "the new tab should stand for the pane the host just made"
+        );
+        workspace.assert_invariants_for_test();
+    }
+
+    /// The half that the create response alone cannot show: what the *next*
+    /// snapshot makes of what it built.
+    ///
+    /// Mirroring the new pane as its own space left two workspaces wearing one
+    /// space key, and reconcile stops at the first -- so the pane was planned
+    /// as missing from that one and added there too. The tab the user asked
+    /// for ended up in a duplicate space, and the pane was mirrored twice.
+    #[tokio::test]
+    async fn the_snapshot_after_a_created_tab_has_nothing_left_to_do() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+        app.state.workspaces.push(mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "rycelia",
+        ));
+
+        app.handle_remote_tab_created(
+            "workbox".to_string(),
+            Ok(Box::new(crate::remote::spaces::CreatedRemoteSpace {
+                remote_herdr: "/usr/bin/herdr".to_string(),
+                pane: shell_pane("w1", "rycelia", "term-2"),
+            })),
+        );
+
+        // The host now reports what it made: the agent pane, and beside it the
+        // new shell, which is an extra pane and only mirrored because the
+        // create pinned it.
+        let pinned_panes = app
+            .state
+            .created_remote_panes
+            .get("workbox")
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            pinned_panes.contains("term-2"),
+            "the created pane should be pinned, or the next snapshot closes it"
+        );
+        let plan = super::plan_remote_mirrors(
+            &app.state.workspaces,
+            &space("workbox"),
+            &snapshot_with_extras(
+                vec![agent_pane("w1", "rycelia", "term-1")],
+                vec![shell_pane("w1", "rycelia", "term-2")],
+            ),
+            &Default::default(),
+            &pinned_panes,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        );
+
+        assert!(
+            plan.is_empty(),
+            "the space already holds both panes, so there is nothing to do: {plan:?}"
+        );
+    }
+
+    /// A space created on a host is a space, and still arrives as one. Only a
+    /// pane made in a space this side already mirrors joins that space.
+    #[tokio::test]
+    async fn a_space_created_on_a_host_still_arrives_as_a_space() {
+        let mut app = crate::app::tests::test_app();
+        app.multiplexed_mirrors = true;
+        app.remote_spaces = vec![space("workbox")];
+        app.state.workspaces.clear();
+        app.state.workspaces.push(mirror(
+            "workbox",
+            &key_for("workbox", "w1", "term-1"),
+            "rycelia",
+        ));
+
+        app.handle_remote_space_created(
+            "workbox".to_string(),
+            Ok(Box::new(crate::remote::spaces::CreatedRemoteSpace {
+                remote_herdr: "/usr/bin/herdr".to_string(),
+                pane: shell_pane("w2", "new work", "term-9"),
+            })),
+        );
+
+        assert_eq!(
+            app.state.workspaces.len(),
+            2,
+            "a different remote space is a different space here"
         );
     }
 
