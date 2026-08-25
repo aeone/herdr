@@ -2217,8 +2217,11 @@ impl App {
     }
 }
 
+// Reachable from tests outside `app`: restore builds workspaces and terminals
+// that only mean something once an App is holding them, and the tests that
+// matter are the ones that carry on past the moment of restore.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::config::Config;
     use crate::detect::{Agent, AgentState};

@@ -3075,7 +3075,11 @@ impl AppState {
             let changed_at_ms = crate::app::state::unix_millis_now();
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
                 terminal.last_agent_state_change_seq = Some(self.next_agent_state_change_seq);
-                terminal.agent_state_changed_at_ms = Some(changed_at_ms);
+                terminal.note_agent_state_change_for_clock(
+                    change.previous_state,
+                    change.state,
+                    changed_at_ms,
+                );
             }
             self.mark_session_dirty();
         }

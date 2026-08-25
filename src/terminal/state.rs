@@ -150,6 +150,12 @@ pub struct TerminalState {
     /// this has to survive a restart. It is persisted with the pane and
     /// restored on load.
     pub agent_state_changed_at_ms: Option<u64>,
+    /// The state this pane was last known to be in, held while the reading is
+    /// lost. `Unknown` is not a state an agent is in -- it is this side being
+    /// unable to tell -- so getting the same reading back afterwards is not the
+    /// agent having changed. Not persisted: a restore seeds `state` from the
+    /// saved status, which is the same answer by another route.
+    state_before_unknown: Option<AgentState>,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -186,6 +192,7 @@ impl TerminalState {
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
             agent_state_changed_at_ms: None,
+            state_before_unknown: None,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -216,6 +223,40 @@ impl TerminalState {
             self.agent_process_acquisition_pending = true;
         }
         mutation
+    }
+
+    /// Records a state change against the idle clock.
+    ///
+    /// The clock says how long the agent has been in the state it is in, and
+    /// the sidebar buckets by it in days and months. `Unknown` is not one of
+    /// those states: it means detection could not tell, which happens for a
+    /// second or two after every handoff, before each pane's process has been
+    /// re-acquired. Stamping that read every agent on the machine as having
+    /// changed just now -- 21 of lute's panes landed on the same second, four
+    /// seconds after a deploy, however long they had really sat.
+    ///
+    /// So losing the reading keeps the clock, and getting the same reading back
+    /// keeps it too. Only a different answer than the last real one is a change.
+    pub(crate) fn note_agent_state_change_for_clock(
+        &mut self,
+        previous: AgentState,
+        state: AgentState,
+        now_ms: u64,
+    ) {
+        if state == AgentState::Unknown {
+            self.state_before_unknown = Some(previous);
+            return;
+        }
+        if previous == AgentState::Unknown {
+            let remembered = self.state_before_unknown.take();
+            // A pane that never had a clock has nothing to keep, so the first
+            // real reading stamps one even if it agrees with what came before.
+            if remembered == Some(state) && self.agent_state_changed_at_ms.is_some() {
+                return;
+            }
+        }
+        self.state_before_unknown = None;
+        self.agent_state_changed_at_ms = Some(now_ms);
     }
 
     pub(crate) fn finish_agent_process_acquisition(&mut self) -> bool {

@@ -1390,6 +1390,188 @@ mod tests {
         );
     }
 
+    /// A snapshot of one idle agent that has been sitting for a long time.
+    fn snapshot_of_one_idle_agent(long_ago: u64) -> SessionSnapshot {
+        let cwd = std::env::current_dir().unwrap();
+        SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("workspace".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::new(),
+                next_public_pane_number: 0,
+                public_tab_numbers: Vec::new(),
+                next_public_tab_number: 0,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes: HashMap::from([(
+                        0,
+                        super::super::snapshot::PaneSnapshot {
+                            cwd,
+                            label: None,
+                            agent_name: Some("claude".into()),
+                            managed_agent_kind: None,
+                            agent_session: None,
+                            launch_argv: None,
+                            agent_state_changed_at_ms: Some(long_ago),
+                            agent_status: Some(crate::api::schema::AgentStatus::Idle),
+                            terminal_title: None,
+                        },
+                    )]),
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+            space_marks: Default::default(),
+            agent_marks: Default::default(),
+            legacy_agent_marks: Default::default(),
+            keep_offline_mirrors: None,
+            mirrors_off: None,
+            hide_spaces_in_agents: None,
+        }
+    }
+
+    /// An app holding what restore just built, ready to be told what the first
+    /// look at the screen saw.
+    async fn app_restored_from(snapshot: &SessionSnapshot) -> crate::app::App {
+        let (events, _event_rx) = mpsc::channel(64);
+        let (workspaces, terminals, runtimes) = restore(
+            snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = workspaces;
+        app.state.terminals = terminals;
+        app.terminal_runtimes = runtimes.into();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app
+    }
+
+    fn only_clock(app: &crate::app::App) -> Option<u64> {
+        app.state
+            .terminals
+            .values()
+            .next()
+            .and_then(|terminal| terminal.agent_state_changed_at_ms)
+    }
+
+    /// The moment of restore was never where this broke.
+    ///
+    /// The clock survived restore and then moved a few seconds later, when the
+    /// first detection pass landed -- which is why a test that stopped at the
+    /// restored value passed while the fleet still read "today" after every
+    /// deploy. So this one runs past restore, into that first look.
+    #[tokio::test]
+    async fn the_first_look_at_a_restored_screen_leaves_the_idle_clock_alone() {
+        let long_ago = 1_700_000_000_000u64;
+        let snapshot = snapshot_of_one_idle_agent(long_ago);
+        let mut app = app_restored_from(&snapshot).await;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id,
+            agent: Some(crate::detect::Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert_eq!(
+            only_clock(&app),
+            Some(long_ago),
+            "reading the same state off the screen is not a change"
+        );
+    }
+
+    /// The first pass after a handoff often cannot say what is running yet: the
+    /// pane's process has not been re-acquired, so detection reports no agent
+    /// and no state. That is ignorance, not the agent changing -- and treating
+    /// it as a change is what re-stamped every clock a few seconds after every
+    /// deploy.
+    #[tokio::test]
+    async fn a_pass_that_cannot_tell_what_is_running_does_not_move_the_idle_clock() {
+        let long_ago = 1_700_000_000_000u64;
+        let snapshot = snapshot_of_one_idle_agent(long_ago);
+        let mut app = app_restored_from(&snapshot).await;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        app.handle_internal_event(crate::events::AppEvent::StateChanged {
+            pane_id,
+            agent: None,
+            state: AgentState::Unknown,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+
+        assert_eq!(
+            only_clock(&app),
+            Some(long_ago),
+            "not knowing yet is not the agent having changed"
+        );
+    }
+
+    /// The whole shape of a handoff, not either end of it: the reading is lost
+    /// while the pane's process is re-acquired, then comes back saying what it
+    /// said before. Nothing about the agent changed, so its clock must not move.
+    ///
+    /// And if the reading comes back saying something else, that *is* a change
+    /// and the clock has to move -- or an agent that started working while we
+    /// could not see would go on claiming it had been idle for a month.
+    #[tokio::test]
+    async fn losing_the_reading_and_getting_the_same_one_back_is_not_a_change() {
+        let long_ago = 1_700_000_000_000u64;
+        let snapshot = snapshot_of_one_idle_agent(long_ago);
+
+        for (regained, moves) in [(AgentState::Idle, false), (AgentState::Working, true)] {
+            let mut app = app_restored_from(&snapshot).await;
+            let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+            let mut look = |agent, state| {
+                app.handle_internal_event(crate::events::AppEvent::StateChanged {
+                    pane_id,
+                    agent,
+                    state,
+                    visible_blocker: false,
+                    visible_working: false,
+                    process_exited: false,
+                    observed_at: std::time::Instant::now(),
+                });
+            };
+            look(None, AgentState::Unknown);
+            look(Some(crate::detect::Agent::Claude), regained);
+
+            assert_eq!(
+                only_clock(&app) != Some(long_ago),
+                moves,
+                "coming back as {regained:?} should {} the clock",
+                if moves { "move" } else { "leave" }
+            );
+        }
+    }
+
     #[tokio::test]
     async fn restore_preserves_public_id_mapping_after_pane_id_remap() {
         let cwd = std::env::current_dir().unwrap();
