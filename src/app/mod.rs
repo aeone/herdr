@@ -1196,28 +1196,9 @@ impl App {
             }
 
             // A mirrored agent's new name goes to the machine that runs the
-            // pane; the name comes back on the next poll as the host's answer.
-            if let Some((ws_idx, pane_id, label)) = self.state.pending_agent_rename.take() {
-                #[cfg(unix)]
-                let sent = self.request_remote_agent_rename(ws_idx, pane_id, label.clone());
-                #[cfg(not(unix))]
-                let sent = false;
-                if !sent {
-                    // Not a mirror after all, or its host is unknown: name it
-                    // here rather than dropping what was typed.
-                    if let Some(terminal_id) = self
-                        .state
-                        .workspaces
-                        .get(ws_idx)
-                        .and_then(|ws| ws.pane_state(pane_id))
-                        .map(|pane| pane.attached_terminal_id.clone())
-                    {
-                        if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
-                            terminal.set_manual_label(label);
-                            self.state.mark_session_dirty();
-                        }
-                    }
-                }
+            // pane; a local one is named here. Both live in a method so a test
+            // can drive them without a run loop.
+            if self.apply_pending_agent_rename() {
                 needs_render = true;
             }
 

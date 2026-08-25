@@ -12,6 +12,19 @@ const INVALID_AGENT_TIMEOUT_MESSAGE: &str =
     "agent start timeout must be greater than 3000ms and at most 300000ms";
 const INVALID_AGENT_NAME_MESSAGE: &str = "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)";
 
+/// What became of a name typed at a local agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LocalAgentRename {
+    Named,
+    /// Nothing in this pane to name; the caller falls back to the pane label.
+    NotAnAgent,
+    /// Not a name an agent may have: lowercase letters, digits, `-` and `_`,
+    /// starting with a letter, at most 32 characters.
+    BadName,
+    /// Another agent is already called this.
+    Taken,
+}
+
 fn valid_agent_name(name: &str) -> bool {
     let mut chars = name.chars();
     matches!(chars.next(), Some('a'..='z'))
@@ -85,6 +98,122 @@ impl App {
             .ok_or_else(|| TerminalTargetError::NotFound {
                 target: target.to_string(),
             })
+    }
+
+    /// Applies a name typed at the rename-agent prompt, wherever it belongs.
+    ///
+    /// A mirrored agent is named on the machine that runs it, and the name
+    /// comes back on the next poll as the host's answer. A local one is named
+    /// here, through the same door the API uses. Returns whether there was one
+    /// to apply.
+    pub(super) fn apply_pending_agent_rename(&mut self) -> bool {
+        let Some((ws_idx, pane_id, label)) = self.state.pending_agent_rename.take() else {
+            return false;
+        };
+        #[cfg(unix)]
+        let sent = self.request_remote_agent_rename(ws_idx, pane_id, label.clone());
+        #[cfg(not(unix))]
+        let sent = false;
+        if sent {
+            return true;
+        }
+        // Not a mirror: it is an agent running here, so name it the way the API
+        // names one. Setting the pane's label instead -- which is what this did
+        // -- put the name in a field the agent panel does not show, so nothing
+        // appeared to happen.
+        match self.rename_local_agent(ws_idx, pane_id, label.clone()) {
+            LocalAgentRename::Named => {}
+            // No agent here to name, so name the pane rather than dropping what
+            // was typed.
+            LocalAgentRename::NotAnAgent => {
+                if let Some(terminal_id) = self
+                    .state
+                    .workspaces
+                    .get(ws_idx)
+                    .and_then(|workspace| workspace.terminal_id(pane_id))
+                    .cloned()
+                {
+                    if let Some(terminal) = self.state.terminals.get_mut(&terminal_id) {
+                        terminal.set_manual_label(label);
+                        self.state.mark_session_dirty();
+                    }
+                }
+            }
+            // Say so. A refusal that shows nothing is the same experience as the
+            // bug this replaces.
+            LocalAgentRename::BadName => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::NeedsAttention,
+                    title: format!("{label} is not a name an agent can have"),
+                    context: "lowercase letters, digits, - and _, starting with a letter"
+                        .to_string(),
+                    position: None,
+                    target: None,
+                });
+            }
+            LocalAgentRename::Taken => {
+                self.state.toast = Some(crate::app::state::ToastNotification {
+                    kind: crate::app::state::ToastKind::NeedsAttention,
+                    title: format!("another agent is already called {label}"),
+                    context: "agent names are unique in a session".to_string(),
+                    position: None,
+                    target: None,
+                });
+            }
+        }
+        true
+    }
+
+    /// Names the agent in one pane, the way `agents.rename` does over the API.
+    ///
+    /// This is a different field from the pane's manual label, and the sidebar
+    /// reads them through different tokens: `agent` shows the name set here,
+    /// `pane` shows the label -- and only behind the agent's own title, which
+    /// an agent rewrites constantly. Setting the label was what "rename agent"
+    /// used to do for a local agent, so the name was stored and never seen.
+    pub(super) fn rename_local_agent(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        name: String,
+    ) -> LocalAgentRename {
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .cloned()
+        else {
+            return LocalAgentRename::NotAnAgent;
+        };
+        let is_agent = self
+            .state
+            .terminals
+            .get(&terminal_id)
+            .is_some_and(|terminal| {
+                terminal.effective_agent_label().is_some()
+                    && !terminal.managed_agent_launch_pending()
+            });
+        if !is_agent {
+            return LocalAgentRename::NotAnAgent;
+        }
+        if !valid_agent_name(&name) {
+            return LocalAgentRename::BadName;
+        }
+        if !self
+            .agent_name_conflicts(&name, &terminal_id.to_string())
+            .is_empty()
+        {
+            return LocalAgentRename::Taken;
+        }
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return LocalAgentRename::NotAnAgent;
+        };
+        terminal.set_agent_name(name);
+        self.state.mark_session_dirty();
+        self.schedule_session_save();
+        self.emit_pane_updated(ws_idx, pane_id);
+        LocalAgentRename::Named
     }
 
     pub(super) fn rename_agent_target(
@@ -469,6 +598,158 @@ pub(super) enum AgentRenameError {
 #[cfg(test)]
 mod tests {
     use super::valid_agent_name;
+    use super::LocalAgentRename;
+    use crate::detect::{Agent, AgentState};
+    use crate::workspace::Workspace;
+
+    /// One local space holding one pane with an agent running in it.
+    fn app_with_a_local_agent() -> crate::app::App {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = vec![Workspace::test_new("agent")];
+        app.state.ensure_test_terminals();
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        app
+    }
+
+    fn only_pane(app: &crate::app::App) -> (crate::layout::PaneId, crate::terminal::TerminalId) {
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .unwrap()
+            .clone();
+        (pane_id, terminal_id)
+    }
+
+    /// What the agent panel would draw for the first agent it lists. Asking the
+    /// panel rather than a field is the point: the bug was a name stored in a
+    /// field the panel does not read.
+    fn agent_shown_first(app: &crate::app::App) -> Option<String> {
+        crate::ui::agent_panel_entries(&app.state)
+            .first()
+            .and_then(|entry| entry.agent_label.clone())
+    }
+
+    /// The name has to land in the field the agent panel reads.
+    ///
+    /// This used to set the pane's manual label, which the panel shows only
+    /// through the `pane` token and only when the agent is not reporting a
+    /// title of its own -- so on a machine whose rows do not list that token,
+    /// renaming an agent looked like it did nothing at all.
+    #[test]
+    fn naming_a_local_agent_names_the_agent_and_not_its_pane() {
+        let mut app = app_with_a_local_agent();
+        let (pane_id, terminal_id) = only_pane(&app);
+        app.state.pending_agent_rename = Some((0, pane_id, "scarlet".to_string()));
+
+        assert!(app.apply_pending_agent_rename());
+
+        assert_eq!(
+            agent_shown_first(&app).as_deref(),
+            Some("scarlet"),
+            "the agent panel has to show the name that was typed"
+        );
+        assert_eq!(
+            app.state.terminals[&terminal_id].manual_label, None,
+            "and the pane keeps whatever label it had"
+        );
+    }
+
+    /// Agent names are a small grammar, and a name outside it is refused. A
+    /// refusal nobody can see is the same experience as the bug this replaces,
+    /// so it has to say something.
+    #[test]
+    fn a_name_an_agent_cannot_have_is_refused_out_loud() {
+        let mut app = app_with_a_local_agent();
+        let (pane_id, terminal_id) = only_pane(&app);
+        app.state.pending_agent_rename = Some((0, pane_id, "Scarlet Two".to_string()));
+
+        assert!(app.apply_pending_agent_rename());
+
+        let _ = terminal_id;
+        assert_eq!(
+            agent_shown_first(&app).as_deref(),
+            Some("claude"),
+            "the agent keeps the name it had"
+        );
+        assert!(
+            app.state
+                .toast
+                .as_ref()
+                .is_some_and(|toast| toast.title.contains("Scarlet Two")),
+            "a refusal has to be visible"
+        );
+    }
+
+    /// A pane with no agent in it still has a label worth setting, rather than
+    /// losing what was typed.
+    #[test]
+    fn a_pane_with_no_agent_keeps_the_name_as_its_label() {
+        let mut app = app_with_a_local_agent();
+        let (pane_id, terminal_id) = only_pane(&app);
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(None, AgentState::Unknown);
+        app.state.pending_agent_rename = Some((0, pane_id, "notes".to_string()));
+
+        assert!(app.apply_pending_agent_rename());
+
+        assert_eq!(
+            app.state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("notes")
+        );
+    }
+
+    /// Two agents in one session cannot share a name, and being told so beats
+    /// the rename quietly doing nothing.
+    #[test]
+    fn a_name_another_agent_already_has_is_refused_out_loud() {
+        let mut app = app_with_a_local_agent();
+        app.state.workspaces.push(Workspace::test_new("other"));
+        app.state.ensure_test_terminals();
+        let other_pane = app.state.workspaces[1].tabs[0].root_pane;
+        let other_terminal = app.state.workspaces[1]
+            .terminal_id(other_pane)
+            .unwrap()
+            .clone();
+        let terminal = app.state.terminals.get_mut(&other_terminal).unwrap();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_agent_name("scarlet".into());
+
+        let (pane_id, terminal_id) = only_pane(&app);
+        app.state.pending_agent_rename = Some((0, pane_id, "scarlet".to_string()));
+
+        assert!(app.apply_pending_agent_rename());
+
+        let _ = terminal_id;
+        assert_eq!(agent_shown_first(&app).as_deref(), Some("claude"));
+        assert!(app
+            .state
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.title.contains("already called scarlet")));
+    }
+
+    /// And nothing pending is not something to apply.
+    #[test]
+    fn nothing_pending_applies_nothing() {
+        let mut app = app_with_a_local_agent();
+        assert!(!app.apply_pending_agent_rename());
+    }
+
+    #[allow(unused)]
+    fn _local_agent_rename_variants_are_used(r: LocalAgentRename) -> bool {
+        matches!(r, LocalAgentRename::Named)
+    }
 
     #[test]
     fn agent_names_use_a_small_cli_safe_grammar() {

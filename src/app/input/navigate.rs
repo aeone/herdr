@@ -1720,8 +1720,18 @@ pub(super) fn execute_navigate_action_in_context(
             state.request_new_workspace = true;
             leave_navigate_mode(state);
         }
-        // Renaming reaches a host, which the harness has no way to do.
-        NavigateAction::RenameAgent => {}
+        // Only sending the name to a host is out of the harness's reach; opening
+        // the prompt, and naming a local agent, are ordinary state changes --
+        // and leaving the whole action unimplemented here is why nothing tested
+        // that the key does anything at all.
+        NavigateAction::RenameAgent => {
+            if let Some(ws_idx) = state.active {
+                let pane_id = state.workspaces[ws_idx].tabs[state.workspaces[ws_idx].active_tab]
+                    .layout
+                    .focused();
+                super::modal::open_rename_agent(state, pane_id);
+            }
+        }
         // State-only variants of the mark cycles, for the test harness that
         // drives actions without an App.
         NavigateAction::ToggleSpaceHighlight => {
@@ -2211,6 +2221,45 @@ mod tests {
 
         assert_eq!(state.mode, Mode::RenameWorkspace);
         assert_eq!(state.name_input, "test");
+    }
+
+    /// A binding is only real if the key a terminal actually sends for it
+    /// reaches the action. `shift+a` arrives as an uppercase `A`, so a binding
+    /// that matched only the lowercase letter would be configured, listed in
+    /// the keybind menu, and dead under the finger.
+    #[test]
+    fn the_rename_agent_key_reaches_the_action_as_a_terminal_sends_it() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.keybinds.rename_agent = crate::config::ActionKeybinds::prefix("shift+a");
+
+        for key in [
+            TerminalKey::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            TerminalKey::new(KeyCode::Char('a'), KeyModifiers::SHIFT),
+        ] {
+            assert_eq!(
+                action_for_key(&state, key, BindingDispatch::Prefix),
+                Some(NavigateAction::RenameAgent),
+                "prefix+shift+a should reach the rename action"
+            );
+        }
+    }
+
+    /// And the action has to open the prompt, aimed at the focused pane and
+    /// flagged as an agent rename so the commit knows where the name belongs.
+    #[test]
+    fn the_rename_agent_action_opens_the_prompt_for_the_focused_pane() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        let focused = state.workspaces[0].tabs[0].layout.focused();
+
+        execute_navigate_action(&mut state, NavigateAction::RenameAgent);
+
+        assert_eq!(state.mode, Mode::RenamePane);
+        assert!(
+            state.renaming_agent,
+            "the prompt has to know it is naming an agent, not a pane"
+        );
+        assert_eq!(state.rename_pane_target, Some(focused));
     }
 
     #[test]

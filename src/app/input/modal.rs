@@ -577,16 +577,12 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 Mode::RenamePane => {
                     if let (Some(ws_idx), Some(pane_id)) = (state.active, state.rename_pane_target)
                     {
-                        // A mirrored agent is named on the machine that runs it,
-                        // and the name comes back on the next poll as the host's
-                        // own answer. Naming it here instead would last only
-                        // until the next rebuild.
-                        let mirrored = state.renaming_agent
-                            && state
-                                .workspaces
-                                .get(ws_idx)
-                                .is_some_and(|ws| ws.remote_mirror.is_some());
-                        if mirrored {
+                        // Naming an agent is not the same as naming its pane,
+                        // and neither is done from here: a mirrored agent is
+                        // named on the machine that runs it, and a local one
+                        // through the same door the API uses, both of which
+                        // need an App. Renaming a *pane* is the branch below.
+                        if state.renaming_agent {
                             state.pending_agent_rename = Some((ws_idx, pane_id, new_name));
                         } else if let Some(ws) = state.workspaces.get(ws_idx) {
                             if let Some(pane) = ws.pane_state(pane_id) {
@@ -1643,6 +1639,53 @@ mod tests {
         let (save, _, _) = crate::ui::rename_button_rects(inner);
         let action = modal_action_from_buttons(save.x, save.y, &[(save, ModalAction::Save)]);
         assert_eq!(action, Some(ModalAction::Save));
+    }
+
+    /// Committing the rename-agent prompt hands the name on rather than
+    /// writing it here. Naming an agent and naming its pane are different
+    /// fields, and the panel reads the first; writing the second from here is
+    /// what made the keybind look dead on a machine whose agents are its own.
+    #[test]
+    fn committing_an_agent_rename_hands_the_name_on() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        let pane_id = state.workspaces[0].tabs[0].layout.focused();
+        open_rename_agent(&mut state, pane_id);
+        state.name_input = "scarlet".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert_eq!(
+            state.pending_agent_rename,
+            Some((0, pane_id, "scarlet".to_string())),
+            "a local space is not a reason to write the name straight to the pane"
+        );
+    }
+
+    /// And renaming a *pane* still names the pane, from here, as it always did.
+    #[test]
+    fn committing_a_pane_rename_still_labels_the_pane() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].layout.focused();
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        open_rename_pane(&mut state, pane_id);
+        state.name_input = "notes".into();
+
+        handle_rename_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        );
+
+        assert!(state.pending_agent_rename.is_none());
+        assert_eq!(
+            state.terminals[&terminal_id].manual_label.as_deref(),
+            Some("notes")
+        );
     }
 
     #[test]
