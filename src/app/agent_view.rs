@@ -102,8 +102,13 @@ impl AgentGroup {
 /// group of `entries[i]`. Keeping entries a flat list matters — the indexed
 /// switch keys and click handling address agents by position, and they must not
 /// have to know about headings.
-/// Where a mark puts a row inside its group: marked rows rise loudest-first,
-/// then the unmarked ones, and the parked grey sinks to the bottom.
+/// Where a mark puts a row among the rows of its own status: marked rows rise
+/// loudest-first, then the unmarked ones, and the parked grey sinks below them.
+///
+/// A mark does not lift a row past a status. Done work sits above work already
+/// read whether or not either is marked, because a mark says how much a thing
+/// matters and the status says whether it wants you now -- reordering the
+/// second by the first hides finished agents under ones with nothing to say.
 ///
 /// `Background` is the level that means "not now", so it is the one level that
 /// sorts *below* no mark at all -- parking a row and having it stay where it
@@ -129,14 +134,17 @@ pub(crate) fn group_by_status(
         let group = AgentGroup::of_with_offline(entry, now_ms, offline(entry));
         (
             group,
-            // Then by the mark, which is the one ordering the user set by hand:
-            // what they marked rises within its group, loudest first, and what
-            // they parked sinks below even the unmarked rows. A mark that only
-            // recoloured a row left the user hunting for their own colour in a
-            // list of a hundred.
-            mark_rank(mark(entry)),
-            // Unread output first inside a group: there is something to look at.
+            // Unread output first: an idle agent nobody has read is "done", and
+            // one that has been read is "idle". They read as two statuses in
+            // the list, so they sort like two statuses -- a mark is a nudge
+            // inside a status, not a way past one.
             entry.seen,
+            // Then by the mark, which is the one ordering the user set by hand:
+            // what they marked rises among rows of its own status, loudest
+            // first, and what they parked sinks below the unmarked ones. A mark
+            // that only recoloured a row left the user hunting for their own
+            // colour in a list of a hundred.
+            mark_rank(mark(entry)),
             // Then most recently changed first, so a group reads newest-down.
             std::cmp::Reverse(entry.agent_state_changed_at_ms),
         )
@@ -830,6 +838,56 @@ mod tests {
 
         let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
         assert_eq!(order, ["blocked-parked", "idle-marked"]);
+    }
+
+    /// A mark is a nudge inside a status, not a lift past one. Marking a row
+    /// you have already read used to put it above agents that had finished and
+    /// were waiting to be looked at -- so the panel answered "what did you say
+    /// mattered" when the question it is there for is "what wants you now".
+    #[test]
+    fn a_mark_never_lifts_a_read_agent_over_unread_work() {
+        let now = 100 * DAY_MS;
+        let mut entries = vec![
+            entry_at(
+                "read-and-marked",
+                AgentState::Idle,
+                true,
+                Some(now - HOUR_MS),
+            ),
+            entry_at(
+                "done-unmarked",
+                AgentState::Idle,
+                false,
+                Some(now - 2 * HOUR_MS),
+            ),
+        ];
+        let mark = |entry: &AgentPanelEntry| {
+            (entry.primary_label == "read-and-marked").then_some(crate::app::MarkLevel::High)
+        };
+
+        group_by_status(&mut entries, now, &|_| false, &mark);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
+        assert_eq!(order, ["done-unmarked", "read-and-marked"]);
+    }
+
+    /// And the mark still does its job among rows of one status: two agents
+    /// both waiting to be read are ordered by what the user said matters.
+    #[test]
+    fn a_mark_still_orders_rows_of_the_same_status() {
+        let now = 100 * DAY_MS;
+        let mut entries = vec![
+            entry_at("unmarked", AgentState::Idle, false, Some(now - HOUR_MS)),
+            entry_at("marked", AgentState::Idle, false, Some(now - 2 * HOUR_MS)),
+        ];
+        let mark = |entry: &AgentPanelEntry| {
+            (entry.primary_label == "marked").then_some(crate::app::MarkLevel::High)
+        };
+
+        group_by_status(&mut entries, now, &|_| false, &mark);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
+        assert_eq!(order, ["marked", "unmarked"]);
     }
 
     #[test]
