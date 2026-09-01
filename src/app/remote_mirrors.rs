@@ -740,36 +740,75 @@ impl App {
     /// made only here lasts until the next rebuild -- every handoff, every
     /// reconnect. Sent to the host, it is the name every machine mirroring that
     /// pane will show.
-    pub(crate) fn request_remote_agent_rename(
+    /// Gives a mirrored pane the name its host holds for the agent in it.
+    ///
+    /// The name lands in the same field a local rename writes, so the sidebar
+    /// reads it the same way -- the name in front, the kind still behind it --
+    /// and a rebuilt mirror gets it back on the next poll rather than losing it
+    /// with the workspace it was typed into.
+    fn apply_mirrored_agent_name(
         &mut self,
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
-        label: String,
-    ) -> bool {
-        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
-            return false;
+        name: Option<&str>,
+    ) {
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .cloned()
+        else {
+            return;
         };
-        let Some(target) = workspace
+        let Some(terminal) = self.state.terminals.get_mut(&terminal_id) else {
+            return;
+        };
+        if terminal.agent_name.as_deref() == name {
+            return;
+        }
+        // An empty name clears it, which is how a host that dropped the name
+        // travels back rather than leaving the old one stuck here for ever.
+        terminal.set_agent_name(name.unwrap_or_default().to_string());
+        self.state.mark_session_dirty();
+        self.emit_pane_updated(ws_idx, pane_id);
+    }
+
+    /// The host to ask, and the name it knows this pane by, when the pane is a
+    /// mirror of one somewhere else.
+    ///
+    /// `None` for a pane this machine really runs, which is what tells the two
+    /// cases apart everywhere a rename is applied.
+    pub(crate) fn mirror_rename_target(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<(RemoteSpaceConfig, String)> {
+        let workspace = self.state.workspaces.get(ws_idx)?;
+        let target = workspace
             .remote_mirror
             .as_ref()
-            .map(|mirror| mirror.target.clone())
-        else {
-            return false;
-        };
-        let Some(remote_pane) = workspace
+            .map(|mirror| mirror.target.clone())?;
+        let remote_pane = workspace
             .tabs
             .iter()
             .find(|tab| tab.panes.contains_key(&pane_id))
             .and_then(|tab| tab.remote_mirror.as_ref())
-            .map(|mirrored| mirrored.remote_pane.clone())
-        else {
-            return false;
-        };
-        let Some(space) = self
+            .map(|mirrored| mirrored.remote_pane.clone())?;
+        let space = self
             .config_remote_spaces()
             .into_iter()
-            .find(|space| space.target == target)
-        else {
+            .find(|space| space.target == target)?;
+        Some((space, remote_pane))
+    }
+
+    pub(crate) fn request_remote_agent_rename(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        label: Option<String>,
+    ) -> bool {
+        let Some((space, remote_pane)) = self.mirror_rename_target(ws_idx, pane_id) else {
             return false;
         };
         let manage_ssh_config = self.manage_ssh_config;
@@ -780,7 +819,7 @@ impl App {
                 &space,
                 manage_ssh_config,
                 &remote_pane,
-                &label,
+                label.as_deref(),
             ) {
                 tracing::warn!(target = %space.target, %err, "could not rename a mirrored agent");
             }
@@ -1209,6 +1248,10 @@ impl App {
                 seq: None,
                 session_ref: None,
             });
+            // The name is the host's to give, and it arrives beside the kind
+            // rather than instead of it: a renamed claude still reads as a
+            // claude here, and still gets a claude's colour.
+            self.apply_mirrored_agent_name(ws_idx, pane_id, pane.agent_name.as_deref());
             // "done" on the remote means idle with output nobody has read, and
             // the host keeps saying it on every poll until someone reads it
             // *there*. Reading the mirror here is a local act the host never
@@ -3327,6 +3370,23 @@ mod tests {
         }
     }
 
+    /// The API and the sidebar both describe a pane through the terminal behind
+    /// it, so a mirror built in a test needs one registered per pane before it
+    /// can be asked anything.
+    fn register_mirror_terminals(app: &mut App) {
+        for tab in &app.state.workspaces[0].tabs {
+            for pane in tab.panes.values() {
+                app.state.terminals.insert(
+                    pane.attached_terminal_id.clone(),
+                    crate::terminal::TerminalState::new(
+                        pane.attached_terminal_id.clone(),
+                        std::path::PathBuf::from("/mirror"),
+                    ),
+                );
+            }
+        }
+    }
+
     fn shell_pane(workspace_id: &str, label: &str, terminal_id: &str) -> RemoteAgentPane {
         RemoteAgentPane {
             agent: None,
@@ -3359,6 +3419,7 @@ mod tests {
             workspace_id: workspace_id.into(),
             workspace_label: label.into(),
             agent: Some("claude".into()),
+            agent_name: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
@@ -3759,6 +3820,75 @@ mod tests {
         }
     }
 
+    /// A name given on the host has to arrive here, or "rename agent" looks
+    /// broken from every machine except the one running the agent -- which is
+    /// most of them, since the sidebar is mostly other people's work. The name
+    /// travels beside the kind rather than instead of it: a renamed claude is
+    /// still a claude, and still coloured like one.
+    #[test]
+    fn a_name_its_host_gave_an_agent_reaches_the_mirror() {
+        let space = space("workbox");
+        let mut app = crate::app::tests::test_app();
+        mirror_of_two_panes(&mut app, "workbox");
+        register_mirror_terminals(&mut app);
+
+        let mut named = agent_pane("w1", "api", "term-remote");
+        named.agent = Some("claude".to_string());
+        named.agent_name = Some("scarlet".to_string());
+        app.report_remote_agent_states(&space, &snapshot(vec![named]));
+
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        let entry = entries
+            .iter()
+            .find(|entry| entry.pane_id == pane_id)
+            .expect("the mirrored pane should be listed as an agent");
+        assert_eq!(
+            entry.agent_label.as_deref(),
+            Some("scarlet"),
+            "the panel should call the agent what its host calls it"
+        );
+        assert_eq!(
+            app.pane_info(0, pane_id)
+                .expect("pane info")
+                .agent
+                .as_deref(),
+            Some("claude"),
+            "and still know what kind of agent it is"
+        );
+    }
+
+    /// The other direction: a name cleared on the host clears here too, rather
+    /// than leaving the old one stuck on a mirror nothing can rename back.
+    #[test]
+    fn a_name_dropped_on_the_host_is_dropped_on_the_mirror() {
+        let space = space("workbox");
+        let mut app = crate::app::tests::test_app();
+        mirror_of_two_panes(&mut app, "workbox");
+        register_mirror_terminals(&mut app);
+
+        let named = |name: Option<&str>| {
+            let mut pane = agent_pane("w1", "api", "term-remote");
+            pane.agent = Some("claude".to_string());
+            pane.agent_name = name.map(str::to_string);
+            pane
+        };
+        app.report_remote_agent_states(&space, &snapshot(vec![named(Some("scarlet"))]));
+        app.report_remote_agent_states(&space, &snapshot(vec![named(None)]));
+
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        let entry = entries
+            .iter()
+            .find(|entry| entry.pane_id == pane_id)
+            .expect("the mirrored pane should still be listed");
+        assert_eq!(
+            entry.agent_label.as_deref(),
+            Some("claude"),
+            "with the name gone the panel falls back to the kind"
+        );
+    }
+
     /// An image pasted into a mirror has to go to the machine that runs the
     /// pane, and which machine that is depends on the tab in front: a mirrored
     /// space holds a tab per remote pane, each with a terminal of its own.
@@ -3824,6 +3954,89 @@ mod tests {
         }
     }
 
+    /// A rename has to travel the whole chain, not the first hop of it.
+    ///
+    /// pandora mirrors lute, and lute mirrors valkyrie, so a third of what
+    /// pandora shows is two hops from the machine that runs it. Named only on
+    /// the hop in the middle, the name is overwritten by that hop's own next
+    /// poll of the machine below it -- the name appears for about a second and
+    /// then goes back. So every hop names its own mirror *and* passes it on,
+    /// which is the same rule applied twice.
+    #[tokio::test]
+    async fn a_rename_that_arrives_at_a_mirror_is_passed_on_from_there() {
+        let space = space("workbox");
+        let mut app = crate::app::tests::test_app();
+        app.remote_spaces = vec![space.clone()];
+        mirror_of_two_panes(&mut app, "workbox");
+        register_mirror_terminals(&mut app);
+        let mut named = agent_pane("w1", "api", "term-remote");
+        named.agent = Some("claude".to_string());
+        app.report_remote_agent_states(&space, &snapshot(vec![named]));
+
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let onward = app
+            .mirror_rename_target(0, pane_id)
+            .expect("a mirrored agent has a machine to pass the name on to");
+
+        assert_eq!(onward.0.target, "workbox", "the hop below this one");
+        assert_eq!(
+            onward.1, "w1:p1",
+            "addressed by the name that machine knows the pane by"
+        );
+    }
+
+    /// And a pane this machine really runs is the end of the chain.
+    #[tokio::test]
+    async fn a_rename_of_a_local_agent_is_passed_on_to_nobody() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = vec![Workspace::test_new("here")];
+        app.state.active = Some(0);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+
+        assert!(app.mirror_rename_target(0, pane_id).is_none());
+    }
+
+    /// A name the grammar refuses is refused here, before it is sent anywhere.
+    ///
+    /// The machine that would turn it down is not the one the user is looking
+    /// at: over there a bad name is a line in a log, and here it is the keybind
+    /// appearing to do nothing at all -- which is the complaint this whole path
+    /// exists to answer.
+    #[tokio::test]
+    async fn a_name_a_host_would_refuse_is_refused_here_instead() {
+        let space = space("workbox");
+        let mut app = crate::app::tests::test_app();
+        app.remote_spaces = vec![space.clone()];
+        mirror_of_two_panes(&mut app, "workbox");
+        register_mirror_terminals(&mut app);
+        let mut named = agent_pane("w1", "api", "term-remote");
+        named.agent = Some("claude".to_string());
+        app.report_remote_agent_states(&space, &snapshot(vec![named]));
+
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        app.state.pending_agent_rename = Some((0, pane_id, "Scarlet Two".to_string()));
+
+        assert!(app.apply_pending_agent_rename());
+
+        assert!(
+            app.state
+                .toast
+                .as_ref()
+                .is_some_and(|toast| toast.title.contains("Scarlet Two")),
+            "a refusal has to be visible on the machine that typed it"
+        );
+        let entries = crate::ui::agent_panel_entries(&app.state);
+        let entry = entries
+            .iter()
+            .find(|entry| entry.pane_id == pane_id)
+            .expect("the mirrored pane should still be listed");
+        assert_eq!(
+            entry.agent_label.as_deref(),
+            Some("claude"),
+            "and the agent keeps the name it had"
+        );
+    }
+
     /// A pane of this machine's own is renamed here, so nothing is sent anywhere.
     #[tokio::test]
     async fn renaming_a_local_agent_asks_no_host() {
@@ -3833,7 +4046,7 @@ mod tests {
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
 
         assert!(
-            !app.request_remote_agent_rename(0, pane_id, "api".to_string()),
+            !app.request_remote_agent_rename(0, pane_id, Some("api".to_string())),
             "a local pane has no host to ask"
         );
     }

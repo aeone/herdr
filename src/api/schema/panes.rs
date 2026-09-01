@@ -458,6 +458,12 @@ pub struct PaneInfo {
     pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// The name this agent was given, as `agents.rename` sets it. Separate from
+    /// `agent`, which says what kind of agent is running: a renamed claude is
+    /// still a claude, and a mirror needs both -- the name to show, the kind to
+    /// colour it by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

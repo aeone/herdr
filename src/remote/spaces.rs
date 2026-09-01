@@ -68,6 +68,13 @@ pub(crate) struct RemoteAgentPane {
     pub(crate) pane_label: Option<String>,
     /// Detected or reported agent name, when the remote knows one.
     pub(crate) agent: Option<String>,
+    /// The name the host's own user gave this agent, when it has one.
+    ///
+    /// Kept apart from `agent` because they answer different questions: `agent`
+    /// says what is running, and is what the mirror's own detection hint and
+    /// the agent's colour are read from, while this is what to call it. Folding
+    /// a name into `agent` would rename the agent and forget it was a claude.
+    pub(crate) agent_name: Option<String>,
     /// Status the remote reports. The remote has hook-level authority over its
     /// own agents, so this is more accurate than screen-detecting the attached
     /// copy, which never sees anything but idle.
@@ -719,6 +726,7 @@ fn parse_mirror_panes(
             workspace_id: pane.workspace_id,
             workspace_label,
             agent: pane.display_agent.or(pane.agent),
+            agent_name: pane.agent_name,
             origin: pane.mirror_origin.map(|origin| MirrorOrigin {
                 target: origin.target,
                 workspace_id: origin.workspace_id,
@@ -882,7 +890,7 @@ pub(crate) fn rename_remote_pane(
     space: &RemoteSpaceConfig,
     manage_ssh_config: bool,
     pane_id: &str,
-    label: &str,
+    label: Option<&str>,
 ) -> io::Result<()> {
     let script = rename_pane_script(space.session.as_deref(), space.is_local(), pane_id, label);
     let output = if space.is_local() {
@@ -900,12 +908,29 @@ pub(crate) fn rename_remote_pane(
     Ok(())
 }
 
-fn rename_pane_script(session: Option<&str>, local: bool, pane_id: &str, label: &str) -> String {
+/// Names the agent in a remote pane, or the pane itself when no agent runs there.
+///
+/// `agent rename` and `pane rename` write different fields, and only the first
+/// is the one a sidebar shows as the agent's name -- renaming the pane stored
+/// the name somewhere nothing displayed, which is exactly the bug this had
+/// locally. `agent get` is what tells the two cases apart, because a host
+/// resolves an agent target only when the pane really runs one, so a shell
+/// mirror still gets its label rather than an error.
+fn rename_pane_script(
+    session: Option<&str>,
+    local: bool,
+    pane_id: &str,
+    label: Option<&str>,
+) -> String {
     let mut script = script_prologue(session, local);
+    let pane_id = shell_quote(pane_id);
+    // Both subcommands take `--clear` where they take a name, so dropping a
+    // name travels the same road as setting one. `valid_agent_name` refuses a
+    // name starting with a dash, so nothing a user can type reaches this as a
+    // literal.
+    let label = shell_quote(label.unwrap_or("--clear"));
     script.push_str(&format!(
-        "\"$herdr_bin\" pane rename {} {}\n",
-        shell_quote(pane_id),
-        shell_quote(label)
+        "if \"$herdr_bin\" agent get {pane_id} >/dev/null 2>&1; then\n  \"$herdr_bin\" agent rename {pane_id} {label}\nelse\n  \"$herdr_bin\" pane rename {pane_id} {label}\nfi\n"
     ));
     script
 }
@@ -976,6 +1001,7 @@ fn parse_created_workspace(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             workspace_id: root_pane.workspace_id,
             workspace_label: workspace.label,
             agent: None,
+            agent_name: root_pane.agent_name,
             origin: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
         },
@@ -1044,6 +1070,7 @@ fn parse_created_tab(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             workspace_id: root_pane.workspace_id,
             workspace_label,
             agent: None,
+            agent_name: root_pane.agent_name,
             origin: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
         },
@@ -1179,6 +1206,7 @@ mod tests {
                 workspace_id: "w1".into(),
                 workspace_label: "api-server".into(),
                 agent: Some("claude".into()),
+                agent_name: None,
                 status: crate::api::schema::AgentStatus::Working,
                 origin: None,
                 state_changed_at_ms: None,
@@ -1213,6 +1241,7 @@ mod tests {
                     workspace_id: "w1".into(),
                     workspace_label: "lifestream".into(),
                     agent: Some("claude".into()),
+                    agent_name: None,
                     status: crate::api::schema::AgentStatus::Idle,
                     origin: None,
                     state_changed_at_ms: None,
@@ -1225,6 +1254,7 @@ mod tests {
                     workspace_id: "w3".into(),
                     workspace_label: "emf".into(),
                     agent: Some("claude".into()),
+                    agent_name: None,
                     status: crate::api::schema::AgentStatus::Done,
                     origin: None,
                     state_changed_at_ms: None,
@@ -1312,6 +1342,7 @@ mod tests {
             workspace_id: workspace_id.into(),
             workspace_label: workspace_label.into(),
             agent: Some("claude".into()),
+            agent_name: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
@@ -1362,6 +1393,7 @@ mod tests {
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: Some("claude".into()),
+            agent_name: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
@@ -1382,6 +1414,7 @@ mod tests {
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: None,
+            agent_name: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
@@ -1457,6 +1490,7 @@ mod tests {
             workspace_id: "w1".into(),
             workspace_label: "api-server".into(),
             agent: None,
+            agent_name: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
@@ -1824,6 +1858,44 @@ mod tests {
 
         assert!(!script.contains("rm -rf ~;\n"), "{script}");
         assert!(script.contains("workspace rename 'w8' 'a'"), "{script}");
+    }
+
+    /// The name goes in the field a sidebar reads. `pane rename` writes the
+    /// pane's manual label, which the agent panel never shows, so a rename made
+    /// this way was stored on the host and seen by nobody -- the same bug that
+    /// was fixed locally, still standing on every mirrored agent.
+    #[test]
+    fn renaming_a_mirrored_pane_names_the_agent_in_it() {
+        let script = super::rename_pane_script(None, false, "w8:p1", Some("scarlet"));
+
+        assert!(
+            script.contains("agent rename 'w8:p1' 'scarlet'"),
+            "{script}"
+        );
+    }
+
+    /// A mirrored pane running no agent still takes the name -- as a pane
+    /// label, which is what a shell can be called. `agent get` is the test,
+    /// because a host resolves an agent target only for a pane that runs one.
+    #[test]
+    fn a_mirrored_pane_with_no_agent_falls_back_to_naming_the_pane() {
+        let script = super::rename_pane_script(None, false, "w8:p1", Some("scarlet"));
+
+        assert!(script.contains("agent get 'w8:p1'"), "{script}");
+        assert!(script.contains("pane rename 'w8:p1' 'scarlet'"), "{script}");
+    }
+
+    /// Dropping a name travels the same road as setting one: both subcommands
+    /// take `--clear` where they take a name, so nothing here needs a second
+    /// shape of request.
+    #[test]
+    fn clearing_a_mirrored_agents_name_asks_the_host_to_clear_it() {
+        let script = super::rename_pane_script(None, false, "w8:p1", None);
+
+        assert!(
+            script.contains("agent rename 'w8:p1' '--clear'"),
+            "{script}"
+        );
     }
 
     #[test]

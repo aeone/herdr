@@ -813,6 +813,13 @@
                 "null"
               ]
             },
+            "agent_name": {
+              "description": "The name this agent was given, as `agents.rename` sets it. Separate from\n`agent`, which says what kind of agent is running: a renamed claude is\nstill a claude, and a mirror needs both -- the name to show, the kind to\ncolour it by.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "agent_session": {
               "anyOf": [
                 {
@@ -7601,6 +7608,13 @@
         "PaneInfo": {
           "properties": {
             "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "agent_name": {
+              "description": "The name this agent was given, as `agents.rename` sets it. Separate from\n`agent`, which says what kind of agent is running: a renamed claude is\nstill a claude, and a mirror needs both -- the name to show, the kind to\ncolour it by.",
               "type": [
                 "string",
                 "null"

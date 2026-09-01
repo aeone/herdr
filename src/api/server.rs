@@ -999,6 +999,7 @@ mod tests {
             foreground_cwd: None,
             label: None,
             agent: Some("pi".into()),
+            agent_name: None,
             title: None,
             terminal_title: None,
             terminal_title_stripped: None,

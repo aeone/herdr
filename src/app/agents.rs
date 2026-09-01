@@ -110,8 +110,16 @@ impl App {
         let Some((ws_idx, pane_id, label)) = self.state.pending_agent_rename.take() else {
             return false;
         };
+        // A name bound for another machine is checked here as well, because the
+        // machine that would refuse it is not the one the user is looking at:
+        // over there a bad name is a line in a log, and here it is nothing
+        // happening at all.
+        if self.pane_runs_an_agent(ws_idx, pane_id) && !valid_agent_name(&label) {
+            self.warn_bad_agent_name(&label);
+            return true;
+        }
         #[cfg(unix)]
-        let sent = self.request_remote_agent_rename(ws_idx, pane_id, label.clone());
+        let sent = self.request_remote_agent_rename(ws_idx, pane_id, Some(label.clone()));
         #[cfg(not(unix))]
         let sent = false;
         if sent {
@@ -139,18 +147,7 @@ impl App {
                     }
                 }
             }
-            // Say so. A refusal that shows nothing is the same experience as the
-            // bug this replaces.
-            LocalAgentRename::BadName => {
-                self.state.toast = Some(crate::app::state::ToastNotification {
-                    kind: crate::app::state::ToastKind::NeedsAttention,
-                    title: format!("{label} is not a name an agent can have"),
-                    context: "lowercase letters, digits, - and _, starting with a letter"
-                        .to_string(),
-                    position: None,
-                    target: None,
-                });
-            }
+            LocalAgentRename::BadName => self.warn_bad_agent_name(&label),
             LocalAgentRename::Taken => {
                 self.state.toast = Some(crate::app::state::ToastNotification {
                     kind: crate::app::state::ToastKind::NeedsAttention,
@@ -162,6 +159,35 @@ impl App {
             }
         }
         true
+    }
+
+    /// Whether this pane runs an agent, mirrored or not.
+    ///
+    /// A mirror's hook authority is the host's answer, so this is true of a
+    /// mirrored agent as well -- which is the point: the name rules are the
+    /// host's rules, and the check has to reach panes we do not run ourselves.
+    fn pane_runs_an_agent(&self, ws_idx: usize, pane_id: crate::layout::PaneId) -> bool {
+        self.state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+            .is_some_and(|terminal| {
+                terminal.effective_agent_label().is_some()
+                    && !terminal.managed_agent_launch_pending()
+            })
+    }
+
+    /// Says a name was refused. A refusal that shows nothing is the same
+    /// experience as the bug this replaces.
+    fn warn_bad_agent_name(&mut self, label: &str) {
+        self.state.toast = Some(crate::app::state::ToastNotification {
+            kind: crate::app::state::ToastKind::NeedsAttention,
+            title: format!("{label} is not a name an agent can have"),
+            context: "lowercase letters, digits, - and _, starting with a letter".to_string(),
+            position: None,
+            target: None,
+        });
     }
 
     /// Names the agent in one pane, the way `agents.rename` does over the API.
@@ -256,13 +282,22 @@ impl App {
         if terminal.effective_agent_label().is_none() {
             return Err(AgentRenameError::NotAgent);
         }
-        match normalized_name {
+        match normalized_name.clone() {
             Some(name) => terminal.set_agent_name(name),
             None => terminal.clear_agent_name(),
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
         self.emit_pane_updated(resolved.ws_idx, resolved.pane_id);
+        // A mirrored pane belongs to another machine, so the name is passed on
+        // to it. The local write above stands until the next poll, which is
+        // either the host agreeing or the host's own answer replacing it --
+        // both of which are the truth, and neither of which a name written only
+        // here would have survived. Passing it on is also what carries a rename
+        // down a chain of hosts: each hop names its own mirror and forwards,
+        // until the machine that really runs the agent hears it.
+        #[cfg(unix)]
+        self.request_remote_agent_rename(resolved.ws_idx, resolved.pane_id, normalized_name);
         self.agent_info(resolved.ws_idx, resolved.pane_id)
             .ok_or_else(|| {
                 AgentRenameError::Target(TerminalTargetError::NotFound {
