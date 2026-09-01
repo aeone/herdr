@@ -1345,6 +1345,7 @@ fn resolved_token_spans(
     state_text_style: Style,
     workspace_style: Style,
     secondary_style: Style,
+    agent_style: Style,
     custom_style: Style,
     p: &Palette,
     max_width: usize,
@@ -1490,11 +1491,20 @@ fn resolved_token_spans(
             }
             ResolvedTokenKind::Tab(text)
             | ResolvedTokenKind::Pane(text)
-            | ResolvedTokenKind::Agent(text)
             | ResolvedTokenKind::Branch(text) => {
                 spans.push(Span::styled(
                     truncate_end(text, budgets[index]),
                     apply_token_style(secondary_style, token.style),
+                ));
+            }
+            // Styled apart from its neighbours because it is the one token on
+            // the row that can be a name rather than a fact: what kind of agent
+            // is running is worth saying quietly, and what someone chose to call
+            // this one is not.
+            ResolvedTokenKind::Agent(text) => {
+                spans.push(Span::styled(
+                    truncate_end(text, budgets[index]),
+                    apply_token_style(agent_style, token.style),
                 ));
             }
             ResolvedTokenKind::GitStatus { ahead, behind } => {
@@ -1741,6 +1751,9 @@ fn render_workspace_list(
                 state_text_style,
                 name_style,
                 branch_style,
+                // A Space row has no agent token to style; the tokens it can
+                // hold are a different set entirely.
+                branch_style,
                 branch_style,
                 p,
                 card.rect
@@ -1924,6 +1937,22 @@ fn render_agent_detail(
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
         };
         let agent_style = Style::default().fg(p.overlay0).add_modifier(Modifier::DIM);
+        // A name someone gave this agent is worth reading; the kind we detected
+        // is not, and saying "claude" a hundred times down the panel in the
+        // brightest grey available would bury the handful that carry a name.
+        // The two are told apart by the kind still being there underneath: the
+        // label only differs from it when something named this pane.
+        let named = detail
+            .agent_label
+            .as_deref()
+            .is_some_and(|label| Some(label) != detail.agent_kind_label.as_deref());
+        let agent_name_style = if !named {
+            agent_style
+        } else if is_active {
+            Style::default().fg(p.text)
+        } else {
+            Style::default().fg(p.subtext0)
+        };
         let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
 
         for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
@@ -1934,6 +1963,7 @@ fn render_agent_detail(
                 status_style,
                 name_style,
                 agent_style,
+                agent_name_style,
                 agent_style,
                 p,
                 body.width
@@ -2356,6 +2386,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
             Style::default(),
             Style::default(),
             Style::default(),
+            Style::default(),
             &crate::app::state::AppState::test_new().palette,
             20,
         );
@@ -2400,6 +2431,115 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
         assert_eq!(metrics.max_offset_from_bottom, 0);
         assert_eq!(row_text(buffer, body.y, body.width), " pi");
         assert_eq!(row_text(buffer, body.y + 1, body.width), " claude");
+    }
+
+    /// The name has to reach the row that gets drawn, not just the field the
+    /// row is built from.
+    ///
+    /// Asserting on `agent_panel_entries` proves a rename was stored where the
+    /// panel reads from; it does not prove the panel puts it on screen, and
+    /// "the rename works but I cannot see it" is the same complaint as "the
+    /// rename does not work". This draws the layout actually in use -- the
+    /// space on one row, the agent on the next -- so an agent named apart from
+    /// its space reads as two names on two lines.
+    #[test]
+    fn a_renamed_agent_is_drawn_under_its_spaces_own_name() {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = vec![Workspace::test_new("herdr")];
+        app.ensure_test_terminals();
+        app.active = Some(0);
+        app.selected = 0;
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+        terminal.detected_agent = Some(Agent::Claude);
+        terminal.set_agent_name("scarlet".into());
+        app.sidebar_agents.rows = vec![
+            vec![crate::config::AgentSidebarToken::Workspace],
+            vec![crate::config::AgentSidebarToken::Agent],
+        ];
+
+        let area = Rect::new(0, 0, 20, 6);
+        let body = agent_panel_body_rect(area, false);
+        let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
+        terminal
+            .draw(|frame| render_agent_detail(&app, &TerminalRuntimeRegistry::new(), frame, area))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+
+        let space_row = row_text(buffer, body.y, body.width);
+        let agent_row = row_text(buffer, body.y + 1, body.width);
+        assert!(
+            space_row.contains("herdr"),
+            "the space keeps its own name: {space_row:?}"
+        );
+        assert!(
+            agent_row.contains("scarlet"),
+            "the agent is drawn under the name it was given: {agent_row:?}"
+        );
+        assert!(
+            !agent_row.contains("claude"),
+            "and not under the kind it was called before: {agent_row:?}"
+        );
+    }
+
+    /// A name someone chose is drawn to be read; the kind we detected is not.
+    ///
+    /// Every agent in the panel says "claude", so the label is worth no more
+    /// than the dimmest grey there is -- until it stops being the kind and
+    /// starts being a name, at which point it is the only thing on the row
+    /// telling this agent from the ninety others.
+    #[test]
+    fn a_given_agent_name_is_drawn_brighter_than_the_kind_it_replaces() {
+        let style_of = |name: Option<&str>| {
+            let mut app = crate::app::state::AppState::test_new();
+            app.workspaces = vec![Workspace::test_new("herdr")];
+            app.ensure_test_terminals();
+            let pane_id = app.workspaces[0].tabs[0].root_pane;
+            let terminal_id = app.workspaces[0].tabs[0].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            let terminal = app.terminals.get_mut(&terminal_id).unwrap();
+            terminal.detected_agent = Some(Agent::Claude);
+            if let Some(name) = name {
+                terminal.set_agent_name(name.into());
+            }
+            app.sidebar_agents.rows = vec![vec![crate::config::AgentSidebarToken::Agent]];
+
+            let area = Rect::new(0, 0, 20, 6);
+            let body = agent_panel_body_rect(area, false);
+            let mut terminal = Terminal::new(TestBackend::new(20, 6)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_agent_detail(&app, &TerminalRuntimeRegistry::new(), frame, area)
+                })
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            let x = find_symbol_x(buffer, body.y, body.width, "c");
+            (
+                row_text(buffer, body.y, body.width),
+                buffer[(x, body.y)].style(),
+                app.palette,
+            )
+        };
+
+        let (kind_row, kind_style, p) = style_of(None);
+        assert_eq!(kind_row.trim(), "claude");
+        assert_eq!(kind_style.fg, Some(p.overlay0));
+        assert!(
+            kind_style.add_modifier.contains(Modifier::DIM),
+            "the kind stays as quiet as it was"
+        );
+
+        let (named_row, named_style, p) = style_of(Some("scarlet"));
+        assert_eq!(named_row.trim(), "scarlet");
+        assert_eq!(named_style.fg, Some(p.subtext0));
+        assert!(
+            !named_style.add_modifier.contains(Modifier::DIM),
+            "a name is not dimmed"
+        );
     }
 
     #[test]
@@ -2463,6 +2603,7 @@ rows = [[{ token = "git_status", fg = "#123456" }]]
                 "修复🙂标题很长".into(),
             ))],
             ("", Style::default()),
+            Style::default(),
             Style::default(),
             Style::default(),
             Style::default(),
