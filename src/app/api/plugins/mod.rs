@@ -2332,6 +2332,12 @@ command = ["sh", "-c", "printf '%s' \"$HERDR_PLUGIN_ACTION_ID\""]
     #[cfg(unix)]
     #[test]
     fn manifest_action_invoke_injects_plugin_paths() {
+        // The paths this asserts on are read from the environment, and another
+        // test in this file moves `XDG_CONFIG_HOME` aside while it runs. Without
+        // the lock the two interleave: the plugin is spawned against one config
+        // dir and the assertion is evaluated against the other, and which one
+        // wins depends on how the suite happens to be scheduled.
+        let _guard = crate::config::test_config_env_lock().lock().unwrap();
         let mut app = test_app();
         let root = unique_temp_path("plugin-action-path-env");
         write_manifest_content(
