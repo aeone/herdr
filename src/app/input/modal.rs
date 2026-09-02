@@ -596,14 +596,15 @@ pub(super) fn apply_rename_action(state: &mut AppState, action: ModalAction) {
                 Mode::RenamePane => {
                     if let (Some(ws_idx), Some(pane_id)) = (state.active, state.rename_pane_target)
                     {
-                        // Naming an agent is not the same as naming its pane,
-                        // and neither is done from here: a mirrored agent is
-                        // named on the machine that runs it, and a local one
-                        // through the same door the API uses, both of which
-                        // need an App. Renaming a *pane* is the branch below.
-                        if state.renaming_agent {
-                            state.pending_agent_rename = Some((ws_idx, pane_id, new_name));
-                        } else if let Some(ws) = state.workspaces.get(ws_idx) {
+                        // Naming an *agent* is not handled here at all: it needs
+                        // an App, and this function has one. See
+                        // `save_rename_modal_via_api`, which is the one the
+                        // running program calls.
+                        if let Some(ws) = state
+                            .workspaces
+                            .get(ws_idx)
+                            .filter(|_| !state.renaming_agent)
+                        {
                             if let Some(pane) = ws.pane_state(pane_id) {
                                 let terminal_id = pane.attached_terminal_id.clone();
                                 if let Some(terminal) = state.terminals.get_mut(&terminal_id) {
@@ -733,6 +734,16 @@ fn handle_rename_edit_key(state: &mut AppState, key: KeyEvent) {
     }
 }
 
+#[cfg(test)]
+/// The AppState half of the rename modal, for tests that do not need an App.
+///
+/// **This is not the path the program runs.** Every rename keystroke in the
+/// running app goes to [`App::handle_rename_key_via_api`], which does the same
+/// job against `App`. The two drifted apart once already: this one grew the
+/// branch that names an agent and the other did not, so the tests here passed
+/// while the keybind went on labelling panes. Anything asserted through this
+/// function is a statement about this function, not about the program -- test
+/// commit behaviour through the App path.
 #[cfg(test)]
 pub(crate) fn handle_rename_key(state: &mut AppState, key: KeyEvent) {
     if let Some(action) = modal_action_from_key(&key, RENAME_ACTIONS) {
@@ -1128,7 +1139,7 @@ impl App {
                     // pane's label while the tests, which call that other
                     // handler, all passed.
                     if self.state.renaming_agent {
-                        self.state.pending_agent_rename = Some((ws_idx, pane_id, new_name));
+                        self.apply_agent_rename(ws_idx, pane_id, new_name);
                     } else if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
                         self.runtime_pane_rename(
                             "tui.pane.rename",
@@ -1669,29 +1680,12 @@ mod tests {
         assert_eq!(action, Some(ModalAction::Save));
     }
 
-    /// Committing the rename-agent prompt hands the name on rather than
-    /// writing it here. Naming an agent and naming its pane are different
-    /// fields, and the panel reads the first; writing the second from here is
-    /// what made the keybind look dead on a machine whose agents are its own.
-    #[test]
-    fn committing_an_agent_rename_hands_the_name_on() {
-        let mut state = state_with_workspaces(&["test"]);
-        state.active = Some(0);
-        let pane_id = state.workspaces[0].tabs[0].layout.focused();
-        open_rename_agent(&mut state, pane_id);
-        state.name_input = "scarlet".into();
-
-        handle_rename_key(
-            &mut state,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
-        );
-
-        assert_eq!(
-            state.pending_agent_rename,
-            Some((0, pane_id, "scarlet".to_string())),
-            "a local space is not a reason to write the name straight to the pane"
-        );
-    }
+    // What committing an agent rename *does* is asserted where the program does
+    // it -- `app::agents::tests::naming_an_agent_shows_that_name_and_offers_it_back`,
+    // which drives the App path and reads the drawn panel. The test that used
+    // to sit here drove this AppState helper instead and checked the slot it
+    // parked a name in, so it went on passing through two separate releases in
+    // which pressing the key did not name anything at all.
 
     /// The prompt opens holding the name it is about to overwrite.
     ///
@@ -1776,10 +1770,13 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
         );
 
-        assert!(state.pending_agent_rename.is_none());
         assert_eq!(
             state.terminals[&terminal_id].manual_label.as_deref(),
             Some("notes")
+        );
+        assert_eq!(
+            state.terminals[&terminal_id].agent_name, None,
+            "naming a pane is not naming the agent in it"
         );
     }
 

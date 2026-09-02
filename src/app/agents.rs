@@ -104,26 +104,34 @@ impl App {
     ///
     /// A mirrored agent is named on the machine that runs it, and the name
     /// comes back on the next poll as the host's answer. A local one is named
-    /// here, through the same door the API uses. Returns whether there was one
-    /// to apply.
-    pub(super) fn apply_pending_agent_rename(&mut self) -> bool {
-        let Some((ws_idx, pane_id, label)) = self.state.pending_agent_rename.take() else {
-            return false;
-        };
+    /// here, through the same door the API uses.
+    ///
+    /// Called straight from the commit, not parked in a slot for a loop to
+    /// notice later. It was parked once, and the loop that drained it was the
+    /// TUI's -- but a herdr running as a server has its own loop in
+    /// `server::headless`, which knew nothing about the slot, so on every
+    /// machine the fleet actually runs the name went into it and stayed there.
+    /// Nothing to drain is one less loop that can forget to.
+    pub(super) fn apply_agent_rename(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        label: String,
+    ) {
         // A name bound for another machine is checked here as well, because the
         // machine that would refuse it is not the one the user is looking at:
         // over there a bad name is a line in a log, and here it is nothing
         // happening at all.
         if self.pane_runs_an_agent(ws_idx, pane_id) && !valid_agent_name(&label) {
             self.warn_bad_agent_name(&label);
-            return true;
+            return;
         }
         #[cfg(unix)]
         let sent = self.request_remote_agent_rename(ws_idx, pane_id, Some(label.clone()));
         #[cfg(not(unix))]
         let sent = false;
         if sent {
-            return true;
+            return;
         }
         // Not a mirror: it is an agent running here, so name it the way the API
         // names one. Setting the pane's label instead -- which is what this did
@@ -158,7 +166,6 @@ impl App {
                 });
             }
         }
-        true
     }
 
     /// Whether this pane runs an agent, mirrored or not.
@@ -682,9 +689,7 @@ mod tests {
     fn naming_a_local_agent_names_the_agent_and_not_its_pane() {
         let mut app = app_with_a_local_agent();
         let (pane_id, terminal_id) = only_pane(&app);
-        app.state.pending_agent_rename = Some((0, pane_id, "scarlet".to_string()));
-
-        assert!(app.apply_pending_agent_rename());
+        app.apply_agent_rename(0, pane_id, "scarlet".to_string());
 
         assert_eq!(
             agent_shown_first(&app).as_deref(),
@@ -718,11 +723,11 @@ mod tests {
             crossterm::event::KeyCode::Enter,
             crossterm::event::KeyModifiers::empty(),
         ));
-        assert!(
-            app.apply_pending_agent_rename(),
-            "committing the prompt should leave a rename to apply"
-        );
-
+        // Nothing else is called here on purpose. The previous version of this
+        // test drained the rename by hand, which is precisely the step
+        // production was supposed to take and did not: the name was parked in a
+        // slot only the TUI's loop drained, and a herdr running as a server has
+        // a different loop. Doing it for the app hid that completely.
         let drawn = crate::ui::agent_panel_rows_for_test(&app.state, 24, 8).join("\n");
         assert!(
             drawn.contains("scarlet"),
@@ -743,9 +748,7 @@ mod tests {
     fn a_name_an_agent_cannot_have_is_refused_out_loud() {
         let mut app = app_with_a_local_agent();
         let (pane_id, terminal_id) = only_pane(&app);
-        app.state.pending_agent_rename = Some((0, pane_id, "Scarlet Two".to_string()));
-
-        assert!(app.apply_pending_agent_rename());
+        app.apply_agent_rename(0, pane_id, "Scarlet Two".to_string());
 
         let _ = terminal_id;
         assert_eq!(
@@ -773,9 +776,7 @@ mod tests {
             .get_mut(&terminal_id)
             .unwrap()
             .set_detected_state(None, AgentState::Unknown);
-        app.state.pending_agent_rename = Some((0, pane_id, "notes".to_string()));
-
-        assert!(app.apply_pending_agent_rename());
+        app.apply_agent_rename(0, pane_id, "notes".to_string());
 
         assert_eq!(
             app.state.terminals[&terminal_id].manual_label.as_deref(),
@@ -800,9 +801,7 @@ mod tests {
         terminal.set_agent_name("scarlet".into());
 
         let (pane_id, terminal_id) = only_pane(&app);
-        app.state.pending_agent_rename = Some((0, pane_id, "scarlet".to_string()));
-
-        assert!(app.apply_pending_agent_rename());
+        app.apply_agent_rename(0, pane_id, "scarlet".to_string());
 
         let _ = terminal_id;
         assert_eq!(agent_shown_first(&app).as_deref(), Some("claude"));
@@ -811,13 +810,6 @@ mod tests {
             .toast
             .as_ref()
             .is_some_and(|toast| toast.title.contains("already called scarlet")));
-    }
-
-    /// And nothing pending is not something to apply.
-    #[test]
-    fn nothing_pending_applies_nothing() {
-        let mut app = app_with_a_local_agent();
-        assert!(!app.apply_pending_agent_rename());
     }
 
     #[allow(unused)]

@@ -1613,7 +1613,6 @@ pub struct AppState {
     /// A mirrored agent's new name, waiting for the App to send it to the host.
     /// Set here because the modal only has the state, and reaching a host is the
     /// App's to do.
-    pub(crate) pending_agent_rename: Option<(usize, PaneId, String)>,
     pub(crate) pane_id_aliases: std::collections::HashMap<u32, PaneId>,
     pub(crate) public_pane_id_aliases: std::collections::HashMap<String, PaneId>,
     pub workspaces: Vec<Workspace>,
@@ -2197,7 +2196,6 @@ impl AppState {
             direct_attach_resize_locks: std::collections::HashSet::new(),
             wheel_events: std::collections::HashMap::new(),
             renaming_agent: false,
-            pending_agent_rename: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces: Vec::new(),

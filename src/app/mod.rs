@@ -679,7 +679,6 @@ impl App {
             direct_attach_resize_locks: std::collections::HashSet::new(),
             wheel_events: std::collections::HashMap::new(),
             renaming_agent: false,
-            pending_agent_rename: None,
             pane_id_aliases: std::collections::HashMap::new(),
             public_pane_id_aliases: std::collections::HashMap::new(),
             workspaces,
@@ -1192,13 +1191,6 @@ impl App {
                         env: Default::default(),
                     },
                 );
-                needs_render = true;
-            }
-
-            // A mirrored agent's new name goes to the machine that runs the
-            // pane; a local one is named here. Both live in a method so a test
-            // can drive them without a run loop.
-            if self.apply_pending_agent_rename() {
                 needs_render = true;
             }
 

@@ -4014,9 +4014,7 @@ mod tests {
         app.report_remote_agent_states(&space, &snapshot(vec![named]));
 
         let pane_id = app.state.workspaces[0].tabs[0].root_pane;
-        app.state.pending_agent_rename = Some((0, pane_id, "Scarlet Two".to_string()));
-
-        assert!(app.apply_pending_agent_rename());
+        app.apply_agent_rename(0, pane_id, "Scarlet Two".to_string());
 
         assert!(
             app.state
