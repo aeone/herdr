@@ -53,6 +53,8 @@ pub(crate) use self::scrollbar::{
 };
 use self::settings::render_settings_overlay;
 #[cfg(test)]
+pub(crate) use self::sidebar::agent_panel_rows_for_test;
+#[cfg(test)]
 pub(crate) use self::sidebar::workspace_drop_indicator_row;
 use self::sidebar::{render_sidebar, render_sidebar_collapsed};
 use self::status::{

@@ -725,6 +725,33 @@ pub(crate) fn workspace_list_scrollbar_rect(app: &AppState, area: Rect) -> Optio
     ))
 }
 
+/// The agent panel as it would actually be drawn, one string per row.
+///
+/// A test that stops at [`agent_panel_entries`] proves a name reached the
+/// struct the panel is built from. That is a different claim from the panel
+/// showing it, and the gap between the two is where more than one of these
+/// bugs has lived: a name written to one field and read from another passes
+/// every test that picks a field and checks that same field back.
+#[cfg(test)]
+pub(crate) fn agent_panel_rows_for_test(app: &AppState, width: u16, height: u16) -> Vec<String> {
+    let area = Rect::new(0, 0, width, height);
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| render_agent_detail(app, &TerminalRuntimeRegistry::new(), frame, area))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|row| {
+            (0..width)
+                .map(|x| buffer[(x, row)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
 pub(crate) fn agent_panel_body_rect(area: Rect, has_scrollbar: bool) -> Rect {
     if area.width == 0 || area.height <= AGENT_PANEL_HEADER_ROWS {
         return Rect::default();

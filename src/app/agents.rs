@@ -697,6 +697,45 @@ mod tests {
         );
     }
 
+    /// The whole way round, in one test: press the key, type a name, commit it,
+    /// and read the panel that gets drawn -- then press the key again and check
+    /// the box offers back the name that is on screen.
+    ///
+    /// Every earlier test here stopped at one end of that. They set a field and
+    /// read the same field back, so a rename that wrote one field and displayed
+    /// another satisfied all of them at once, twice: first when the name went
+    /// to the pane's label instead of the agent's name, and again when the
+    /// prompt prefilled from the label while the panel drew the name. Neither
+    /// half is wrong on its own terms. What was wrong was the seam, and a test
+    /// that never crosses a seam cannot see it.
+    #[tokio::test]
+    async fn naming_an_agent_shows_that_name_and_offers_it_back() {
+        let mut app = app_with_a_local_agent();
+
+        app.open_rename_focused_agent();
+        app.state.name_input = "scarlet".into();
+        app.handle_rename_key_via_api(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert!(
+            app.apply_pending_agent_rename(),
+            "committing the prompt should leave a rename to apply"
+        );
+
+        let drawn = crate::ui::agent_panel_rows_for_test(&app.state, 24, 8).join("\n");
+        assert!(
+            drawn.contains("scarlet"),
+            "the panel should draw the name that was typed: {drawn:?}"
+        );
+
+        app.open_rename_focused_agent();
+        assert_eq!(
+            app.state.name_input, "scarlet",
+            "and the prompt should offer back the name the panel is showing"
+        );
+    }
+
     /// Agent names are a small grammar, and a name outside it is refused. A
     /// refusal nobody can see is the same experience as the bug this replaces,
     /// so it has to say something.

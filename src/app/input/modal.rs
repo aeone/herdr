@@ -432,7 +432,26 @@ pub(super) fn open_rename_pane(state: &mut AppState, pane_id: crate::layout::Pan
 /// it, or the next rebuild takes it away again.
 pub(super) fn open_rename_agent(state: &mut AppState, pane_id: crate::layout::PaneId) {
     open_rename_pane(state, pane_id);
-    state.renaming_agent = state.mode == Mode::RenamePane;
+    if state.mode != Mode::RenamePane {
+        return;
+    }
+    state.renaming_agent = true;
+    // Prefilled from the field this prompt writes, which is not the one
+    // `open_rename_pane` just filled it from. A pane's manual label is a
+    // different name in a different field, and the agent panel draws neither it
+    // nor anything derived from it -- so an agent reading as one name on screen
+    // opened a box already holding another, left over from whenever the pane
+    // was last named. It looked like the rename was remembered somewhere and
+    // simply not shown, which is exactly backwards: what was shown was the
+    // name, and what was remembered was the label.
+    let existing = state
+        .active
+        .and_then(|idx| state.workspaces.get(idx))
+        .and_then(|ws| ws.pane_state(pane_id))
+        .and_then(|pane| state.terminals.get(&pane.attached_terminal_id))
+        .and_then(|terminal| terminal.agent_name.clone());
+    state.name_input_replace_on_type = existing.is_none();
+    state.name_input = existing.unwrap_or_default();
 }
 
 fn workspace_create_label(input: &str, suggested_name: &str) -> Option<String> {
@@ -1101,7 +1120,16 @@ impl App {
                 if let (Some(ws_idx), Some(pane_id)) =
                     (self.state.active, self.state.rename_pane_target)
                 {
-                    if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
+                    // Naming an agent is not naming its pane, and this is the
+                    // door the running application comes through -- the TUI
+                    // sends every rename keystroke here. The AppState-level
+                    // handler grew this branch and this one did not, so an
+                    // agent rename committed in the app went on writing the
+                    // pane's label while the tests, which call that other
+                    // handler, all passed.
+                    if self.state.renaming_agent {
+                        self.state.pending_agent_rename = Some((ws_idx, pane_id, new_name));
+                    } else if let Some(pane_id) = self.public_pane_id(ws_idx, pane_id) {
                         self.runtime_pane_rename(
                             "tui.pane.rename",
                             crate::api::schema::PaneRenameParams {
@@ -1663,6 +1691,73 @@ mod tests {
             Some((0, pane_id, "scarlet".to_string())),
             "a local space is not a reason to write the name straight to the pane"
         );
+    }
+
+    /// The prompt opens holding the name it is about to overwrite.
+    ///
+    /// It used to open holding the pane's manual label instead -- a different
+    /// name in a different field, which the agent panel does not draw. On a
+    /// pane carrying both, the box offered a name nobody could see anywhere
+    /// while the sidebar went on showing the real one, so the rename looked
+    /// like it was being remembered somewhere and not displayed. It was the
+    /// other way round.
+    #[test]
+    fn renaming_an_agent_opens_with_the_agents_name_not_the_panes_label() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].layout.focused();
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("rycelia".into());
+        terminal.set_manual_label("arcline".into());
+
+        open_rename_agent(&mut state, pane_id);
+
+        assert_eq!(state.name_input, "rycelia");
+        assert!(
+            !state.name_input_replace_on_type,
+            "an existing name is edited, not typed over"
+        );
+    }
+
+    /// An agent with no name of its own opens empty rather than offering the
+    /// pane's label as a starting point, which would quietly turn a label into
+    /// a name the first time anyone pressed enter.
+    #[test]
+    fn renaming_an_unnamed_agent_opens_empty() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].layout.focused();
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_manual_label("arcline".into());
+
+        open_rename_agent(&mut state, pane_id);
+
+        assert_eq!(state.name_input, "");
+    }
+
+    /// And renaming a *pane* still opens with the pane's label, which is the
+    /// field that prompt writes.
+    #[test]
+    fn renaming_a_pane_still_opens_with_the_panes_label() {
+        let mut state = state_with_workspaces(&["test"]);
+        state.active = Some(0);
+        state.ensure_test_terminals();
+        let pane_id = state.workspaces[0].tabs[0].layout.focused();
+        let terminal_id = state.workspaces[0].terminal_id(pane_id).unwrap().clone();
+        let terminal = state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("rycelia".into());
+        terminal.set_manual_label("arcline".into());
+
+        open_rename_pane(&mut state, pane_id);
+
+        assert_eq!(state.name_input, "arcline");
     }
 
     /// And renaming a *pane* still names the pane, from here, as it always did.
