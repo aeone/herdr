@@ -224,6 +224,12 @@ fn compute_view_internal(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) {
+    // Scopes sidebar::agent_panel_entries's cache to this call (including
+    // every branch below, via Drop) so the workspace list, the agent panel,
+    // and their scroll-metrics helpers share one walk of the panes instead
+    // of each redoing it. See ViewComputeEpochGuard's doc comment.
+    let _view_compute_epoch = self::sidebar::ViewComputeEpochGuard::enter();
+
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;

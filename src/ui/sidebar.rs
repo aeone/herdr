@@ -20,6 +20,92 @@ use crate::terminal::TerminalRuntimeRegistry;
 const WORKSPACE_SECTION_HEADER_ROWS: u16 = 2;
 const AGENT_PANEL_HEADER_ROWS: u16 = 3;
 
+std::thread_local! {
+    /// Source of fresh ids for [`ViewComputeEpochGuard::enter`]. Never reset,
+    /// only ever handed out once each, so two overlapping (nested) guards
+    /// can't be confused for one another.
+    static NEXT_VIEW_COMPUTE_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(1) };
+    /// The epoch of whichever [`ViewComputeEpochGuard`] is innermost right
+    /// now, or `0` if none is open. `0` is not a valid epoch id (ids start at
+    /// 1), so it doubles as "the cache is off": every check below compares
+    /// against this value, and a stored entry can only match while its guard
+    /// -- or a guard opened after it, since ids only increase -- is live.
+    static ACTIVE_VIEW_COMPUTE_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The last [`agent_panel_entries_with_runtimes`] result computed with no
+    /// explicit `terminal_runtimes`, alongside the epoch it was computed in.
+    static AGENT_PANEL_ENTRIES_CACHE: std::cell::RefCell<Option<(u64, Vec<AgentPanelEntry>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Scopes the [`agent_panel_entries`] cache to exactly one view computation.
+///
+/// One `compute_view_internal` pass calls into the workspace list, the agent
+/// panel, and their scroll-metrics helpers separately, and each one used to
+/// redo the same O(workspaces * panes) `agent_panel_entries` walk from
+/// scratch -- a `pane.agent_status_changed`-derived state read with a TTL, so
+/// nothing here needs to be older than "this frame" for the cache to be
+/// invisible to the user.
+///
+/// The cache is consulted, and populated, only while `ACTIVE_VIEW_COMPUTE_EPOCH`
+/// names a live guard (see `enter`/`drop` below) -- not merely "whenever the
+/// epoch last seen happens to match". That is deliberate: a caller that reads
+/// `agent_panel_entries` directly, outside any `compute_view_internal` call
+/// (a mouse-click hit-test, say), must never be handed a value left over from
+/// the last time one ran, however recently. Restoring the *previous* active
+/// epoch on `Drop`, rather than resetting to `0` unconditionally, keeps that
+/// guarantee correct even if `compute_view_internal` is ever called
+/// re-entrantly.
+///
+/// See the iac-28cc infra repo's
+/// docs/investigations/2026-09-03-pandora-attach-timeout-agent-feed-storm.md
+/// (fleet-ops repo, not this one) for the incident this and the drain-loop
+/// bound in `server::headless` were both written against: the redundant
+/// rebuilds this collapses were what made every API request expensive enough
+/// for the starvation bug to bite in the first place.
+pub(crate) struct ViewComputeEpochGuard {
+    previous_active_epoch: u64,
+}
+
+impl ViewComputeEpochGuard {
+    pub(crate) fn enter() -> Self {
+        let previous_active_epoch = ACTIVE_VIEW_COMPUTE_EPOCH.with(|active| active.get());
+        let epoch = NEXT_VIEW_COMPUTE_EPOCH.with(|next| {
+            let epoch = next.get();
+            next.set(epoch.wrapping_add(1).max(1));
+            epoch
+        });
+        ACTIVE_VIEW_COMPUTE_EPOCH.with(|active| active.set(epoch));
+        Self {
+            previous_active_epoch,
+        }
+    }
+}
+
+impl Drop for ViewComputeEpochGuard {
+    fn drop(&mut self) {
+        ACTIVE_VIEW_COMPUTE_EPOCH.with(|active| active.set(self.previous_active_epoch));
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// Counts real (non-cached) [`collect_agent_panel_entries_with_runtimes`]
+    /// calls, so a test can assert the cache is actually collapsing repeat
+    /// calls instead of merely returning the right values by coincidence.
+    static AGENT_PANEL_ENTRIES_COMPUTE_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn test_reset_agent_panel_entries_compute_count() {
+    AGENT_PANEL_ENTRIES_COMPUTE_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn test_agent_panel_entries_compute_count() -> u32 {
+    AGENT_PANEL_ENTRIES_COMPUTE_COUNT.with(|count| count.get())
+}
+
+#[derive(Clone)]
 pub(crate) struct AgentPanelEntry {
     pub ws_idx: usize,
     pub tab_idx: usize,
@@ -209,6 +295,41 @@ fn agent_panel_entries_with_runtimes(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
 ) -> Vec<AgentPanelEntry> {
+    // Only the no-explicit-registry path is cached: it's the one every
+    // sidebar/agent-panel helper calls internally within a view computation,
+    // and caching against an arbitrary `&TerminalRuntimeRegistry` would need
+    // a key that actually reflects the registry's content, not just whether
+    // a reference happened to be passed.
+    //
+    // active_epoch == 0 means no ViewComputeEpochGuard is open right now, so
+    // the cache is bypassed entirely -- see the guard's doc comment for why
+    // that matters.
+    let active_epoch = ACTIVE_VIEW_COMPUTE_EPOCH.with(|active| active.get());
+    if terminal_runtimes.is_none() && active_epoch != 0 {
+        let cached = AGENT_PANEL_ENTRIES_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .as_ref()
+                .filter(|(cached_epoch, _)| *cached_epoch == active_epoch)
+                .map(|(_, entries)| entries.clone())
+        });
+        if let Some(entries) = cached {
+            return entries;
+        }
+
+        let entries = compute_agent_panel_entries(app, terminal_runtimes);
+        AGENT_PANEL_ENTRIES_CACHE
+            .with(|cache| *cache.borrow_mut() = Some((active_epoch, entries.clone())));
+        return entries;
+    }
+
+    compute_agent_panel_entries(app, terminal_runtimes)
+}
+
+fn compute_agent_panel_entries(
+    app: &AppState,
+    terminal_runtimes: Option<&TerminalRuntimeRegistry>,
+) -> Vec<AgentPanelEntry> {
     let mut entries = collect_agent_panel_entries_with_runtimes(app, terminal_runtimes);
     crate::app::agent_view::apply_agent_view(app, &mut entries);
     // Agents on an unreachable host sink to the bottom, like offline spaces.
@@ -220,6 +341,9 @@ fn collect_agent_panel_entries_with_runtimes(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
 ) -> Vec<AgentPanelEntry> {
+    #[cfg(test)]
+    AGENT_PANEL_ENTRIES_COMPUTE_COUNT.with(|count| count.set(count.get() + 1));
+
     let empty_runtimes;
     let terminal_runtimes = match terminal_runtimes {
         Some(terminal_runtimes) => terminal_runtimes,
@@ -2064,6 +2188,90 @@ mod tests {
     use super::*;
     use crate::{detect::Agent, layout::PaneId, workspace::Workspace};
     use ratatui::{backend::TestBackend, layout::Direction, Terminal};
+
+    fn app_with_workspaces(count: usize) -> crate::app::state::AppState {
+        let mut app = crate::app::state::AppState::test_new();
+        app.workspaces = (0..count)
+            .map(|i| Workspace::test_new(&format!("ws{i}")))
+            .collect();
+        app.active = Some(0);
+        app
+    }
+
+    /// Companion to `drain_api_requests_returns_promptly_under_sustained_request_pressure`
+    /// in `server::headless`: that test proves a flood of API requests can no
+    /// longer starve `accept_client_connections`; this one proves each of
+    /// those requests is now also cheap, by checking that a single view
+    /// computation -- which calls into `agent_panel_entries` from several
+    /// independent places (the workspace list's `hide_entries_listed_in_agent_panel`,
+    /// the agent panel itself, their scroll-metrics helpers) -- does the
+    /// expensive per-pane walk once, not once per call site.
+    #[test]
+    fn agent_panel_entries_cache_collapses_repeat_calls_within_one_view_compute() {
+        let app = app_with_workspaces(20);
+
+        test_reset_agent_panel_entries_compute_count();
+        {
+            let _epoch = ViewComputeEpochGuard::enter();
+            for _ in 0..5 {
+                agent_panel_entries(&app);
+            }
+        }
+        assert_eq!(
+            test_agent_panel_entries_compute_count(),
+            1,
+            "5 calls inside one ViewComputeEpochGuard scope should share one computation"
+        );
+
+        // A nested guard (as if compute_view_internal were ever re-entrant)
+        // gets its own epoch and does not read the outer scope's cached
+        // entry. The single cache slot is shared across nesting depths, so
+        // the inner scope's write overwrites the outer's -- meaning the
+        // outer scope recomputes once more on resuming, rather than finding
+        // its own entry still there. That's the safe direction to be wrong
+        // in (an extra recompute, never a stale read), so this test pins the
+        // count that actually falls out of that shared slot rather than an
+        // idealized per-scope cache.
+        test_reset_agent_panel_entries_compute_count();
+        {
+            let _outer = ViewComputeEpochGuard::enter();
+            agent_panel_entries(&app); // outer, cache empty: compute (1)
+            {
+                let _inner = ViewComputeEpochGuard::enter();
+                agent_panel_entries(&app); // inner epoch, cache holds outer's: compute (2)
+                agent_panel_entries(&app); // inner epoch, cache now holds inner's: hit
+            }
+            // Outer epoch restored, but the cache slot holds the inner
+            // scope's entry now, so this misses and recomputes too.
+            agent_panel_entries(&app); // outer epoch again, cache holds inner's: compute (3)
+        }
+        assert_eq!(test_agent_panel_entries_compute_count(), 3);
+    }
+
+    #[test]
+    fn agent_panel_entries_outside_any_view_compute_never_uses_the_cache() {
+        let app = app_with_workspaces(5);
+
+        // Populate the cache from inside a guard scope, then read again
+        // after it closes: a caller with no guard open (a mouse-click
+        // hit-test, say) must recompute every time, never reuse a value a
+        // `compute_view_internal` call happened to leave behind.
+        test_reset_agent_panel_entries_compute_count();
+        {
+            let _epoch = ViewComputeEpochGuard::enter();
+            agent_panel_entries(&app);
+        }
+        assert_eq!(test_agent_panel_entries_compute_count(), 1);
+
+        agent_panel_entries(&app);
+        agent_panel_entries(&app);
+        assert_eq!(
+            test_agent_panel_entries_compute_count(),
+            3,
+            "calls outside any guard must not read a value cached inside one, or cache their \
+             own result for a later outside-any-guard caller to reuse"
+        );
+    }
 
     fn row_text(buffer: &ratatui::buffer::Buffer, row: u16, width: u16) -> String {
         (0..width)

@@ -3964,9 +3964,25 @@ impl HeadlessServer {
     /// Drains API requests with shutdown awareness.
     ///
     /// During shutdown, remaining requests get a `server_unavailable` error.
+    ///
+    /// Bounded to however many requests were already queued when this call
+    /// started (the same `0..len()` snapshot [`reject_queued_api_requests_for_shutdown`]
+    /// takes below), not to "however many happen to be in `api_rx` whenever we
+    /// next check". A sustained stream of requests -- e.g. `herdr agent feed`
+    /// rebuilding one `pane.agent_status_changed` subscription per agent pane
+    /// every time the set of agent panes changes -- can keep `try_recv`
+    /// finding a fresh message on every iteration, so an unbounded version of
+    /// this loop never returns and `accept_client_connections` (the next step
+    /// in the run loop) never runs; every attach then times out waiting on a
+    /// socket nothing is accepting from. See the iac-28cc infra repo's
+    /// docs/investigations/2026-09-03-pandora-attach-timeout-agent-feed-storm.md
+    /// (fleet-ops repo, not this one).
     fn drain_api_requests_with_shutdown_check(&mut self) -> bool {
         let mut changed = false;
-        while !self.should_quit.load(Ordering::Acquire) {
+        for _ in 0..self.app.api_rx.len() {
+            if self.should_quit.load(Ordering::Acquire) {
+                break;
+            }
             let Ok(msg) = self.app.api_rx.try_recv() else {
                 break;
             };
@@ -3984,9 +4000,16 @@ impl HeadlessServer {
         }
     }
 
+    /// Same bound as [`drain_api_requests_with_shutdown_check`], and for the
+    /// same reason: this is the render-impact-tracking drain used while pane
+    /// graphics streaming is active, and it sits in the same run-loop step
+    /// ahead of `accept_client_connections`.
     fn drain_api_requests_with_render_impact(&mut self) -> RenderImpact {
         let mut impact = RenderImpact::None;
-        while !self.should_quit.load(Ordering::Acquire) {
+        for _ in 0..self.app.api_rx.len() {
+            if self.should_quit.load(Ordering::Acquire) {
+                break;
+            }
             let Ok(msg) = self.app.api_rx.try_recv() else {
                 break;
             };
@@ -6022,8 +6045,19 @@ mod tests {
     }
 
     fn test_headless_server_with_event_hub(event_hub: api::EventHub) -> HeadlessServer {
+        test_headless_server_with_api_channel(event_hub).0
+    }
+
+    /// Like [`test_headless_server_with_event_hub`], but also hands back the
+    /// sender feeding `app.api_rx` -- the same
+    /// `tokio::sync::mpsc::UnboundedSender<ApiRequestMessage>` a real client
+    /// handler thread holds -- so a test can push requests onto it from
+    /// another thread the way concurrent API connections really do.
+    fn test_headless_server_with_api_channel(
+        event_hub: api::EventHub,
+    ) -> (HeadlessServer, api::ApiRequestSender) {
         let config = crate::config::Config::default();
-        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = crate::app::App::new(&config, true, None, api_rx, event_hub);
         app.state.local_sound_playback = false;
         app.local_terminal_notifications = false;
@@ -6054,7 +6088,7 @@ mod tests {
         let server_keybindings = app_keybindings(&app);
         let headless_size = app.state.headless_size;
 
-        HeadlessServer {
+        let server = HeadlessServer {
             app,
             #[cfg(unix)]
             api_tx: None,
@@ -6085,7 +6119,112 @@ mod tests {
             should_quit,
             server_event_rx,
             server_event_tx,
+        };
+        (server, api_tx)
+    }
+
+    /// Sends one cheap, read-only request into `api_tx` with a fresh,
+    /// disposable response channel.
+    fn send_flood_request(api_tx: &api::ApiRequestSender) -> std::sync::mpsc::Receiver<String> {
+        let (respond_to, response_rx) = std::sync::mpsc::channel();
+        let _ = api_tx.send(api::ApiRequestMessage {
+            request: api::schema::Request {
+                id: "flood".into(),
+                method: api::schema::Method::PaneList(api::schema::PaneListParams::default()),
+            },
+            respond_to,
+            response_write_complete: None,
+            stream_active: None,
+        });
+        response_rx
+    }
+
+    /// Reproduces the incident this test is named for: `herdr agent feed`
+    /// held dozens of concurrent `events.subscribe` connections and rebuilt
+    /// every one of them whenever the set of agent panes changed, keeping
+    /// `api_rx` continuously non-empty. Because
+    /// `drain_api_requests_with_shutdown_check` looped on plain `try_recv`
+    /// with no bound, it never saw an empty channel and never returned --
+    /// so `accept_client_connections`, the very next step in the run loop,
+    /// never ran. Every `herdr` attach then timed out waiting on a listening
+    /// socket nothing was accepting from ("lost connection to server:
+    /// Resource temporarily unavailable (os error 11)", which is actually a
+    /// 5s client-side read timeout, not a severed connection). Root-caused
+    /// and reproduced live on the fleet -- see the iac-28cc infra repo's
+    /// docs/investigations/2026-09-03-pandora-attach-timeout-agent-feed-storm.md
+    /// (fleet-ops repo, not this one).
+    ///
+    /// Here a background thread plays the part of those subscriptions: it
+    /// keeps at most `IN_FLIGHT_CAP` requests outstanding (mirroring a bank
+    /// of concurrently-open connections rather than one unbounded blast), so
+    /// the channel is continuously replenished for the whole flood window
+    /// regardless of how fast this thread schedules. `drain_api_requests_with_shutdown_check`
+    /// must return well before that window ends, having processed only what
+    /// was already queued when it was called -- exactly like the
+    /// `0..api_rx.len()` snapshot `reject_queued_api_requests_for_shutdown`
+    /// already took, a few lines above, for the same reason.
+    #[test]
+    fn drain_api_requests_returns_promptly_under_sustained_request_pressure() {
+        const IN_FLIGHT_CAP: usize = 24;
+        const FLOOD_DURATION: Duration = Duration::from_millis(400);
+        const MAX_ACCEPTABLE_DRAIN_TIME: Duration = Duration::from_millis(150);
+
+        let (mut server, api_tx) = test_headless_server_with_api_channel(api::EventHub::default());
+
+        // Every request pays for a full `sync_foreground_client_state` pass,
+        // which walks every workspace and pane -- give it enough of both that
+        // one pass is measurable, the way a mirrored fleet's worth of
+        // workspaces was in production.
+        for i in 0..200 {
+            server
+                .app
+                .state
+                .workspaces
+                .push(crate::workspace::Workspace::test_new(&format!("flood-{i}")));
         }
+
+        let stop_after = Instant::now() + FLOOD_DURATION;
+        let producer = std::thread::spawn(move || {
+            let mut pending: std::collections::VecDeque<std::sync::mpsc::Receiver<String>> =
+                std::collections::VecDeque::new();
+            while Instant::now() < stop_after {
+                if pending.len() >= IN_FLIGHT_CAP {
+                    // Wait for the oldest outstanding request to complete
+                    // before issuing another -- caps the backlog at
+                    // IN_FLIGHT_CAP regardless of how the two threads get
+                    // scheduled, so this reproduces "a bounded pool of
+                    // connections in continuous use", not "an unbounded
+                    // burst", and the fixed drain's cost stays bounded too.
+                    let _ = pending
+                        .pop_front()
+                        .expect("checked non-empty above")
+                        .recv_timeout(Duration::from_secs(2));
+                }
+                pending.push_back(send_flood_request(&api_tx));
+            }
+        });
+
+        // Let the flood fill to its cap before measuring, so the drain call
+        // below has something queued the instant it starts.
+        std::thread::sleep(Duration::from_millis(20));
+
+        let started = Instant::now();
+        server.drain_api_requests_with_shutdown_check();
+        let elapsed = started.elapsed();
+
+        producer.join().expect("flood producer thread");
+
+        assert!(
+            elapsed < MAX_ACCEPTABLE_DRAIN_TIME,
+            "drain_api_requests_with_shutdown_check took {elapsed:?} while requests kept \
+             arriving (flood ran for {FLOOD_DURATION:?}); it must process only what was \
+             already queued and return -- otherwise accept_client_connections() never gets \
+             a turn and every attach times out. See the iac-28cc infra repo's \
+             docs/investigations/2026-09-03-pandora-attach-timeout-agent-feed-storm.md \
+             (fleet-ops repo, not this one)"
+        );
+
+        shutdown_test_runtimes(&mut server);
     }
 
     fn shutdown_test_runtimes(server: &mut HeadlessServer) {
