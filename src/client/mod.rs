@@ -1850,7 +1850,10 @@ async fn run_client_loop(
                 };
                 if should_bridge_clipboard_image_paste(
                     &data,
-                    is_remote_client,
+                    should_read_local_clipboard_on_empty_paste(
+                        is_remote_client,
+                        state.attach_escape.is_some(),
+                    ),
                     state.remote_image_paste_key,
                 ) {
                     if let Some(image) = crate::platform::read_clipboard_image() {
@@ -2411,6 +2414,30 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
         "agent attention" => Some(crate::sound::Sound::Request),
         _ => None,
     }
+}
+
+/// Whether this client should treat an "empty" paste — no text, the
+/// terminal's only way to signal a paste it could not represent as text,
+/// almost always an image — as a cue to read its own OS clipboard directly.
+///
+/// True for `--remote`, the original reason this exists: the server cannot
+/// reach the client's clipboard itself, since they run on different
+/// machines. Also true for a direct terminal attach (`herdr focus`) — unlike
+/// `--remote`, that mode runs colocated with the server (same machine, same
+/// clipboard), so there is no cross-machine mismatch to guard against and
+/// bridging is always correct there too. `herdr focus` previously fell
+/// through neither case and silently dropped every empty paste: confirmed
+/// live 2026-09-04, an image paste under `herdr focus` did nothing, no error.
+///
+/// Left false for the plain default session on purpose. Nothing has reported
+/// that one needing this, and broadening scope without evidence risks a path
+/// that already works.
+#[cfg(unix)]
+fn should_read_local_clipboard_on_empty_paste(
+    is_remote_client: bool,
+    is_terminal_attach: bool,
+) -> bool {
+    is_remote_client || is_terminal_attach
 }
 
 #[cfg(unix)]
@@ -3131,6 +3158,21 @@ mod tests {
             true,
             Some(ctrl_v)
         ));
+    }
+
+    /// `herdr focus` (a direct terminal attach) is colocated with the server
+    /// exactly like the plain default session, so it should read the local
+    /// clipboard on an empty paste the same way `--remote` does. The plain
+    /// default session (neither remote nor a terminal attach) should not —
+    /// nothing has reported that one needing it, and this asserts it stays
+    /// untouched by this change.
+    #[cfg(unix)]
+    #[test]
+    fn empty_paste_bridges_for_remote_and_terminal_attach_but_not_the_default_session() {
+        assert!(should_read_local_clipboard_on_empty_paste(true, false));
+        assert!(should_read_local_clipboard_on_empty_paste(false, true));
+        assert!(should_read_local_clipboard_on_empty_paste(true, true));
+        assert!(!should_read_local_clipboard_on_empty_paste(false, false));
     }
 
     struct TempImageFile {
