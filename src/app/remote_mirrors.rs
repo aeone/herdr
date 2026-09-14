@@ -1618,7 +1618,13 @@ impl App {
                 );
             }
         }
-        self.mirror_streams.remove(target);
+        // `stop()` rather than a bare remove: dropping the stream drops its
+        // `Child` without waiting on it, so the ssh that has just exited stays
+        // a zombie for the life of the server. One per disconnect is enough to
+        // reach thousands on a host whose remotes sleep and wake.
+        if let Some(stream) = self.mirror_streams.remove(target) {
+            stream.stop();
+        }
         if let Some(control) = self.mirror_controls.remove(target) {
             control.stop();
         }
