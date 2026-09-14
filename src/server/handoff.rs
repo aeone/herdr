@@ -23,7 +23,12 @@ const READY_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(unix)]
 const OWNED_ACK_TIMEOUT: Duration = Duration::from_millis(500);
 #[cfg(unix)]
-pub(crate) const MAX_FDS_PER_HANDOFF: usize = 64;
+/// Pane descriptors travel in batches of this many. One `SCM_RIGHTS` message
+/// carries at most 253 (`SCM_MAX_FD`), so sending them all at once put a hard
+/// ceiling on how large a session could be and still update in place — first
+/// 64, which real sessions outgrew. Any session up to this size still arrives
+/// in the single message an older importer expects.
+const FDS_PER_MESSAGE: usize = 200;
 #[cfg(unix)]
 pub(crate) const MAX_REPLAY_BYTES_PER_PANE: usize = 8 * 1024;
 #[cfg(unix)]
@@ -174,13 +179,7 @@ pub(crate) fn accept_and_validate_on(
 
 #[cfg(unix)]
 pub(crate) fn send_fds_and_wait_restored(stream: &mut UnixStream, fds: &[RawFd]) -> io::Result<()> {
-    if fds.len() > MAX_FDS_PER_HANDOFF {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("handoff supports at most {MAX_FDS_PER_HANDOFF} pane file descriptors at once"),
-        ));
-    }
-    send_fds(stream, fds)?;
+    send_fds_in_batches(stream, fds)?;
 
     stream.set_read_timeout(Some(READY_TIMEOUT))?;
     let restored = read_line_unbuffered(&mut *stream)?;
@@ -415,16 +414,38 @@ fn send_fds(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
-    if expected == 0 {
-        return Ok(Vec::new());
+fn send_fds_in_batches(stream: &UnixStream, fds: &[RawFd]) -> io::Result<()> {
+    for batch in fds.chunks(FDS_PER_MESSAGE) {
+        send_fds(stream, batch)?;
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
+    let mut out = Vec::with_capacity(expected);
+    while out.len() < expected {
+        if let Err(err) = recv_fd_message(stream, expected - out.len(), &mut out) {
+            for fd in out {
+                let _ = unsafe { libc::close(fd) };
+            }
+            return Err(err);
+        }
+    }
+    Ok(out)
+}
+
+/// Reads one `SCM_RIGHTS` message into `out`. The control buffer is sized for
+/// every descriptor still outstanding rather than for one batch, so a source
+/// that sends them all in a single message is still read whole.
+#[cfg(unix)]
+fn recv_fd_message(stream: &UnixStream, remaining: usize, out: &mut Vec<RawFd>) -> io::Result<()> {
     let mut byte = [0u8; 1];
     let mut iov = [libc::iovec {
         iov_base: byte.as_mut_ptr() as *mut libc::c_void,
         iov_len: byte.len(),
     }];
-    let fd_bytes = expected * std::mem::size_of::<RawFd>();
+    let fd_bytes = remaining * std::mem::size_of::<RawFd>();
     let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(fd_bytes as u32) as usize }];
     let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
     msg.msg_iov = iov.as_mut_ptr();
@@ -436,35 +457,41 @@ fn recv_fds(stream: &UnixStream, expected: usize) -> io::Result<Vec<RawFd>> {
     if read < 0 {
         return Err(io::Error::last_os_error());
     }
+
+    // Take ownership of whatever arrived before judging the message, so the
+    // descriptors from a truncated or empty message are still closed.
+    let before = out.len();
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if !cmsg.is_null()
+            && (*cmsg).cmsg_level == libc::SOL_SOCKET
+            && (*cmsg).cmsg_type == libc::SCM_RIGHTS
+        {
+            let data_len = ((*cmsg).cmsg_len as usize).saturating_sub(libc::CMSG_LEN(0) as usize);
+            let count = data_len / std::mem::size_of::<RawFd>();
+            let data = libc::CMSG_DATA(cmsg) as *const RawFd;
+            for idx in 0..count {
+                out.push(*data.add(idx));
+            }
+        }
+    }
     if msg.msg_flags & libc::MSG_CTRUNC != 0 {
         return Err(io::Error::other("handoff fd control message was truncated"));
     }
-
-    let mut out = Vec::new();
-    unsafe {
-        let cmsg = libc::CMSG_FIRSTHDR(&msg);
-        if cmsg.is_null()
-            || (*cmsg).cmsg_level != libc::SOL_SOCKET
-            || (*cmsg).cmsg_type != libc::SCM_RIGHTS
-        {
-            return Err(io::Error::other("handoff fd message missing SCM_RIGHTS"));
-        }
-        let data_len = ((*cmsg).cmsg_len as usize).saturating_sub(libc::CMSG_LEN(0) as usize);
-        let count = data_len / std::mem::size_of::<RawFd>();
-        let data = libc::CMSG_DATA(cmsg) as *const RawFd;
-        for idx in 0..count {
-            out.push(*data.add(idx));
-        }
+    if read == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "handoff stream closed after {} of {} fds",
+                out.len(),
+                out.len() + remaining
+            ),
+        ));
     }
-    if out.len() != expected {
-        for fd in out {
-            let _ = unsafe { libc::close(fd) };
-        }
-        return Err(io::Error::other(format!(
-            "expected {expected} handoff fds, received fewer"
-        )));
+    if out.len() == before {
+        return Err(io::Error::other("handoff fd message missing SCM_RIGHTS"));
     }
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -526,5 +553,41 @@ mod tests {
             serde_json::from_value(value).expect("an older manifest should still load");
 
         assert!(older.api_window_title.is_none());
+    }
+
+    fn inode(fd: RawFd) -> u64 {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::fstat(fd, &mut stat) }, 0, "fstat failed");
+        stat.st_ino as u64
+    }
+
+    /// One `SCM_RIGHTS` message carries at most 253 descriptors, so a session
+    /// with more panes than that arrives over several messages — and has to
+    /// arrive whole and in pane order, or panes attach to each other's
+    /// terminals.
+    #[test]
+    fn descriptors_beyond_one_message_all_arrive_in_pane_order() {
+        let (sender, receiver) = UnixStream::pair().expect("socket pair");
+        // Each pane is stood in for by one end of its own socket pair, so every
+        // descriptor has a distinct inode to check the order against.
+        let panes: Vec<(UnixStream, UnixStream)> = (0..260)
+            .map(|_| UnixStream::pair().expect("pane socket pair"))
+            .collect();
+        let fds: Vec<RawFd> = panes.iter().map(|(end, _)| end.as_raw_fd()).collect();
+
+        send_fds_in_batches(&sender, &fds).expect("descriptors should send");
+        let received = recv_fds(&receiver, fds.len()).expect("descriptors should arrive");
+
+        assert_eq!(received.len(), fds.len());
+        for (sent, got) in fds.iter().zip(&received) {
+            assert_eq!(
+                inode(*sent),
+                inode(*got),
+                "a pane received another pane's descriptor"
+            );
+        }
+        for fd in received {
+            unsafe { libc::close(fd) };
+        }
     }
 }
