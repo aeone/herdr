@@ -227,6 +227,14 @@ impl PtyFd {
 
     fn spawn_command(&self, builder: CommandBuilder) -> anyhow::Result<std::process::Child> {
         let configured_umask = builder.umask;
+        // Built before the fork: the child may only make async-signal-safe
+        // calls, so it cannot allocate the path itself.
+        let cgroup_procs = match &builder.join_cgroup {
+            Some(dir) => Some(std::ffi::CString::new(
+                dir.join("cgroup.procs").as_os_str().as_bytes(),
+            )?),
+            None => None,
+        };
 
         let mut cmd = builder.as_command()?;
         let controlling_tty = builder.get_controlling_tty();
@@ -236,6 +244,18 @@ impl PtyFd {
                 .stdout(self.as_stdio()?)
                 .stderr(self.as_stdio()?)
                 .pre_exec(move || {
+                    // Join the requested cgroup first, so everything the
+                    // child does from here on is accounted there. Writing
+                    // "0" moves the writing process. Best effort: on failure
+                    // the child stays in its parent's cgroup.
+                    if let Some(path) = &cgroup_procs {
+                        let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
+                        if fd >= 0 {
+                            libc::write(fd, b"0".as_ptr().cast(), 1);
+                            libc::close(fd);
+                        }
+                    }
+
                     // Clean up a few things before we exec the program
                     // Clear out any potentially problematic signal
                     // dispositions that we might have inherited

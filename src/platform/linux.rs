@@ -809,6 +809,124 @@ fn process_session_id(pid: u32) -> Option<i32> {
     fields.get(3)?.parse().ok()
 }
 
+/// `HERDR_PANE_CGROUPS=0` turns per-pane cgroups off.
+const PANE_CGROUPS_ENV_VAR: &str = "HERDR_PANE_CGROUPS";
+const CGROUP_MOUNT: &str = "/sys/fs/cgroup";
+/// The subgroup a delegated server runs in (systemd `DelegateSubgroup=server`).
+const SERVER_CGROUP_NAME: &str = "server";
+const PANE_CGROUP_PREFIX: &str = "pane-";
+/// How long a new pane cgroup is kept while empty, waiting for its child.
+const PANE_CGROUP_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
+static PANE_CGROUPS: OnceLock<Option<PaneCgroups>> = OnceLock::new();
+
+/// A cgroup of its own for each pane, beside the server's.
+///
+/// systemd-oomd kills whole leaf cgroups. With every pane in the server's
+/// cgroup, one runaway process in one pane makes the server and every other pane
+/// the thing it kills. Split per pane, the runaway's cgroup is the one with the
+/// memory and the reclaim, so it is the one that goes, and the server's leaf,
+/// which holds little, is left alone.
+///
+/// Only used when the server's cgroup is delegated to it: a unit with
+/// `Delegate=yes` and `DelegateSubgroup=server` starts the server in
+/// `<unit>/server`, owned by the service user, and panes go beside it as
+/// `<unit>/pane-<server pid>-<n>`.
+struct PaneCgroups {
+    root: PathBuf,
+    next: std::sync::atomic::AtomicU64,
+}
+
+impl PaneCgroups {
+    fn detect() -> Option<Self> {
+        if std::env::var(PANE_CGROUPS_ENV_VAR).as_deref() == Ok("0") {
+            return None;
+        }
+        let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+        let relative = delegated_pane_cgroup_root(&own)?;
+        let root = std::path::Path::new(CGROUP_MOUNT).join(relative.trim_start_matches('/'));
+        // Panes need the memory and pids controllers to be accounted and
+        // killed on their own. This write also fails when the root is not
+        // ours, so it doubles as the delegation check.
+        if let Err(err) = std::fs::write(root.join("cgroup.subtree_control"), "+memory +pids") {
+            tracing::info!(
+                root = %root.display(),
+                err = %err,
+                "per-pane cgroups unavailable; panes share the server's cgroup"
+            );
+            return None;
+        }
+        let cgroups = Self {
+            root,
+            next: std::sync::atomic::AtomicU64::new(1),
+        };
+        cgroups.remove_empty();
+        tracing::info!(root = %cgroups.root.display(), "each pane gets its own cgroup");
+        Some(cgroups)
+    }
+
+    fn create(&self) -> std::io::Result<PathBuf> {
+        self.remove_empty();
+        let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = self
+            .root
+            .join(format!("{PANE_CGROUP_PREFIX}{}-{n}", std::process::id()));
+        std::fs::create_dir(&dir)?;
+        Ok(dir)
+    }
+
+    /// Removes pane cgroups whose processes have all exited. The kernel refuses
+    /// to remove a populated cgroup, so attempting each one is the check.
+    /// Recently created ones are left alone: their child may not have joined
+    /// yet.
+    fn remove_empty(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let is_pane = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(PANE_CGROUP_PREFIX));
+            let settled = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= PANE_CGROUP_JOIN_GRACE);
+            if is_pane && settled {
+                let _ = std::fs::remove_dir(entry.path());
+            }
+        }
+    }
+}
+
+/// Where pane cgroups go, given `/proc/self/cgroup`: the parent of the
+/// server's own cgroup, when that cgroup is a delegated `server` subgroup.
+fn delegated_pane_cgroup_root(proc_self_cgroup: &str) -> Option<&str> {
+    let path = proc_self_cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))?;
+    let (parent, name) = path.rsplit_once('/')?;
+    (name == SERVER_CGROUP_NAME && !parent.is_empty()).then_some(parent)
+}
+
+/// Puts the process `command` spawns into a cgroup of its own, when the server
+/// runs delegated. See [`PaneCgroups`].
+pub(crate) fn place_in_pane_cgroup_platform(command: &mut portable_pty::CommandBuilder) {
+    let Some(cgroups) = PANE_CGROUPS.get_or_init(PaneCgroups::detect) else {
+        return;
+    };
+    match cgroups.create() {
+        Ok(dir) => command.join_cgroup(Some(dir)),
+        Err(err) => tracing::warn!(
+            root = %cgroups.root.display(),
+            err = %err,
+            "failed to create a pane cgroup; the pane shares the server's"
+        ),
+    }
+}
+
 /// Unix98 pty slaves are character major 136, and the pts number is the minor.
 const PTY_SLAVE_MAJOR: u64 = 136;
 
@@ -1022,6 +1140,33 @@ impl ProcessHandle {
 mod adoption_tests {
     use super::*;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    #[test]
+    fn pane_cgroups_go_beside_a_delegated_server_subgroup_only() {
+        let delegated = "0::/user.slice/user-1000.slice/herdr-server.service/server\n";
+        assert_eq!(
+            delegated_pane_cgroup_root(delegated),
+            Some("/user.slice/user-1000.slice/herdr-server.service")
+        );
+        // A hybrid hierarchy lists v1 controllers first; only the v2 line counts.
+        let hybrid = "12:pids:/user.slice\n0::/system.slice/herdr.service/server\n";
+        assert_eq!(
+            delegated_pane_cgroup_root(hybrid),
+            Some("/system.slice/herdr.service")
+        );
+        // Not delegated: an ssh session scope, or a unit without the subgroup.
+        assert_eq!(
+            delegated_pane_cgroup_root("0::/user.slice/user-1000.slice/session-19.scope\n"),
+            None
+        );
+        assert_eq!(
+            delegated_pane_cgroup_root("0::/user.slice/user-1000.slice/herdr-server.service\n"),
+            None
+        );
+        // Never the root of the hierarchy.
+        assert_eq!(delegated_pane_cgroup_root("0::/server\n"), None);
+        assert_eq!(delegated_pane_cgroup_root("0::/\n"), None);
+    }
 
     #[test]
     fn fdinfo_tty_index_reads_the_pts_number() {

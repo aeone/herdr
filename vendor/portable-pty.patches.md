@@ -84,3 +84,41 @@ python3 -m unittest scripts.test_vendor_portable_pty
 ```
 
 On Windows, also run `cargo test raw_arg_appends_unescaped_windows_command_tail`.
+
+## 0003 let a unix child join a cgroup before exec
+
+status: active
+
+patch: `vendor/patches/portable-pty/0003-join-pane-cgroup.patch`
+
+herdr issue: none
+
+upstream discussion: none
+
+upstream pr: none
+
+vendored base: `portable-pty 0.9.0`
+
+local files:
+
+- `vendor/portable-pty/src/cmdbuilder.rs`
+- `vendor/portable-pty/src/unix.rs`
+
+reason: On Linux, a server whose cgroup is delegated to it gives each pane a
+cgroup of its own, so systemd-oomd can kill one runaway pane instead of the
+server with every pane. The pane process has to join that cgroup between fork
+and exec, before the shell starts anything. `portable-pty` owns the `pre_exec`
+hook, and std allows only one.
+
+remove when: upstream `portable-pty` offers a pre-exec extension point or cgroup
+placement, or Herdr spawns pane processes without `portable-pty`.
+
+verification:
+
+```sh
+python3 -m unittest scripts.test_vendor_portable_pty
+```
+
+On Linux, run the server under `systemd-run --user -p Delegate=yes
+-p DelegateSubgroup=server` and check that a new pane's shell lists a
+`pane-<server pid>-<n>` cgroup in `/proc/<pid>/cgroup`.

@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: herdr maintainers <maintainers@herdr.dev>
+Date: Mon, 14 Sep 2026 00:00:00 +0000
+Subject: [PATCH] let a unix child join a cgroup before exec
+
+Herdr puts each pane in a cgroup of its own when its server runs in a
+delegated cgroup. The child has to join before it execs, so that the
+shell and everything it forks start there.
+---
+ vendor/portable-pty/src/cmdbuilder.rs | 15 +++++++++++++++
+ vendor/portable-pty/src/unix.rs       | 20 ++++++++++++++++++++
+ 2 files changed, 35 insertions(+)
+
+diff --git a/vendor/portable-pty/src/cmdbuilder.rs b/vendor/portable-pty/src/cmdbuilder.rs
+index 0000000..0000000 100644
+--- a/vendor/portable-pty/src/cmdbuilder.rs
++++ b/vendor/portable-pty/src/cmdbuilder.rs
+@@ -208,6 +208,8 @@ pub struct CommandBuilder {
+     cwd: Option<OsString>,
+     #[cfg(unix)]
+     pub(crate) umask: Option<libc::mode_t>,
++    #[cfg(unix)]
++    pub(crate) join_cgroup: Option<std::path::PathBuf>,
+     controlling_tty: bool,
+ }
+ 
+@@ -223,6 +225,8 @@ impl CommandBuilder {
+             cwd: None,
+             #[cfg(unix)]
+             umask: None,
++            #[cfg(unix)]
++            join_cgroup: None,
+             controlling_tty: true,
+         }
+     }
+@@ -237,6 +241,8 @@ impl CommandBuilder {
+             cwd: None,
+             #[cfg(unix)]
+             umask: None,
++            #[cfg(unix)]
++            join_cgroup: None,
+             controlling_tty: true,
+         }
+     }
+@@ -266,6 +272,8 @@ impl CommandBuilder {
+             cwd: None,
+             #[cfg(unix)]
+             umask: None,
++            #[cfg(unix)]
++            join_cgroup: None,
+             controlling_tty: true,
+         }
+     }
+@@ -426,6 +434,13 @@ impl CommandBuilder {
+         self.umask = mask;
+     }
+ 
++    /// Have the child move itself into the cgroup at `dir` before it execs, so
++    /// everything it forks later starts there too. Best effort: a child that
++    /// cannot join still runs, in its parent's cgroup.
++    pub fn join_cgroup(&mut self, dir: Option<std::path::PathBuf>) {
++        self.join_cgroup = dir;
++    }
++
+     fn resolve_path(&self) -> Option<&OsStr> {
+         self.get_env("PATH")
+     }
+diff --git a/vendor/portable-pty/src/unix.rs b/vendor/portable-pty/src/unix.rs
+index 0000000..0000000 100644
+--- a/vendor/portable-pty/src/unix.rs
++++ b/vendor/portable-pty/src/unix.rs
+@@ -227,6 +227,14 @@ impl PtyFd {
+ 
+     fn spawn_command(&self, builder: CommandBuilder) -> anyhow::Result<std::process::Child> {
+         let configured_umask = builder.umask;
++        // Built before the fork: the child may only make async-signal-safe
++        // calls, so it cannot allocate the path itself.
++        let cgroup_procs = match &builder.join_cgroup {
++            Some(dir) => Some(std::ffi::CString::new(
++                dir.join("cgroup.procs").as_os_str().as_bytes(),
++            )?),
++            None => None,
++        };
+ 
+         let mut cmd = builder.as_command()?;
+         let controlling_tty = builder.get_controlling_tty();
+@@ -236,6 +244,18 @@ impl PtyFd {
+                 .stdout(self.as_stdio()?)
+                 .stderr(self.as_stdio()?)
+                 .pre_exec(move || {
++                    // Join the requested cgroup first, so everything the
++                    // child does from here on is accounted there. Writing
++                    // "0" moves the writing process. Best effort: on failure
++                    // the child stays in its parent's cgroup.
++                    if let Some(path) = &cgroup_procs {
++                        let fd = libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_CLOEXEC);
++                        if fd >= 0 {
++                            libc::write(fd, b"0".as_ptr().cast(), 1);
++                            libc::close(fd);
++                        }
++                    }
++
+                     // Clean up a few things before we exec the program
+                     // Clear out any potentially problematic signal
+                     // dispositions that we might have inherited

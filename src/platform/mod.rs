@@ -47,6 +47,16 @@ pub(crate) fn terminal_title_for_presentation(title: &str) -> &str {
 #[cfg(not(windows))]
 fn apply_pane_runtime_marker_platform(_command: &mut portable_pty::CommandBuilder) {}
 
+/// Gives the pane `command` starts a cgroup of its own where the platform and
+/// the server's service manager allow it, so a runaway pane can be contained
+/// or killed without the rest of the session.
+pub(crate) fn place_in_pane_cgroup(command: &mut portable_pty::CommandBuilder) {
+    place_in_pane_cgroup_platform(command);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn place_in_pane_cgroup_platform(_command: &mut portable_pty::CommandBuilder) {}
+
 pub(crate) fn configure_background_command(command: &mut std::process::Command) {
     configure_background_command_platform(command);
 }

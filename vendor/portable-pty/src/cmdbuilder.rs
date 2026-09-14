@@ -208,6 +208,8 @@ pub struct CommandBuilder {
     cwd: Option<OsString>,
     #[cfg(unix)]
     pub(crate) umask: Option<libc::mode_t>,
+    #[cfg(unix)]
+    pub(crate) join_cgroup: Option<std::path::PathBuf>,
     controlling_tty: bool,
 }
 
@@ -223,6 +225,8 @@ impl CommandBuilder {
             cwd: None,
             #[cfg(unix)]
             umask: None,
+            #[cfg(unix)]
+            join_cgroup: None,
             controlling_tty: true,
         }
     }
@@ -237,6 +241,8 @@ impl CommandBuilder {
             cwd: None,
             #[cfg(unix)]
             umask: None,
+            #[cfg(unix)]
+            join_cgroup: None,
             controlling_tty: true,
         }
     }
@@ -266,6 +272,8 @@ impl CommandBuilder {
             cwd: None,
             #[cfg(unix)]
             umask: None,
+            #[cfg(unix)]
+            join_cgroup: None,
             controlling_tty: true,
         }
     }
@@ -424,6 +432,13 @@ impl CommandBuilder {
 impl CommandBuilder {
     pub fn umask(&mut self, mask: Option<libc::mode_t>) {
         self.umask = mask;
+    }
+
+    /// Have the child move itself into the cgroup at `dir` before it execs, so
+    /// everything it forks later starts there too. Best effort: a child that
+    /// cannot join still runs, in its parent's cgroup.
+    pub fn join_cgroup(&mut self, dir: Option<std::path::PathBuf>) {
+        self.join_cgroup = dir;
     }
 
     fn resolve_path(&self) -> Option<&OsStr> {
