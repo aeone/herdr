@@ -1090,3 +1090,18 @@ fn codex_osc_working_beats_weak_blocker_screen() {
         Some("osc_title_working")
     );
 }
+
+/// Detection runs per pane on every output change, so a lookup has to hand out
+/// the cached manifest rather than a copy of it: cloning deep-copies every
+/// compiled rule, gate and regex behind it, and on a host with many agent panes
+/// that copying is what the server spends its time on.
+#[test]
+fn repeated_lookups_share_one_manifest() {
+    let first = load_manifest(Agent::Claude).expect("claude manifest is bundled");
+    let second = load_manifest(Agent::Claude).expect("claude manifest is bundled");
+
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "each lookup copied the manifest instead of sharing the cached one"
+    );
+}

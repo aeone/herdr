@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock},
 };
 
 use regex::Regex;
@@ -133,7 +133,10 @@ struct LoadedManifest {
 
 #[derive(Debug, Clone)]
 struct ManifestCache {
-    manifests: Vec<(Agent, Option<LoadedManifest>)>,
+    /// Shared rather than owned per lookup: detection runs per pane on every
+    /// output change, and cloning a manifest deep-copies every compiled rule,
+    /// gate and regex behind it.
+    manifests: Vec<(Agent, Option<Arc<LoadedManifest>>)>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -293,7 +296,7 @@ fn build_manifest_cache() -> ManifestCache {
     ManifestCache {
         manifests: Agent::SCREEN_MANIFEST_AGENTS
             .into_iter()
-            .map(|agent| (agent, load_manifest_uncached(agent)))
+            .map(|agent| (agent, load_manifest_uncached(agent).map(Arc::new)))
             .collect(),
     }
 }
@@ -304,20 +307,20 @@ fn manifest_summaries_from_cache(cache: &ManifestCache) -> Vec<AgentManifestSumm
         .iter()
         .filter_map(|(agent, loaded)| {
             loaded
-                .clone()
+                .as_deref()
                 .map(|loaded| manifest_summary_from_loaded(*agent, loaded))
         })
         .collect()
 }
 
-fn manifest_summary_from_loaded(agent: Agent, loaded: LoadedManifest) -> AgentManifestSummary {
+fn manifest_summary_from_loaded(agent: Agent, loaded: &LoadedManifest) -> AgentManifestSummary {
     AgentManifestSummary {
         agent,
         active_version: loaded.manifest.version.as_ref().map(ToString::to_string),
-        active_source: loaded.source,
-        cached_remote_version: loaded.cached_remote_version,
+        active_source: loaded.source.clone(),
+        cached_remote_version: loaded.cached_remote_version.clone(),
         local_override_shadowing_remote: loaded.local_override_shadowing_remote,
-        warning: loaded.warning,
+        warning: loaded.warning.clone(),
     }
 }
 
@@ -337,7 +340,7 @@ pub fn detect_with_osc(agent: Agent, input: DetectionInput<'_>) -> AgentDetectio
     let Some(loaded) = load_manifest(agent) else {
         return fallback_explain(Some(agent), None, false).into_detection();
     };
-    evaluate_loaded_manifest(agent, input, loaded, false).into_detection()
+    evaluate_loaded_manifest(agent, input, &loaded, false).into_detection()
 }
 
 pub fn explain(agent: Agent, screen_content: &str) -> DetectionExplain {
@@ -355,7 +358,7 @@ pub fn explain_with_input(agent: Agent, input: DetectionInput<'_>) -> DetectionE
     let Some(loaded) = load_manifest(agent) else {
         return fallback_explain(Some(agent), None, true);
     };
-    evaluate_loaded_manifest(agent, input, loaded, true)
+    evaluate_loaded_manifest(agent, input, &loaded, true)
 }
 
 pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionExplain {
@@ -396,7 +399,7 @@ pub fn should_skip_state_update(agent: Agent, screen_content: &str) -> bool {
             osc_title: "",
             osc_progress: "",
         },
-        loaded,
+        &loaded,
         false,
     )
     .skip_state_update
@@ -418,7 +421,7 @@ impl DetectionExplain {
 fn evaluate_loaded_manifest(
     agent: Agent,
     input: DetectionInput<'_>,
-    loaded: LoadedManifest,
+    loaded: &LoadedManifest,
     include_update_status: bool,
 ) -> DetectionExplain {
     let mut matched: Option<(&ManifestRule, String)> = None;
@@ -493,7 +496,7 @@ fn evaluate_loaded_manifest(
     DetectionExplain {
         agent: Some(agent_label(agent).to_string()),
         state,
-        source: Some(loaded.source),
+        source: Some(loaded.source.clone()),
         matched_rule: Some(MatchedRule {
             id: rule.id.clone(),
             priority: rule.priority,
@@ -509,9 +512,9 @@ fn evaluate_loaded_manifest(
         skipped_update_reason,
         fallback_reason: None,
         evaluated_rules,
-        warning: loaded.warning,
+        warning: loaded.warning.clone(),
         manifest_version: loaded.manifest.version.as_ref().map(ToString::to_string),
-        cached_remote_version: loaded.cached_remote_version,
+        cached_remote_version: loaded.cached_remote_version.clone(),
         local_override_shadowing_remote: loaded.local_override_shadowing_remote,
         remote_update_status: remote_update_status
             .as_ref()
@@ -522,7 +525,7 @@ fn evaluate_loaded_manifest(
 
 fn fallback_explain(
     agent: Option<Agent>,
-    context: Option<(LoadedManifest, Vec<EvaluatedRule>)>,
+    context: Option<(&LoadedManifest, Vec<EvaluatedRule>)>,
     include_update_status: bool,
 ) -> DetectionExplain {
     let (
@@ -535,11 +538,11 @@ fn fallback_explain(
     ) = context
         .map(|(loaded, evaluated)| {
             (
-                Some(loaded.source),
+                Some(loaded.source.clone()),
                 evaluated,
-                loaded.warning,
+                loaded.warning.clone(),
                 loaded.manifest.version.as_ref().map(ToString::to_string),
-                loaded.cached_remote_version,
+                loaded.cached_remote_version.clone(),
                 loaded.local_override_shadowing_remote,
             )
         })
@@ -578,7 +581,7 @@ fn fallback_explain(
     }
 }
 
-fn load_manifest(agent: Agent) -> Option<LoadedManifest> {
+fn load_manifest(agent: Agent) -> Option<Arc<LoadedManifest>> {
     let lock = manifest_cache();
     let guard = match lock.read() {
         Ok(guard) => guard,
