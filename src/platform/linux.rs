@@ -809,6 +809,301 @@ fn process_session_id(pid: u32) -> Option<i32> {
     fields.get(3)?.parse().ok()
 }
 
+/// Unix98 pty slaves are character major 136, and the pts number is the minor.
+const PTY_SLAVE_MAJOR: u64 = 136;
+
+pub(crate) fn process_args(pid: u32) -> Option<Vec<String>> {
+    process_argv(pid)
+}
+
+/// The one-letter state from `/proc/<pid>/stat`: `R`, `S`, `T`, `Z` and so on.
+pub(crate) fn process_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.get(stat.rfind(')')? + 2..)?.chars().next()
+}
+
+pub(crate) fn process_uid(pid: u32) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(format!("/proc/{pid}"))
+        .ok()
+        .map(|metadata| metadata.uid())
+}
+
+/// A variable from the environment `pid` was started with.
+pub(crate) fn process_env_var(pid: u32, name: &str) -> Option<String> {
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
+    environ_var(&environ, name)
+}
+
+fn environ_var(environ: &[u8], name: &str) -> Option<String> {
+    environ.split(|&byte| byte == 0).find_map(|entry| {
+        let value = entry.strip_prefix(name.as_bytes())?.strip_prefix(b"=")?;
+        String::from_utf8(value.to_vec()).ok()
+    })
+}
+
+/// Every pseudo-terminal master `pid` holds, as `(descriptor, pts number)`.
+pub(crate) fn held_pty_masters(pid: u32) -> std::io::Result<Vec<(RawFd, u32)>> {
+    let mut masters = Vec::new();
+    for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
+        let entry = entry?;
+        let Some(fd) = numeric_file_name(&entry) else {
+            continue;
+        };
+        let is_ptmx = std::fs::read_link(entry.path()).is_ok_and(|target| {
+            target.as_os_str() == "/dev/ptmx" || target.as_os_str() == "/dev/pts/ptmx"
+        });
+        if !is_ptmx {
+            continue;
+        }
+        let Some(tty_index) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}"))
+            .ok()
+            .as_deref()
+            .and_then(fdinfo_tty_index)
+        else {
+            continue;
+        };
+        masters.push((fd as RawFd, tty_index));
+    }
+    masters.sort_unstable();
+    Ok(masters)
+}
+
+fn fdinfo_tty_index(fdinfo: &str) -> Option<u32> {
+    fdinfo
+        .lines()
+        .find_map(|line| line.strip_prefix("tty-index:"))
+        .and_then(|value| value.trim().parse().ok())
+}
+
+/// The session leader on each `/dev/pts/<n>`, keyed by `n`.
+///
+/// A pane's shell leads its terminal's session whoever its parent is, which is
+/// why this scans sessions rather than a server's children: after a live handoff
+/// the shells belong to init while their terminals belong to the new server.
+pub(crate) fn pts_session_leaders() -> std::collections::HashMap<u32, u32> {
+    let mut leaders = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return leaders;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = numeric_file_name(&entry) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        if let Some(pts) = pts_led_by(pid, &stat) {
+            leaders.insert(pts, pid);
+        }
+    }
+    leaders
+}
+
+fn pts_led_by(pid: u32, stat: &str) -> Option<u32> {
+    let rest = stat.get(stat.rfind(')')? + 2..)?;
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    // After (comm): state(0) ppid(1) pgrp(2) session(3) tty_nr(4)
+    if *fields.first()? == "Z" {
+        return None;
+    }
+    let session: u32 = fields.get(3)?.parse().ok()?;
+    let tty_nr: u64 = fields.get(4)?.parse().ok()?;
+    if session != pid {
+        return None;
+    }
+    let major = (tty_nr >> 8) & 0xfff;
+    let minor = (tty_nr & 0xff) | ((tty_nr >> 20) << 8);
+    (major == PTY_SLAVE_MAJOR).then_some(minor as u32)
+}
+
+/// The size a terminal reports: `(rows, cols, width_px, height_px)`.
+pub(crate) fn pty_window_size(fd: RawFd) -> std::io::Result<(u16, u16, u16, u16)> {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCGWINSZ writes one winsize through the pointer.
+    if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel))
+}
+
+/// A process held by pidfd, so signals and descriptor copies reach the process
+/// that was opened even if its pid is reused later.
+pub(crate) struct ProcessHandle {
+    pid: u32,
+    pidfd: std::os::fd::OwnedFd,
+}
+
+impl ProcessHandle {
+    pub(crate) fn open(pid: u32) -> std::io::Result<Self> {
+        use std::os::fd::FromRawFd;
+        let target = libc::pid_t::try_from(pid)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        // SAFETY: pidfd_open takes a pid and flags and returns a new descriptor
+        // or -1.
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, target, 0) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the kernel just returned this descriptor and nothing else owns it.
+        let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw as RawFd) };
+        Ok(Self { pid, pidfd })
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// A close-on-exec copy of the process's descriptor `fd`, via
+    /// `pidfd_getfd(2)`. That needs ptrace access to the process: the same user
+    /// and, unless the caller is its ancestor, `kernel.yama.ptrace_scope` 0.
+    pub(crate) fn copy_fd(&self, fd: RawFd) -> std::io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        // SAFETY: pidfd_getfd takes a pidfd, a descriptor number in that process
+        // and flags, and returns a new descriptor or -1.
+        let raw = unsafe { libc::syscall(libc::SYS_pidfd_getfd, self.pidfd.as_raw_fd(), fd, 0) };
+        if raw < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: the kernel just returned this descriptor and nothing else owns it.
+        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw as RawFd) })
+    }
+
+    pub(crate) fn send_signal(&self, signal: libc::c_int) -> std::io::Result<()> {
+        use std::os::fd::AsRawFd;
+        // SAFETY: pidfd_send_signal with a null siginfo behaves like kill(2) on
+        // the process the pidfd refers to.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                self.pidfd.as_raw_fd(),
+                signal,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Waits up to `timeout` for the process to exit, returning whether it has.
+    /// Works for processes that are not the caller's children.
+    pub(crate) fn wait_exited(&self, timeout: std::time::Duration) -> std::io::Result<bool> {
+        use std::os::fd::AsRawFd;
+        let mut pollfd = libc::pollfd {
+            fd: self.pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let millis = libc::c_int::try_from(timeout.as_millis()).unwrap_or(libc::c_int::MAX);
+        loop {
+            // SAFETY: one valid pollfd, and its count.
+            let ready = unsafe { libc::poll(&mut pollfd, 1, millis) };
+            if ready < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(err);
+            }
+            return Ok(ready > 0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod adoption_tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    #[test]
+    fn fdinfo_tty_index_reads_the_pts_number() {
+        let fdinfo = "pos:\t0\nflags:\t02100002\nmnt_id:\t32\nino:\t5\ntty-index:\t78\n";
+        assert_eq!(fdinfo_tty_index(fdinfo), Some(78));
+        assert_eq!(fdinfo_tty_index("pos:\t0\nflags:\t02\n"), None);
+    }
+
+    #[test]
+    fn a_session_leader_is_found_on_its_pts_and_nothing_else_is() {
+        // tty_nr 34894 is major 136, minor 78: /dev/pts/78.
+        let leader = "1034546 (zsh) S 2751997 1034546 1034546 34894 1035682 4194560";
+        assert_eq!(pts_led_by(1034546, leader), Some(78));
+        let member = "1035682 (claude) S 1034546 1035682 1034546 34894 1035682 4194560";
+        assert_eq!(pts_led_by(1035682, member), None);
+        let zombie = "1034546 (zsh) Z 2751997 1034546 1034546 34894 -1 4194560";
+        assert_eq!(pts_led_by(1034546, zombie), None);
+        let no_tty = "900 (sshd) S 1 900 900 0 -1 4194560";
+        assert_eq!(pts_led_by(900, no_tty), None);
+        let awkward_comm = "77 (a) b (c)) S 1 77 77 34894 -1 0";
+        assert_eq!(pts_led_by(77, awkward_comm), Some(78));
+    }
+
+    #[test]
+    fn environ_var_matches_the_whole_name() {
+        let environ = b"HERDR_PANE_ID_OLD=x\0HERDR_PANE_ID=w54:p1\0HOME=/home/ryi\0";
+        assert_eq!(
+            environ_var(environ, "HERDR_PANE_ID").as_deref(),
+            Some("w54:p1")
+        );
+        assert_eq!(environ_var(environ, "HERDR_PANE"), None);
+    }
+
+    #[test]
+    fn a_pty_master_copied_out_of_a_process_names_the_same_terminal() {
+        // SAFETY: plain pty allocation; the descriptor is owned immediately.
+        let raw = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+        assert!(
+            raw >= 0,
+            "posix_openpt: {}",
+            std::io::Error::last_os_error()
+        );
+        let master = unsafe { OwnedFd::from_raw_fd(raw) };
+        assert_eq!(unsafe { libc::grantpt(master.as_raw_fd()) }, 0);
+        assert_eq!(unsafe { libc::unlockpt(master.as_raw_fd()) }, 0);
+        let size = libc::winsize {
+            ws_row: 31,
+            ws_col: 97,
+            ws_xpixel: 970,
+            ws_ypixel: 620,
+        };
+        assert_eq!(
+            unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+            0
+        );
+
+        let pid = std::process::id();
+        let tty_index = held_pty_masters(pid)
+            .expect("list own descriptors")
+            .into_iter()
+            .find(|(fd, _)| *fd == master.as_raw_fd())
+            .map(|(_, index)| index)
+            .expect("own pty master is listed");
+
+        let handle = ProcessHandle::open(pid).expect("pidfd_open on self");
+        let copy = handle
+            .copy_fd(master.as_raw_fd())
+            .expect("pidfd_getfd on self");
+        assert_ne!(copy.as_raw_fd(), master.as_raw_fd());
+        let copied_index = held_pty_masters(pid)
+            .expect("list own descriptors")
+            .into_iter()
+            .find(|(fd, _)| *fd == copy.as_raw_fd())
+            .map(|(_, index)| index);
+        assert_eq!(copied_index, Some(tty_index));
+        assert_eq!(
+            pty_window_size(copy.as_raw_fd()).expect("TIOCGWINSZ"),
+            (31, 97, 970, 620)
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,3 +1,5 @@
+#[cfg(target_os = "linux")]
+pub(crate) mod adopt;
 mod alt_screen_read;
 pub mod autodetect;
 #[cfg(unix)]

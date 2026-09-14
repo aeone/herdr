@@ -8,7 +8,7 @@ pub(super) fn run_server_command(args: &[String]) -> std::io::Result<Option<i32>
     match subcommand {
         "stop" => server_stop(&args[1..]).map(Some),
         "live-handoff" => server_live_handoff(&args[1..]).map(Some),
-        "--handoff-import" => Ok(None),
+        "--handoff-import" | "--adopt" => Ok(None),
         "reload-config" => server_reload_config(&args[1..]).map(Some),
         "agent-manifests" => server_agent_manifests(&args[1..]).map(Some),
         "update-agent-manifests" => server_update_agent_manifests(&args[1..]).map(Some),
@@ -257,6 +257,7 @@ fn print_server_help() {
     eprintln!("  herdr server                run as headless server");
     eprintln!("  herdr server stop           stop the running server via the API socket");
     eprintln!("  herdr server live-handoff   hand off live panes to a new local server");
+    eprintln!("  herdr server --adopt <pid>  take over a running server's panes without its cooperation (linux)");
     eprintln!("  herdr server reload-config  reload config.toml in the running server");
     eprintln!("  herdr server agent-manifests [--json]  show agent detection manifest status");
     eprintln!("  herdr server update-agent-manifests [--json]  fetch and reload agent detection manifests");

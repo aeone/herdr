@@ -5743,6 +5743,22 @@ pub fn run_server() -> io::Result<()> {
             tracing::error!(err = %err, "handoff import server failed");
         });
     }
+    #[cfg(target_os = "linux")]
+    if args.get(2).map(String::as_str) == Some("--adopt") {
+        let old_pid = args
+            .get(3)
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "usage: herdr server --adopt <pid>",
+                )
+            })?;
+        return run_adopt_server(old_pid).inspect_err(|err| {
+            eprintln!("error: {err}");
+            tracing::error!(err = %err, old_pid, "adopting server failed");
+        });
+    }
 
     let loaded_config = config::Config::load();
     let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5953,6 +5969,70 @@ fn wait_for_old_public_sockets_to_close(timeout: Duration) -> io::Result<()> {
         io::ErrorKind::TimedOut,
         "old server sockets did not close before handoff import bind",
     ))
+}
+
+/// Serves the panes of server `old_pid` without its cooperation. See
+/// `server::adopt` for what carries over and what does not.
+#[cfg(target_os = "linux")]
+fn run_adopt_server(old_pid: u32) -> io::Result<()> {
+    let loaded_config = config::Config::load();
+    let crate::server::adopt::TakenPanes {
+        snapshot,
+        mut imports,
+        old_server,
+    } = crate::server::adopt::take_panes(old_pid)?;
+
+    let (api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+    let event_hub = api::EventHub::default();
+    let should_quit = Arc::new(AtomicBool::new(false));
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(io::Error::other)?;
+
+    let result = rt.block_on(async {
+        // Until `retire`, any early return drops `old_server`, which resumes it
+        // with its own copies of every terminal still open.
+        let mut app = app::App::new_from_handoff(
+            &loaded_config.config,
+            config::config_diagnostic_summary(&loaded_config.diagnostics),
+            api_rx,
+            event_hub.clone(),
+            &snapshot,
+            &mut imports,
+        )?;
+        app.state.local_sound_playback = false;
+        app.local_terminal_notifications = false;
+        app.local_input_source_switch = false;
+
+        old_server.retire()?;
+        wait_for_old_public_sockets_to_close(Duration::from_secs(5))?;
+
+        let api_server = api::start_server_with_stop_control(
+            api_tx.clone(),
+            event_hub.clone(),
+            should_quit.clone(),
+        )?;
+        let mut server = HeadlessServer::new(
+            app,
+            &loaded_config.diagnostics,
+            Some(api_tx.clone()),
+            Some(api_server),
+            should_quit,
+        )?;
+        server.app.assume_handoff_ownership();
+        server.app.unpause_handoff_readers();
+        server.pending_handoff_repaint_nudge = true;
+        info!(old_pid, "adopted server started");
+        print_ready_message(&api::socket_path(), &client_socket_path());
+        server.app.run_plugin_startup_hooks();
+        server.run().await
+    });
+
+    rt.shutdown_timeout(Duration::from_millis(100));
+    crate::logging::shutdown("server");
+    result
 }
 
 #[cfg(not(unix))]
