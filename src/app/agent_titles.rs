@@ -85,10 +85,7 @@ struct AgentTitleJob {
 
 impl App {
     pub(crate) fn start_agent_title_refresh_if_due(&mut self, now: Instant) {
-        if self
-            .agent_title_refresh_deadline()
-            .is_none_or(|deadline| now < deadline)
-        {
+        if !self.agent_title_refresh_due(now) {
             return;
         }
         self.agent_titles.last_refresh = Some(now);
@@ -133,6 +130,14 @@ impl App {
                 .collect();
             let _ = event_tx.blocking_send(AppEvent::AgentTitlesRefreshed { refreshed });
         });
+    }
+
+    fn agent_title_refresh_due(&self, now: Instant) -> bool {
+        self.agent_title_refresh_deadline().is_some()
+            && self
+                .agent_titles
+                .last_refresh
+                .is_none_or(|last| now >= last + AGENT_TITLE_REFRESH_INTERVAL)
     }
 
     pub(crate) fn agent_title_refresh_deadline(&self) -> Option<Instant> {
@@ -400,6 +405,29 @@ mod tests {
 
     fn line(kind: &str, field: &str, title: &str) -> String {
         format!(r#"{{"type":"{kind}","{field}":"{title}","sessionId":"s"}}"#)
+    }
+
+    /// The first refresh is due at once. Its deadline is "now" read after the
+    /// caller's `now`, so comparing the two would put it off for ever.
+    #[test]
+    fn the_first_refresh_is_due_immediately_and_the_next_after_the_interval() {
+        let mut app = crate::app::tests::test_app();
+        app.agent_titles.enabled = true;
+        let workspace = crate::workspace::Workspace::test_new("titles");
+        app.state.workspaces = vec![workspace];
+        app.state.ensure_test_terminals();
+        for terminal in app.state.terminals.values_mut() {
+            terminal.set_detected_state(
+                Some(crate::detect::Agent::Claude),
+                crate::detect::AgentState::Idle,
+            );
+        }
+        let now = Instant::now();
+
+        assert!(app.agent_title_refresh_due(now));
+        app.agent_titles.last_refresh = Some(now);
+        assert!(!app.agent_title_refresh_due(now + Duration::from_secs(1)));
+        assert!(app.agent_title_refresh_due(now + AGENT_TITLE_REFRESH_INTERVAL));
     }
 
     #[test]
