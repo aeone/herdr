@@ -166,6 +166,7 @@ impl App {
             if previous_title == known.title {
                 continue;
             }
+            tracing::info!(pane = pane_id.raw(), title = ?known.title, "claude session title changed");
             self.handle_internal_event(AppEvent::HookMetadataReported {
                 pane_id,
                 source: AGENT_TITLE_SOURCE.into(),
