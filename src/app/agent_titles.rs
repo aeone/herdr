@@ -31,11 +31,24 @@ const AGENT_TITLE_SOURCE: &str = "herdr:claude-title";
 const TRANSCRIPT_TAIL_BYTES: u64 = 512 * 1024;
 const MAX_TITLE_CHARS: usize = 80;
 
-#[derive(Default)]
 pub(crate) struct AgentTitles {
+    /// Off in unit tests, which must not read the real `~/.claude` or race
+    /// tests that change the environment it is located through.
+    enabled: bool,
     last_refresh: Option<Instant>,
     in_flight: bool,
     known: HashMap<TerminalId, KnownTitle>,
+}
+
+impl Default for AgentTitles {
+    fn default() -> Self {
+        Self {
+            enabled: !cfg!(test),
+            last_refresh: None,
+            in_flight: false,
+            known: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -128,7 +141,7 @@ impl App {
             .terminals
             .values()
             .any(|terminal| terminal.effective_agent_label() == Some("claude"));
-        if self.agent_titles.in_flight || !any_claude {
+        if !self.agent_titles.enabled || self.agent_titles.in_flight || !any_claude {
             return None;
         }
         Some(

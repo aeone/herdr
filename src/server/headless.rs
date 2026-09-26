@@ -5461,6 +5461,10 @@ impl HeadlessServer {
         #[cfg(unix)]
         self.app.start_remote_space_polls_if_due(now);
 
+        // Titles are read with no client attached too: a mirroring host shows
+        // them whether or not anyone is looking at this server.
+        self.app.start_agent_title_refresh_if_due(now);
+
         if self
             .app
             .next_auto_update_check
