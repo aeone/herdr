@@ -368,7 +368,11 @@ fn setup_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
 ///
 /// Direct attach forwards stdin to the attached PTY. When configured, mouse
 /// capture lets wheel events drive the attached viewport or reach child
-/// programs that requested mouse input.
+/// programs that requested mouse input. Keyboard enhancement (Kitty
+/// protocol / modifyOtherKeys) is still negotiated with the host terminal
+/// here, same as the full app: without it some host terminals won't report
+/// combos like a configured remote-image-paste key at all, which broke
+/// clipboard-image-paste bridging specifically for `focus --remote`.
 fn setup_direct_attach_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
     setup_terminal_with_capabilities(false, mouse_capture)
 }
@@ -392,7 +396,6 @@ fn setup_terminal_with_capabilities(
         if host_color_scheme_reports {
             write_host_color_scheme_report_mode(&mut io::stdout(), true)?;
         }
-        push_keyboard_enhancement_flags()?;
     } else {
         if should_query_host_terminal_theme() {
             write_host_color_scheme_report_mode(&mut io::stdout(), false)?;
@@ -404,6 +407,12 @@ fn setup_terminal_with_capabilities(
         }
         execute!(io::stdout(), EnableBracketedPaste)?;
     }
+    // Pushed for direct attach too (not just the full app): the host terminal
+    // needs this negotiated before it will disambiguate/report key combos
+    // like a configured remote-image-paste key at all, rather than swallowing
+    // them or falling back to a legacy encoding the paste-bridge check can't
+    // see. See `is_remote_client_process` / `should_bridge_clipboard_image_paste`.
+    push_keyboard_enhancement_flags()?;
 
     #[cfg(windows)]
     let windows_virtual_terminal_input =
@@ -427,9 +436,7 @@ fn setup_terminal_with_capabilities(
         }
     }
 
-    let modify_other_keys_mode = enable_client_protocols
-        .then(crate::input::host_modify_other_keys_mode)
-        .flatten();
+    let modify_other_keys_mode = crate::input::host_modify_other_keys_mode();
     if let Some(mode) = modify_other_keys_mode {
         io::stdout().write_all(mode.set_sequence())?;
         io::stdout().flush()?;
