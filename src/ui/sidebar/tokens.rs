@@ -79,9 +79,15 @@ pub(super) fn agent_rows(
                             AgentSidebarToken::Agent => {
                                 entry.agent_label.clone().map(ResolvedTokenKind::Agent)
                             }
-                            AgentSidebarToken::AgentTitle => Some(ResolvedTokenKind::Agent(
-                                format!("{} ({})", entry.agent_title, entry.primary_label),
-                            )),
+                            AgentSidebarToken::AgentTitle => {
+                                Some(ResolvedTokenKind::Agent(entry.agent_title.clone()))
+                            }
+                            AgentSidebarToken::AgentTitleWithWorkspace => {
+                                Some(ResolvedTokenKind::Agent(format!(
+                                    "{} ({})",
+                                    entry.agent_title, entry.primary_label
+                                )))
+                            }
                             AgentSidebarToken::RemoteHost => {
                                 entry.remote_host.clone().map(|text| {
                                     ResolvedTokenKind::RemoteHost {
@@ -314,14 +320,17 @@ mod tests {
             .any(|token| matches!(token.kind, ResolvedTokenKind::Number(_))));
     }
 
-    /// `agent_title` is one token so the space can sit in parentheses after
-    /// the name without a literal-text token to supply them.
+    /// `agent_title_with_workspace` is one token so the space can sit in
+    /// parentheses after the name without a literal-text token to supply them.
     #[test]
-    fn agent_title_puts_the_space_in_parentheses_after_the_name() {
+    fn agent_title_tokens_show_the_name_alone_or_with_its_space() {
         let mut entry = entry();
         entry.agent_title = "fix-alleria".into();
         let config = AgentsSidebarConfig {
-            rows: vec![vec![AgentSidebarToken::AgentTitle]],
+            rows: vec![vec![
+                AgentSidebarToken::AgentTitle,
+                AgentSidebarToken::AgentTitleWithWorkspace,
+            ]],
             rows_by_agent: Default::default(),
             row_gap: 0,
         };
@@ -330,6 +339,10 @@ mod tests {
 
         assert_eq!(
             rows[0][0].kind,
+            ResolvedTokenKind::Agent("fix-alleria".into())
+        );
+        assert_eq!(
+            rows[0][1].kind,
             ResolvedTokenKind::Agent("fix-alleria (repo)".into())
         );
     }

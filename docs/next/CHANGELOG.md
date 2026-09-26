@@ -4,7 +4,7 @@
 
 ### Added
 - Claude Code panes now report their session title as the agent's display name: the `/rename` name when one is set, otherwise the generated title. Herdr reads it from the session transcript, so it also reaches mirrored panes.
-- A new `agent_title` agent sidebar token shows the agent's title, else its given name, else its tab, followed by its workspace in parentheses.
+- New `agent_title` and `agent_title_with_workspace` agent sidebar tokens show the agent's title, else its given name, else its tab, the second followed by its workspace in parentheses.
 
 ### Fixed
 - Retained mouse selections now copy when Ctrl+C or Cmd+C arrives before a delayed mouse release instead of forwarding the copy shortcut to the pane. (#3100, thanks @moret)

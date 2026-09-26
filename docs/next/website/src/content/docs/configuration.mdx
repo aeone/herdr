@@ -357,7 +357,8 @@ Agent rows accept these built-in tokens:
 - `tab` — tab name when available.
 - `pane` — pane name when available.
 - `agent` — detected or reported agent display name.
-- `agent_title` — the agent's reported title (for Claude Code, its `/rename` name, else its generated session title), else the name it was given in herdr, else its tab name, followed by the workspace name in parentheses.
+- `agent_title` — the agent's reported title (for Claude Code, its `/rename` name, else its generated session title), else the name it was given in herdr, else its tab name.
+- `agent_title_with_workspace` — `agent_title` followed by the workspace name in parentheses.
 - `terminal_title` — latest OSC 0/2 terminal title after safety normalization.
 - `terminal_title_stripped` — the terminal title with one recognized leading activity or spinner glyph and its following whitespace removed.
 - `$name` — custom pane metadata named `name`.
