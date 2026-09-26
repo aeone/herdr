@@ -734,6 +734,7 @@ mod tests {
             terminal_title: None,
             terminal_title_stripped: None,
             agent_label: None,
+            agent_title: String::new(),
             agent_kind_label: None,
             agent: None,
             state,

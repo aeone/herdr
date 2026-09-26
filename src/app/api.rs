@@ -223,6 +223,10 @@ impl App {
             self.handle_git_status_refreshed(results, cache_updates);
             return Vec::new();
         }
+        if let AppEvent::AgentTitlesRefreshed { refreshed } = ev {
+            self.handle_agent_titles_refreshed(refreshed);
+            return Vec::new();
+        }
 
         if let AppEvent::TabBarCommandFinished {
             generation,

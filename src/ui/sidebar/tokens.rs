@@ -79,6 +79,9 @@ pub(super) fn agent_rows(
                             AgentSidebarToken::Agent => {
                                 entry.agent_label.clone().map(ResolvedTokenKind::Agent)
                             }
+                            AgentSidebarToken::AgentTitle => Some(ResolvedTokenKind::Agent(
+                                format!("{} ({})", entry.agent_title, entry.primary_label),
+                            )),
                             AgentSidebarToken::RemoteHost => {
                                 entry.remote_host.clone().map(|text| {
                                     ResolvedTokenKind::RemoteHost {
@@ -270,6 +273,7 @@ mod tests {
             terminal_title: None,
             terminal_title_stripped: None,
             agent_label: Some("pi".into()),
+            agent_title: "pi".into(),
             agent_kind_label: Some("pi".into()),
             agent: Some(crate::detect::Agent::Pi),
             state: AgentState::Working,
@@ -308,6 +312,26 @@ mod tests {
             .iter()
             .flatten()
             .any(|token| matches!(token.kind, ResolvedTokenKind::Number(_))));
+    }
+
+    /// `agent_title` is one token so the space can sit in parentheses after
+    /// the name without a literal-text token to supply them.
+    #[test]
+    fn agent_title_puts_the_space_in_parentheses_after_the_name() {
+        let mut entry = entry();
+        entry.agent_title = "fix-alleria".into();
+        let config = AgentsSidebarConfig {
+            rows: vec![vec![AgentSidebarToken::AgentTitle]],
+            rows_by_agent: Default::default(),
+            row_gap: 0,
+        };
+
+        let rows = agent_rows(&config, &entry, "idle", None, false);
+
+        assert_eq!(
+            rows[0][0].kind,
+            ResolvedTokenKind::Agent("fix-alleria (repo)".into())
+        );
     }
 
     #[test]

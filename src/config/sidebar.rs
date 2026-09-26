@@ -110,6 +110,9 @@ pub enum AgentSidebarToken {
     Tab,
     Pane,
     Agent,
+    /// The agent's title, else the name it was given, else its tab, followed by
+    /// its space in parentheses: `fix-alleria (6912c2-rycelia)`.
+    AgentTitle,
     /// Host prefix for an agent mirrored from a remote Herdr; empty otherwise.
     RemoteHost,
     TerminalTitle,
@@ -247,6 +250,7 @@ fn agent_token_name(token: &AgentSidebarToken) -> String {
         AgentSidebarToken::Tab => "tab".into(),
         AgentSidebarToken::Pane => "pane".into(),
         AgentSidebarToken::Agent => "agent".into(),
+        AgentSidebarToken::AgentTitle => "agent_title".into(),
         AgentSidebarToken::RemoteHost => "remote_host".into(),
         AgentSidebarToken::TerminalTitle => "terminal_title".into(),
         AgentSidebarToken::TerminalTitleStripped => "terminal_title_stripped".into(),
@@ -305,6 +309,7 @@ impl<'de> Deserialize<'de> for AgentSidebarToken {
                 ("tab", Self::Tab),
                 ("pane", Self::Pane),
                 ("agent", Self::Agent),
+                ("agent_title", Self::AgentTitle),
                 ("remote_host", Self::RemoteHost),
                 ("terminal_title", Self::TerminalTitle),
                 ("terminal_title_stripped", Self::TerminalTitleStripped),

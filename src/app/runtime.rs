@@ -374,6 +374,7 @@ impl App {
         changed |= self.clear_due_selection_highlight(now);
 
         self.start_git_status_refresh_if_due(now);
+        self.start_agent_title_refresh_if_due(now);
 
         #[cfg(unix)]
         self.start_remote_space_polls_if_due(now);
@@ -649,6 +650,7 @@ impl App {
             include_git_refresh
                 .then(|| self.git_refresh_deadline())
                 .flatten(),
+            self.agent_title_refresh_deadline(),
             self.next_auto_update_check,
             self.next_agent_manifest_update_check,
             self.agent_metadata_deadline,

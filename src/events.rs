@@ -163,6 +163,10 @@ pub enum AppEvent {
         results: Vec<WorkspaceGitStatus>,
         cache_updates: Vec<(std::path::PathBuf, GitStatusCacheEntry)>,
     },
+    /// Claude session titles were read from their transcripts.
+    AgentTitlesRefreshed {
+        refreshed: Vec<crate::app::AgentTitleRefresh>,
+    },
     /// A configured tab bar status command finished.
     TabBarCommandFinished {
         generation: u64,

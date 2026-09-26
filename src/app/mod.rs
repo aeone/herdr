@@ -13,8 +13,10 @@ mod api;
 mod api_helpers;
 pub(crate) use api_helpers::limit_snapshot_lines;
 pub(crate) use api_helpers::{pane_agent_status, pane_state_and_seen};
+mod agent_titles;
 mod config_io;
 mod creation;
+pub(crate) use agent_titles::AgentTitleRefresh;
 mod git_refresh;
 mod ids;
 pub(crate) mod input;
@@ -132,6 +134,7 @@ pub struct App {
     pub(crate) last_git_remote_status_refresh: Instant,
     pub(crate) last_git_repo_discovery_refresh: Instant,
     pub(crate) git_refresh_in_flight: bool,
+    pub(crate) agent_titles: agent_titles::AgentTitles,
     pub(crate) git_refresh_due_after_in_flight: bool,
     pub(crate) git_identity_refresh_requested: bool,
     pub(crate) git_status_cache: HashMap<std::path::PathBuf, crate::workspace::GitStatusCacheEntry>,
@@ -914,6 +917,7 @@ impl App {
             last_git_remote_status_refresh: Instant::now() - GIT_REMOTE_STATUS_REFRESH_INTERVAL,
             last_git_repo_discovery_refresh: Instant::now(),
             git_refresh_in_flight: false,
+            agent_titles: Default::default(),
             git_refresh_due_after_in_flight: false,
             git_identity_refresh_requested: false,
             git_status_cache: HashMap::new(),

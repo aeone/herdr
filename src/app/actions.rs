@@ -2949,6 +2949,12 @@ impl AppState {
                 let _ = cache_updates;
                 Vec::new()
             }
+            // Applied by `App::handle_agent_titles_refreshed`, which reports
+            // each changed title back through `HookMetadataReported`.
+            AppEvent::AgentTitlesRefreshed { refreshed } => {
+                let _ = refreshed;
+                Vec::new()
+            }
             // Mirror reconcile needs the App, not AppState, so it is handled in
             // `App::handle_internal_event` before this state-only dispatch.
             #[cfg(unix)]

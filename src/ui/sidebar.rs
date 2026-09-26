@@ -120,6 +120,8 @@ pub(crate) struct AgentPanelEntry {
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
     pub agent_label: Option<String>,
+    /// What the `agent_title` token names this agent by, before its space.
+    pub agent_title: String,
     pub agent_kind_label: Option<String>,
     pub agent: Option<crate::detect::Agent>,
     pub state: AgentState,
@@ -376,6 +378,10 @@ fn collect_agent_panel_entries_with_runtimes(
                             .tabs
                             .get(detail.tab_idx)
                             .is_some_and(|tab| !tab.is_auto_named());
+                    let agent_title = detail
+                        .given_agent_name
+                        .clone()
+                        .unwrap_or_else(|| detail.tab_label.clone());
                     AgentPanelEntry {
                         ws_idx,
                         tab_idx: detail.tab_idx,
@@ -388,6 +394,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         terminal_title: detail.terminal_title,
                         terminal_title_stripped: detail.terminal_title_stripped,
                         agent_label: Some(detail.agent_label),
+                        agent_title,
                         agent_kind_label: detail.agent_kind_label,
                         agent: detail.agent,
                         state: detail.state,

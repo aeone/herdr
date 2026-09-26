@@ -16,6 +16,8 @@ pub struct PaneDetail {
     pub terminal_title: Option<String>,
     pub terminal_title_stripped: Option<String>,
     pub agent_label: String,
+    /// A name the agent reported for itself or was given, never its kind.
+    pub given_agent_name: Option<String>,
     pub agent_kind_label: Option<String>,
     pub agent: Option<Agent>,
     pub state: AgentState,
@@ -47,8 +49,11 @@ impl Tab {
                     .as_deref()
                     .or(agent_kind_label.as_deref())?
                     .to_string();
-                let agent_label = terminal
+                let given_agent_name = terminal
                     .effective_display_agent()
+                    .or_else(|| terminal.agent_name.clone());
+                let agent_label = given_agent_name
+                    .clone()
                     .unwrap_or_else(|| fallback_agent_label.clone());
                 let presentation = terminal.effective_presentation();
                 Some(PaneDetail {
@@ -62,6 +67,7 @@ impl Tab {
                     terminal_title: terminal.terminal_title.clone(),
                     terminal_title_stripped: terminal.terminal_title_stripped(),
                     agent_label,
+                    given_agent_name,
                     agent_kind_label,
                     agent: terminal.effective_known_agent(),
                     state: terminal.state,
@@ -218,6 +224,53 @@ mod tests {
             labels,
             vec![("planner".into(), "planner".into(), Some(Agent::Pi))]
         );
+    }
+
+    /// The given name is what an agent reported for itself or was named, and
+    /// never falls back to its kind: that is where `agent_title` uses the tab.
+    #[test]
+    fn given_agent_name_prefers_a_reported_title_then_a_given_name_and_never_the_kind() {
+        let ws = Workspace::test_new("test");
+        let root_pane = ws.tabs[0].root_pane;
+        let mut terminals = HashMap::new();
+        let mut terminal = terminal_for_pane(&ws, root_pane);
+        terminal.set_hook_authority(
+            "herdr:claude".into(),
+            "claude".into(),
+            AgentState::Idle,
+            None,
+            None,
+        );
+        let terminal_id = terminal.id.clone();
+        terminals.insert(terminal_id.clone(), terminal);
+        let given = |terminals: &HashMap<_, _>| {
+            ws.pane_details(terminals)
+                .into_iter()
+                .map(|detail| detail.given_agent_name)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(given(&terminals), vec![None]);
+
+        let terminal = terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("planner".into());
+        assert_eq!(given(&terminals), vec![Some("planner".into())]);
+
+        let terminal = terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_metadata(crate::terminal::AgentMetadataReport {
+            source: "herdr:claude-title".into(),
+            agent_label: Some("claude".into()),
+            applies_to_source: None,
+            title: None,
+            display_agent: Some("fix-alleria".into()),
+            state_labels: HashMap::new(),
+            clear_title: false,
+            clear_display_agent: false,
+            clear_state_labels: false,
+            ttl: None,
+            seq: None,
+        });
+        assert_eq!(given(&terminals), vec![Some("fix-alleria".into())]);
     }
 
     #[test]
