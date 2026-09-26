@@ -68,6 +68,16 @@ pub(crate) struct RemoteLaunch {
 pub(crate) fn extract_remote_args(
     args: &[String],
 ) -> Result<(Vec<String>, Option<RemoteLaunch>), String> {
+    // `focus` owns its own `--remote <ssh-target>` (see `run_focus_remote`),
+    // scoped to one terminal rather than the default full-app launch this
+    // function extracts for. Leave its args untouched so `--remote` reaches
+    // `cli::focus::run_focus_command` instead of being mistaken here for the
+    // top-level launch flag and rejected by the "only with the default
+    // launch command" check in `main.rs`.
+    if args.get(1).map(String::as_str) == Some("focus") {
+        return Ok((args.to_vec(), None));
+    }
+
     let mut cleaned = Vec::with_capacity(args.len());
     if let Some(program) = args.first() {
         cleaned.push(program.clone());
@@ -196,6 +206,205 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     )?;
 
     run_client_process(&local_socket, &reattach_command, remote.keybindings)
+}
+
+/// Runs `herdr focus <target>` through the same SSH stdio bridge `--remote`
+/// uses, scoped to one terminal, rather than the full app.
+///
+/// The bridge only forwards the far side's client socket (see
+/// `run_remote`), not its API socket, so a human-typed target can't be
+/// resolved to a terminal id the way local `focus` resolves one. Instead
+/// this execs `herdr focus --resolve-json <target>` once over the same SSH
+/// connection (reusing the ControlMaster, so it's cheap) to get the id, then
+/// opens the bridge and attaches directly to it. Once attached, image-paste
+/// bridging works exactly like it does under a bare `herdr --remote`,
+/// because it is gated only on `HERDR_REMOTE_KEYBINDINGS` being set
+/// (`is_remote_client_process` in `client/mod.rs`), not on which client
+/// subcommand is running.
+pub(crate) fn run_focus_remote(
+    remote_target: String,
+    target: String,
+    observe: bool,
+    takeover: bool,
+) -> io::Result<i32> {
+    match run_focus_remote_inner(&remote_target, &target, observe, takeover) {
+        Ok(code) => Ok(code),
+        Err(err) => {
+            eprintln!("error: {err}");
+            crate::remote::print_remote_error_hint(&err, &remote_target);
+            Ok(1)
+        }
+    }
+}
+
+fn run_focus_remote_inner(
+    remote_target: &str,
+    target: &str,
+    observe: bool,
+    takeover: bool,
+) -> io::Result<i32> {
+    let session_name = crate::session::active_name()
+        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+    let remote_ssh = RemoteSsh::new(remote_target.to_owned(), manage_ssh_config);
+    let prepared_remote = prepare_remote_herdr(&remote_ssh, false)?;
+    ensure_remote_server_ready(
+        &remote_ssh,
+        &prepared_remote.remote_herdr,
+        prepared_remote.installed_or_replaced,
+        prepared_remote.stop_after_install_approved,
+        false,
+    )?;
+
+    let resolved = resolve_focus_target(&remote_ssh, &prepared_remote.remote_herdr, target)?;
+
+    let local_socket = local_forward_socket_path(remote_target, &session_name);
+    let program = std::env::args()
+        .next()
+        .unwrap_or_else(|| "herdr".to_string());
+    let reattach_command =
+        focus_reattach_command(&program, target, remote_target, observe, takeover);
+
+    let _bridge = SshStdioBridge::start(
+        remote_target.to_owned(),
+        prepared_remote.remote_herdr,
+        local_socket.clone(),
+        session_name,
+        remote_ssh.options(),
+    )?;
+
+    eprintln!("focusing {} — detach with ctrl+b q", resolved.label);
+    run_focus_bridge_client(
+        &local_socket,
+        &reattach_command,
+        &resolved.terminal_id,
+        observe,
+        takeover,
+    )
+}
+
+struct ResolvedFocusTarget {
+    terminal_id: String,
+    label: String,
+}
+
+#[derive(Deserialize)]
+struct FocusResolveJson {
+    terminal_id: String,
+    label: String,
+}
+
+/// Resolves `target` on the far side by execing the same `herdr focus
+/// --resolve-json` mode `cli/focus.rs` uses, over one non-interactive ssh
+/// command that reuses the ControlMaster set up by `prepare_remote_herdr`.
+fn resolve_focus_target(
+    ssh: &RemoteSsh,
+    remote_herdr: &RemoteHerdr,
+    target: &str,
+) -> io::Result<ResolvedFocusTarget> {
+    let script = format!(
+        "exec {} focus --resolve-json {}\n",
+        remote_herdr.shell_path,
+        shell_quote(target)
+    );
+    let output = ssh.sh_output(&script)?;
+    if !output.status.success() {
+        // `focus --resolve-json` already printed a human-readable reason
+        // (no match, usage error, ...) to its own stderr; relay it as-is
+        // instead of wrapping it in another layer of "remote command failed".
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            return Err(io::Error::other(format!(
+                "no agent, space or pane matched {target:?} on {}",
+                ssh.target()
+            )));
+        }
+        eprintln!("{stderr}");
+        return Err(io::Error::other(format!(
+            "could not resolve {target:?} on {}",
+            ssh.target()
+        )));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: FocusResolveJson = serde_json::from_str(stdout.trim()).map_err(|err| {
+        io::Error::other(format!(
+            "remote focus resolution returned unexpected output: {err}"
+        ))
+    })?;
+    Ok(ResolvedFocusTarget {
+        terminal_id: parsed.terminal_id,
+        label: parsed.label,
+    })
+}
+
+/// Builds the reattach hint shown when a `focus --remote` connection drops —
+/// the focus-scoped counterpart to `reattach_command`, which is specific to
+/// the full-app `--remote` launch.
+fn focus_reattach_command(
+    program: &str,
+    target: &str,
+    remote_target: &str,
+    observe: bool,
+    takeover: bool,
+) -> String {
+    let program = crate::platform::remote_reattach_program(program);
+    let target = crate::platform::remote_reattach_argument(target);
+    let remote_target = crate::platform::remote_reattach_argument(remote_target);
+    let mut command = format!("{program} focus {target} --remote {remote_target}");
+    if observe {
+        command.push_str(" --observe");
+    }
+    if takeover {
+        command.push_str(" --takeover");
+    }
+    command
+}
+
+/// Spawns the direct-attach or observe CLI as a child process pointed at the
+/// bridge's local socket, the focus-scoped counterpart to `run_client_process`.
+fn run_focus_bridge_client(
+    local_socket: &Path,
+    reattach_command: &str,
+    terminal_id: &str,
+    observe: bool,
+    takeover: bool,
+) -> io::Result<i32> {
+    let exe = std::env::current_exe()?;
+    let mut command = Command::new(exe);
+    if observe {
+        command
+            .arg("terminal")
+            .arg("session")
+            .arg("observe")
+            .arg(terminal_id);
+    } else {
+        command.arg("terminal").arg("attach").arg(terminal_id);
+        if takeover {
+            command.arg("--takeover");
+        }
+    }
+    let status = command
+        .env(
+            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            local_socket,
+        )
+        .env("HERDR_RENDER_ENCODING", "terminal-ansi")
+        .env(REATTACH_COMMAND_ENV_VAR, reattach_command)
+        .env(
+            REMOTE_KEYBINDINGS_ENV_VAR,
+            RemoteKeybindings::Local.as_str(),
+        )
+        .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+    Ok(status.code().unwrap_or(1))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2534,6 +2743,20 @@ mod tests {
     }
 
     #[test]
+    fn extract_remote_args_leaves_focus_remote_untouched() {
+        let args = vec![
+            "herdr".into(),
+            "focus".into(),
+            "agent1".into(),
+            "--remote".into(),
+            "lute".into(),
+        ];
+        let (cleaned, remote) = extract_remote_args(&args).unwrap();
+        assert_eq!(cleaned, args);
+        assert!(remote.is_none());
+    }
+
+    #[test]
     fn extract_remote_args_removes_space_form() {
         let args = vec![
             "herdr".into(),
@@ -2744,6 +2967,23 @@ mod tests {
                 true,
             ),
             "herdr --remote host --handoff"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn focus_reattach_command_includes_target_and_remote() {
+        assert_eq!(
+            focus_reattach_command("herdr", "agent1", "user@host", false, false),
+            "herdr focus agent1 --remote user@host"
+        );
+        assert_eq!(
+            focus_reattach_command("herdr", "my space", "host name", true, false),
+            "herdr focus 'my space' --remote 'host name' --observe"
+        );
+        assert_eq!(
+            focus_reattach_command("herdr", "agent1", "host", false, true),
+            "herdr focus agent1 --remote host --takeover"
         );
     }
 

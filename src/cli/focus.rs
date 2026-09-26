@@ -45,10 +45,18 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
     let mut observe = false;
     let mut host: Option<String> = None;
     let mut expect_host = false;
+    let mut remote: Option<String> = None;
+    let mut expect_remote = false;
+    let mut resolve_json = false;
     for arg in args {
         if expect_host {
             host = Some(arg.clone());
             expect_host = false;
+            continue;
+        }
+        if expect_remote {
+            remote = Some(arg.clone());
+            expect_remote = false;
             continue;
         }
         match arg.as_str() {
@@ -56,8 +64,17 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
             other if other.starts_with("--host=") => {
                 host = Some(other.trim_start_matches("--host=").to_string())
             }
+            "--remote" => expect_remote = true,
+            other if other.starts_with("--remote=") => {
+                remote = Some(other.trim_start_matches("--remote=").to_string())
+            }
             "--takeover" => takeover = true,
             "--observe" => observe = true,
+            // Internal: how `run_focus_remote` resolves a target on the far
+            // side of the bridge, where only the local API socket (not the
+            // bridged client socket) can answer "what does this name mean".
+            // Not advertised in --help; see remote/attach.rs.
+            "--resolve-json" => resolve_json = true,
             other if other.starts_with('-') => {
                 eprintln!("unknown option: {other}");
                 return Ok(2);
@@ -74,6 +91,22 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
         eprintln!("--host needs an ssh target");
         return Ok(2);
     }
+    if expect_remote {
+        eprintln!("--remote needs an ssh target");
+        return Ok(2);
+    }
+    if host.is_some() && remote.is_some() {
+        eprintln!("--host and --remote cannot be used together");
+        return Ok(2);
+    }
+
+    if resolve_json {
+        let Some(target) = target else {
+            eprintln!("usage: herdr focus --resolve-json <target>");
+            return Ok(2);
+        };
+        return print_resolve_json(&target);
+    }
 
     // Everything from here is answered by the herdr on `host`, so hand the whole
     // command over rather than resolving anything locally: our session knows
@@ -82,8 +115,23 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
         return run_via_host(&host, target.as_deref(), observe, takeover);
     }
 
+    // `--remote` bridges through the same SSH stdio tunnel `herdr --remote`
+    // uses, so clipboard image paste works — but that bridge only forwards
+    // the far side's client socket, not its API socket. Listing targets needs
+    // the API socket, so a bare `herdr focus --remote <host>` (no target)
+    // falls back to the plain ssh -t exec `--host` already does; only an
+    // actual attach needs the bridge.
+    if let Some(remote_target) = remote {
+        let Some(target) = target else {
+            return run_via_host(&remote_target, None, observe, takeover);
+        };
+        return crate::remote::run_focus_remote(remote_target, target, observe, takeover);
+    }
+
     let Some(target) = target else {
-        eprintln!("usage: herdr focus <agent|space|pane> [--observe] [--takeover] [--host TARGET]");
+        eprintln!(
+            "usage: herdr focus <agent|space|pane> [--observe] [--takeover] [--host TARGET] [--remote TARGET]"
+        );
         eprintln!();
         eprintln!("Opens a client showing just that one thing, independent of what any");
         eprintln!("other herdr client is focused on. Detach with ctrl+b q.");
@@ -113,6 +161,27 @@ pub(super) fn run_focus_command(args: &[String]) -> std::io::Result<i32> {
     // whatever it is watching. 0 means "size from this terminal", the same
     // default `terminal session observe` uses.
     crate::client::run_terminal_session_observe(resolved.terminal_id().to_owned(), 0, 0)?;
+    Ok(0)
+}
+
+/// Resolves `target` and prints it as JSON instead of attaching.
+///
+/// `run_focus_remote` execs this over ssh to turn a human-typed target into a
+/// terminal id on the far side of the bridge, since the bridge only forwards
+/// the client socket and resolution needs the API socket. Errors reuse
+/// `resolve`'s own stderr messages rather than duplicating them here.
+fn print_resolve_json(target: &str) -> std::io::Result<i32> {
+    let resolved = match resolve(target)? {
+        Ok(resolved) => resolved,
+        Err(code) => return Ok(code),
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "terminal_id": resolved.terminal_id(),
+            "label": resolved.describe(),
+        })
+    );
     Ok(0)
 }
 
@@ -389,6 +458,29 @@ fn pick_space_pane<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn host_and_remote_together_are_rejected() {
+        let code = run_focus_command(&args(&["agent1", "--host", "box", "--remote", "box"]))
+            .expect("no io error");
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn remote_without_a_value_is_rejected() {
+        let code = run_focus_command(&args(&["--remote"])).expect("no io error");
+        assert_eq!(code, 2);
+    }
+
+    #[test]
+    fn resolve_json_without_a_target_is_rejected() {
+        let code = run_focus_command(&args(&["--resolve-json"])).expect("no io error");
+        assert_eq!(code, 2);
+    }
 
     fn pane(pane_id: &str, workspace_id: &str, tab_id: &str, focused: bool) -> Value {
         serde_json::json!({
