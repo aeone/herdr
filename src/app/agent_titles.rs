@@ -10,6 +10,11 @@
 //!
 //! Both records are written again every few dozen lines, so the end of the file
 //! is enough; the whole file is read only when the end has neither.
+//!
+//! The session is the one the Claude hook reported when that integration is
+//! installed. Without it, Claude's own `sessions/<pid>.json` names the session
+//! each running Claude process has open, so the pane's Claude process is found
+//! once and its file read after that.
 
 use std::collections::HashMap;
 use std::io::{Read as _, Seek as _, SeekFrom};
@@ -36,6 +41,9 @@ pub(crate) struct AgentTitles {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct KnownTitle {
     session_id: String,
+    /// The Claude process whose `sessions/<pid>.json` named the session, when
+    /// no hook did.
+    claude_pid: Option<u32>,
     transcript: Option<Transcript>,
     title: Option<String>,
 }
@@ -57,7 +65,8 @@ pub(crate) struct AgentTitleRefresh {
 struct AgentTitleJob {
     terminal_id: TerminalId,
     pane_id: PaneId,
-    session_id: String,
+    reported_session_id: Option<String>,
+    shell_pid: Option<u32>,
     previous: Option<KnownTitle>,
 }
 
@@ -86,12 +95,27 @@ impl App {
         let event_tx = self.event_tx.clone();
         std::thread::spawn(move || {
             let projects = claude_dir.join("projects");
+            let sessions = claude_dir.join("sessions");
             let refreshed = jobs
                 .into_iter()
-                .map(|job| AgentTitleRefresh {
-                    known: refresh_title(&projects, &job.session_id, job.previous),
-                    terminal_id: job.terminal_id,
-                    pane_id: job.pane_id,
+                .filter_map(|job| {
+                    let (session_id, claude_pid) = match job.reported_session_id {
+                        Some(session_id) => (session_id, None),
+                        None => {
+                            let (session_id, pid) = session_of_pane_process(
+                                &sessions,
+                                job.shell_pid?,
+                                job.previous.as_ref().and_then(|known| known.claude_pid),
+                            )?;
+                            (session_id, Some(pid))
+                        }
+                    };
+                    let previous = job.previous.filter(|known| known.session_id == session_id);
+                    Some(AgentTitleRefresh {
+                        known: refresh_title(&projects, &session_id, claude_pid, previous),
+                        terminal_id: job.terminal_id,
+                        pane_id: job.pane_id,
+                    })
                 })
                 .collect();
             let _ = event_tx.blocking_send(AppEvent::AgentTitlesRefreshed { refreshed });
@@ -126,8 +150,11 @@ impl App {
                 .state
                 .terminals
                 .get(&terminal_id)
-                .and_then(claude_session_id)
-                .is_some_and(|session_id| session_id == known.session_id);
+                .filter(|terminal| terminal.effective_agent_label() == Some("claude"))
+                .is_some_and(|terminal| {
+                    reported_claude_session_id(terminal)
+                        .is_none_or(|session_id| session_id == known.session_id)
+                });
             if !still_same_session {
                 continue;
             }
@@ -165,18 +192,23 @@ impl App {
                 workspace.tabs.iter().flat_map(|tab| {
                     tab.panes.iter().filter_map(|(pane_id, pane)| {
                         let terminal = self.state.terminals.get(&pane.attached_terminal_id)?;
-                        let session_id = claude_session_id(terminal)?;
-                        let previous = self
-                            .agent_titles
-                            .known
+                        if terminal.effective_agent_label() != Some("claude") {
+                            return None;
+                        }
+                        let reported_session_id = reported_claude_session_id(terminal);
+                        let shell_pid = self
+                            .terminal_runtimes
                             .get(&terminal.id)
-                            .filter(|known| known.session_id == session_id)
-                            .cloned();
+                            .and_then(|runtime| runtime.child_pid());
+                        if reported_session_id.is_none() && shell_pid.is_none() {
+                            return None;
+                        }
                         Some(AgentTitleJob {
                             terminal_id: terminal.id.clone(),
                             pane_id: *pane_id,
-                            session_id,
-                            previous,
+                            reported_session_id,
+                            shell_pid,
+                            previous: self.agent_titles.known.get(&terminal.id).cloned(),
                         })
                     })
                 })
@@ -185,11 +217,8 @@ impl App {
     }
 }
 
-/// The Claude session a pane is running, while Claude is what it runs.
-fn claude_session_id(terminal: &crate::terminal::TerminalState) -> Option<String> {
-    if terminal.effective_agent_label() != Some("claude") {
-        return None;
-    }
+/// The Claude session the Claude hook reported for a pane, if it is installed.
+fn reported_claude_session_id(terminal: &crate::terminal::TerminalState) -> Option<String> {
     let from_hook = terminal
         .hook_authority
         .as_ref()
@@ -206,7 +235,44 @@ fn claude_session_id(terminal: &crate::terminal::TerminalState) -> Option<String
         .map(|session_ref| session_ref.value.clone())
 }
 
-fn refresh_title(projects: &Path, session_id: &str, previous: Option<KnownTitle>) -> KnownTitle {
+/// The session named by `sessions/<pid>.json` for the Claude process in a
+/// pane: the one found last time while its file still exists, else whichever
+/// process in the pane's foreground job has a file.
+fn session_of_pane_process(
+    sessions: &Path,
+    shell_pid: u32,
+    last_claude_pid: Option<u32>,
+) -> Option<(String, u32)> {
+    if let Some(pid) = last_claude_pid {
+        if let Some(session_id) = session_of_process(sessions, pid) {
+            return Some((session_id, pid));
+        }
+    }
+    let job = crate::detect::foreground_job(shell_pid)?;
+    std::iter::once(shell_pid)
+        .chain(job.processes.iter().map(|process| process.pid))
+        .find_map(|pid| session_of_process(sessions, pid).map(|session_id| (session_id, pid)))
+}
+
+fn session_of_process(sessions: &Path, pid: u32) -> Option<String> {
+    let bytes = std::fs::read(sessions.join(format!("{pid}.json"))).ok()?;
+    let record: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    if record.get("pid").and_then(serde_json::Value::as_u64) != Some(u64::from(pid)) {
+        return None;
+    }
+    record
+        .get("sessionId")
+        .and_then(serde_json::Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+        .map(str::to_string)
+}
+
+fn refresh_title(
+    projects: &Path,
+    session_id: &str,
+    claude_pid: Option<u32>,
+    previous: Option<KnownTitle>,
+) -> KnownTitle {
     let path = previous
         .as_ref()
         .and_then(|known| known.transcript.as_ref())
@@ -222,13 +288,17 @@ fn refresh_title(projects: &Path, session_id: &str, previous: Option<KnownTitle>
         })
     });
     if let Some(previous) = previous.filter(|previous| previous.transcript == transcript) {
-        return previous;
+        return KnownTitle {
+            claude_pid,
+            ..previous
+        };
     }
     let title = transcript
         .as_ref()
         .and_then(|transcript| read_title(&transcript.path, transcript.len));
     KnownTitle {
         session_id: session_id.to_string(),
+        claude_pid,
         transcript,
         title,
     }
@@ -357,6 +427,28 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_process_file_names_its_session_only_for_its_own_pid() {
+        let dir =
+            std::env::temp_dir().join(format!("herdr-agent-title-pid-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("4242.json"),
+            r#"{"pid":4242,"sessionId":"56f81608","cwd":"/tmp"}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("4243.json"), r#"{"pid":1,"sessionId":"stale"}"#).unwrap();
+
+        assert_eq!(session_of_process(&dir, 4242), Some("56f81608".into()));
+        assert_eq!(session_of_process(&dir, 4243), None);
+        assert_eq!(session_of_process(&dir, 4244), None);
+        assert_eq!(
+            session_of_pane_process(&dir, u32::MAX, Some(4242)),
+            Some(("56f81608".into(), 4242))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn titles_are_found_beyond_the_tail_when_the_tail_has_none() {
         let dir = std::env::temp_dir().join(format!("herdr-agent-title-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("-home-someone-project")).unwrap();
@@ -369,7 +461,7 @@ mod tests {
         }
         std::fs::write(&path, transcript).unwrap();
 
-        let known = refresh_title(&dir, "abc", None);
+        let known = refresh_title(&dir, "abc", None, None);
 
         assert_eq!(known.title, Some("early-name".into()));
         assert_eq!(known.transcript.map(|t| t.path), Some(path));
@@ -382,11 +474,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("p")).unwrap();
         let path = dir.join("p").join("abc.jsonl");
         std::fs::write(&path, line("ai-title", "aiTitle", "On disk")).unwrap();
-        let first = refresh_title(&dir, "abc", None);
+        let first = refresh_title(&dir, "abc", None, None);
         let mut remembered = first.clone();
         remembered.title = Some("Remembered".into());
 
-        let second = refresh_title(&dir, "abc", Some(remembered));
+        let second = refresh_title(&dir, "abc", None, Some(remembered));
 
         assert_eq!(first.title, Some("On disk".into()));
         assert_eq!(second.title, Some("Remembered".into()));
