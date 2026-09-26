@@ -320,6 +320,18 @@ mod tests {
             .any(|token| matches!(token.kind, ResolvedTokenKind::Number(_))));
     }
 
+    #[test]
+    fn agent_title_falls_back_past_blank_names_to_the_agent_kind() {
+        use super::super::agent_title_for;
+
+        assert_eq!(
+            agent_title_for(Some("fix-alleria"), "1", "claude"),
+            "fix-alleria"
+        );
+        assert_eq!(agent_title_for(None, "review", "claude"), "review");
+        assert_eq!(agent_title_for(Some(" "), "", "claude"), "claude");
+    }
+
     /// `agent_title_with_workspace` is one token so the space can sit in
     /// parentheses after the name without a literal-text token to supply them.
     #[test]

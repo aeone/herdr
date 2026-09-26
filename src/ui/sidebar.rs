@@ -378,10 +378,11 @@ fn collect_agent_panel_entries_with_runtimes(
                             .tabs
                             .get(detail.tab_idx)
                             .is_some_and(|tab| !tab.is_auto_named());
-                    let agent_title = detail
-                        .given_agent_name
-                        .clone()
-                        .unwrap_or_else(|| detail.tab_label.clone());
+                    let agent_title = agent_title_for(
+                        detail.given_agent_name.as_deref(),
+                        &detail.tab_label,
+                        &detail.agent_label,
+                    );
                     AgentPanelEntry {
                         ws_idx,
                         tab_idx: detail.tab_idx,
@@ -408,6 +409,20 @@ fn collect_agent_panel_entries_with_runtimes(
                 })
         })
         .collect()
+}
+
+/// What the `agent_title` tokens call an agent: the title it reported or the
+/// name it was given, else its tab, else its kind. A mirrored tab can arrive
+/// with an empty name, so blank values fall through rather than leaving the
+/// row empty.
+fn agent_title_for(given_name: Option<&str>, tab_label: &str, agent_label: &str) -> String {
+    [given_name, Some(tab_label), Some(agent_label)]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|name| !name.is_empty())
+        .unwrap_or_default()
+        .to_string()
 }
 
 pub(super) fn agent_panel_status_key(state: AgentState, seen: bool) -> &'static str {
