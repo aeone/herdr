@@ -75,6 +75,12 @@ pub(crate) struct RemoteAgentPane {
     /// the agent's colour are read from, while this is what to call it. Folding
     /// a name into `agent` would rename the agent and forget it was a claude.
     pub(crate) agent_name: Option<String>,
+    /// What the host displays this agent as, such as a Claude session's title.
+    ///
+    /// Kept apart from `agent` for the same reason as `agent_name`: taking it as
+    /// the kind would lose that this is a claude, and leave nothing that reads
+    /// as a display name here.
+    pub(crate) display_agent: Option<String>,
     /// Status the remote reports. The remote has hook-level authority over its
     /// own agents, so this is more accurate than screen-detecting the attached
     /// copy, which never sees anything but idle.
@@ -725,8 +731,9 @@ fn parse_mirror_panes(
             pane_label: pane.label.or(pane.title),
             workspace_id: pane.workspace_id,
             workspace_label,
-            agent: pane.display_agent.or(pane.agent),
+            agent: pane.agent.or_else(|| pane.display_agent.clone()),
             agent_name: pane.agent_name,
+            display_agent: pane.display_agent,
             origin: pane.mirror_origin.map(|origin| MirrorOrigin {
                 target: origin.target,
                 workspace_id: origin.workspace_id,
@@ -1002,6 +1009,7 @@ fn parse_created_workspace(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             workspace_label: workspace.label,
             agent: None,
             agent_name: root_pane.agent_name,
+            display_agent: None,
             origin: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
         },
@@ -1071,6 +1079,7 @@ fn parse_created_tab(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             workspace_label,
             agent: None,
             agent_name: root_pane.agent_name,
+            display_agent: None,
             origin: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
         },
@@ -1207,6 +1216,7 @@ mod tests {
                 workspace_label: "api-server".into(),
                 agent: Some("claude".into()),
                 agent_name: None,
+                display_agent: None,
                 status: crate::api::schema::AgentStatus::Working,
                 origin: None,
                 state_changed_at_ms: None,
@@ -1242,6 +1252,7 @@ mod tests {
                     workspace_label: "lifestream".into(),
                     agent: Some("claude".into()),
                     agent_name: None,
+                    display_agent: None,
                     status: crate::api::schema::AgentStatus::Idle,
                     origin: None,
                     state_changed_at_ms: None,
@@ -1255,6 +1266,7 @@ mod tests {
                     workspace_label: "emf".into(),
                     agent: Some("claude".into()),
                     agent_name: None,
+                    display_agent: None,
                     status: crate::api::schema::AgentStatus::Done,
                     origin: None,
                     state_changed_at_ms: None,
@@ -1265,6 +1277,24 @@ mod tests {
         assert_ne!(
             snapshot.panes[0].mirror_key("sera"),
             snapshot.panes[1].mirror_key("sera")
+        );
+    }
+
+    /// A host reports what an agent is and what it displays as separately, and
+    /// the mirror keeps them apart: taking the title as the kind would forget
+    /// the pane is a claude and leave no display name to show.
+    #[test]
+    fn a_hosts_display_name_arrives_beside_the_agent_kind() {
+        let workspaces = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"active_tab_id":"w1:t1","agent_status":"idle","focused":false,"label":"api","number":1,"pane_count":1,"tab_count":1,"workspace_id":"w1"}]}}"#;
+        let panes = r#"{"id":"cli:pane:list","result":{"panes":[{"agent":"claude","display_agent":"esp32 watch work","agent_status":"idle","focused":false,"pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","terminal_id":"term-a","workspace_id":"w1"}],"type":"pane_list"}}"#;
+        let stdout = format!("herdr\n{workspaces}\n{panes}\n");
+
+        let parsed = parse_discovery_output(&stdout, false).expect("parses");
+
+        assert_eq!(parsed.panes[0].agent.as_deref(), Some("claude"));
+        assert_eq!(
+            parsed.panes[0].display_agent.as_deref(),
+            Some("esp32 watch work")
         );
     }
 
@@ -1343,6 +1373,7 @@ mod tests {
             workspace_label: workspace_label.into(),
             agent: Some("claude".into()),
             agent_name: None,
+            display_agent: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
@@ -1394,6 +1425,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: Some("claude".into()),
             agent_name: None,
+            display_agent: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
@@ -1415,6 +1447,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: None,
             agent_name: None,
+            display_agent: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
@@ -1491,6 +1524,7 @@ mod tests {
             workspace_label: "api-server".into(),
             agent: None,
             agent_name: None,
+            display_agent: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,

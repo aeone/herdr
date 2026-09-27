@@ -11,6 +11,8 @@
 
 use std::time::Duration;
 
+const MIRROR_DISPLAY_AGENT_SOURCE: &str = "herdr:mirror-display";
+
 use crate::config::RemoteSpaceConfig;
 use crate::remote::spaces::{attach_argv, mirror_labels, RemoteAgentPane, RemoteSpaceSnapshot};
 use crate::workspace::{RemoteMirror, Workspace};
@@ -774,6 +776,40 @@ impl App {
         self.emit_pane_updated(ws_idx, pane_id);
     }
 
+    /// Shows a mirror as the host displays it, as pane metadata beside its
+    /// kind, and only when that changed so a steady poll writes nothing.
+    fn apply_mirrored_display_agent(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        display_agent: Option<&str>,
+    ) {
+        let current = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+            .and_then(|terminal| terminal.effective_display_agent());
+        if current.as_deref() == display_agent {
+            return;
+        }
+        self.handle_internal_event(crate::events::AppEvent::HookMetadataReported {
+            pane_id,
+            source: MIRROR_DISPLAY_AGENT_SOURCE.into(),
+            agent_label: None,
+            applies_to_source: None,
+            title: None,
+            display_agent: display_agent.map(str::to_string),
+            state_labels: std::collections::HashMap::new(),
+            clear_title: false,
+            clear_display_agent: display_agent.is_none(),
+            clear_state_labels: false,
+            seq: None,
+            ttl: None,
+        });
+    }
+
     /// The host to ask, and the name it knows this pane by, when the pane is a
     /// mirror of one somewhere else.
     ///
@@ -1252,6 +1288,7 @@ impl App {
             // rather than instead of it: a renamed claude still reads as a
             // claude here, and still gets a claude's colour.
             self.apply_mirrored_agent_name(ws_idx, pane_id, pane.agent_name.as_deref());
+            self.apply_mirrored_display_agent(ws_idx, pane_id, pane.display_agent.as_deref());
             // "done" on the remote means idle with output nobody has read, and
             // the host keeps saying it on every poll until someone reads it
             // *there*. Reading the mirror here is a local act the host never
@@ -3426,6 +3463,7 @@ mod tests {
             workspace_label: label.into(),
             agent: Some("claude".into()),
             agent_name: None,
+            display_agent: None,
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
