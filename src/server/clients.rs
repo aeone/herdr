@@ -41,6 +41,9 @@ pub(crate) struct ObservedTerminal {
     /// it. Passed on to the hosts behind this one, so a chain of mirrors all
     /// know whether anyone is at the end of it.
     pub(crate) resize: bool,
+    /// The key-encoding modes last sent for this terminal, as
+    /// `(application_cursor, kitty_keyboard_flags)`, so they go out on change.
+    pub(crate) last_input_modes: Option<(bool, u16)>,
 }
 
 pub(crate) type RenderTarget = (

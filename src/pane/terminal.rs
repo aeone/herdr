@@ -432,6 +432,10 @@ impl PaneTerminal {
         self.ghostty.bracketed_paste_enabled()
     }
 
+    pub fn application_cursor_enabled(&self) -> bool {
+        self.ghostty.application_cursor_enabled()
+    }
+
     pub fn focus_reporting_enabled(&self) -> bool {
         self.ghostty.focus_reporting_enabled()
     }
@@ -1723,6 +1727,10 @@ impl GhosttyPaneTerminal {
 
     pub fn bracketed_paste_enabled(&self) -> bool {
         self.mode_enabled(crate::ghostty::MODE_BRACKETED_PASTE)
+    }
+
+    pub fn application_cursor_enabled(&self) -> bool {
+        self.mode_enabled(crate::ghostty::MODE_APPLICATION_CURSOR_KEYS)
     }
 
     pub fn focus_reporting_enabled(&self) -> bool {

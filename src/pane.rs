@@ -3015,6 +3015,10 @@ impl PaneRuntime {
         self.terminal.bracketed_paste_enabled()
     }
 
+    pub fn application_cursor_enabled(&self) -> bool {
+        self.terminal.application_cursor_enabled()
+    }
+
     pub fn focus_reporting_enabled(&self) -> bool {
         self.terminal.focus_reporting_enabled()
     }
@@ -3456,6 +3460,31 @@ mod tests {
             "screen was {:?}",
             runtime.visible_text()
         );
+    }
+
+    /// Keys typed at a mirror are encoded here, from this copy's modes, so the
+    /// copy has to be in the modes the host terminal is in. The host sends them
+    /// as the escape sequences that set them, and an arrow then encodes the way
+    /// the host itself would have.
+    #[tokio::test]
+    async fn a_streamed_pane_encodes_keys_in_the_modes_the_host_sent() {
+        let (runtime, _requests) = streamed_test_runtime(40, 8);
+        let up = || {
+            runtime.encode_terminal_key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Up,
+                crossterm::event::KeyModifiers::empty(),
+            ))
+        };
+        assert_eq!(up(), b"\x1b[A");
+
+        runtime.apply_streamed_bytes(&crate::remote::mirror_stream::input_mode_bytes(true, 0));
+        assert_eq!(up(), b"\x1bOA");
+
+        runtime.apply_streamed_bytes(&crate::remote::mirror_stream::input_mode_bytes(false, 31));
+        assert_eq!(up(), b"\x1b[1;1:1A");
+
+        runtime.apply_streamed_bytes(&crate::remote::mirror_stream::input_mode_bytes(false, 0));
+        assert_eq!(up(), b"\x1b[A");
     }
 
     /// Typing into a mirror has nowhere local to go: it belongs to the host,

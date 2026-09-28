@@ -826,6 +826,24 @@ pub enum ServerMessage {
         /// Why it ended, when the server knows.
         reason: Option<String>,
     },
+
+    /// How an observed terminal wants keys encoded, sent when it changes.
+    ///
+    /// A frame is cells and a cursor, and says nothing about the modes an app
+    /// switched on, so a watcher that types into its copy would otherwise
+    /// encode every key for a terminal in default modes: an arrow as `ESC [ A`
+    /// to an app that asked for `ESC O A` or kitty's escape codes. Appended
+    /// last for the same reason as [`ServerMessage::ObservedTerminal`].
+    ObservedTerminalModes {
+        /// Terminal the modes belong to.
+        terminal_id: String,
+        /// The target string the client used.
+        target: String,
+        /// DECCKM: cursor keys as `ESC O x` rather than `ESC [ x`.
+        application_cursor: bool,
+        /// Current kitty keyboard flags; 0 when the protocol is off.
+        kitty_keyboard_flags: u16,
+    },
 }
 
 // ---------------------------------------------------------------------------

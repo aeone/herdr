@@ -62,6 +62,12 @@ pub(crate) enum MirrorStreamLine {
         terminal_id: String,
         reason: Option<String>,
     },
+    /// How the host terminal wants keys encoded; see [`input_mode_bytes`].
+    Modes {
+        terminal_id: String,
+        application_cursor: bool,
+        kitty_keyboard_flags: u16,
+    },
     Closed {
         reason: Option<String>,
     },
@@ -89,6 +95,12 @@ pub(crate) fn parse_stream_line(line: &str) -> Option<MirrorStreamLine> {
                 .and_then(|reason| reason.as_str())
                 .map(str::to_owned),
         }),
+        "terminal.modes" => Some(MirrorStreamLine::Modes {
+            terminal_id: value.get("terminal_id")?.as_str()?.to_owned(),
+            application_cursor: value.get("application_cursor")?.as_bool()?,
+            kitty_keyboard_flags: u16::try_from(value.get("kitty_keyboard_flags")?.as_u64()?)
+                .ok()?,
+        }),
         "terminal.closed" => Some(MirrorStreamLine::Closed {
             reason: value
                 .get("reason")
@@ -97,6 +109,19 @@ pub(crate) fn parse_stream_line(line: &str) -> Option<MirrorStreamLine> {
         }),
         _ => None,
     }
+}
+
+/// The escape sequences that put a terminal in these key-encoding modes: DECCKM
+/// set or reset, and the kitty keyboard flags replaced outright (`CSI = f ; 1 u`)
+/// rather than pushed, so repeating them never grows the local terminal's flag
+/// stack.
+pub(crate) fn input_mode_bytes(application_cursor: bool, kitty_keyboard_flags: u16) -> Vec<u8> {
+    let decckm = if application_cursor {
+        "\x1b[?1h"
+    } else {
+        "\x1b[?1l"
+    };
+    format!("{decckm}\x1b[={kitty_keyboard_flags};1u").into_bytes()
 }
 
 /// Whether what the far side said is a build that does not know the command.
@@ -200,6 +225,18 @@ impl MirrorStream {
                             target: reader_target.clone(),
                             terminal_id,
                             reason,
+                        },
+                        // Applied as the escape sequences that set them, into
+                        // the same local terminal the frames draw into, which
+                        // is what keys typed at the mirror are encoded from.
+                        MirrorStreamLine::Modes {
+                            terminal_id,
+                            application_cursor,
+                            kitty_keyboard_flags,
+                        } => AppEvent::MirrorFrame {
+                            target: reader_target.clone(),
+                            terminal_id,
+                            bytes: input_mode_bytes(application_cursor, kitty_keyboard_flags),
                         },
                         MirrorStreamLine::Closed { reason } => AppEvent::MirrorStreamClosed {
                             target: reader_target.clone(),
@@ -586,6 +623,22 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(line.trim()).expect("valid json");
         assert_eq!(value["targets"][0]["cols"], 1);
         assert_eq!(value["targets"][0]["rows"], 1);
+    }
+
+    #[test]
+    fn a_modes_line_is_read_as_the_modes_it_names() {
+        assert_eq!(
+            parse_stream_line(
+                r#"{"type":"terminal.modes","terminal_id":"term-a","target":"term-a","application_cursor":true,"kitty_keyboard_flags":31}"#
+            ),
+            Some(MirrorStreamLine::Modes {
+                terminal_id: "term-a".into(),
+                application_cursor: true,
+                kitty_keyboard_flags: 31,
+            })
+        );
+        assert_eq!(input_mode_bytes(true, 31), b"\x1b[?1h\x1b[=31;1u");
+        assert_eq!(input_mode_bytes(false, 0), b"\x1b[?1l\x1b[=0;1u");
     }
 
     #[test]

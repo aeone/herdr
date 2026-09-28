@@ -1082,6 +1082,18 @@ fn write_observed_terminal_output(mut stream: LocalStream) -> io::Result<()> {
                 "target": target,
                 "reason": reason,
             }),
+            Ok(ServerMessage::ObservedTerminalModes {
+                terminal_id,
+                target,
+                application_cursor,
+                kitty_keyboard_flags,
+            }) => serde_json::json!({
+                "type": "terminal.modes",
+                "terminal_id": terminal_id,
+                "target": target,
+                "application_cursor": application_cursor,
+                "kitty_keyboard_flags": kitty_keyboard_flags,
+            }),
             Ok(ServerMessage::ServerShutdown { reason }) => {
                 let line = serde_json::json!({"type": "terminal.closed", "reason": reason});
                 serde_json::to_writer(&mut stdout, &line)?;
@@ -1980,7 +1992,8 @@ async fn run_client_loop(
                 // these, and the TUI client never does; the mirror stream reads
                 // them on its own path.
                 ServerMessage::ObservedTerminal(_)
-                | ServerMessage::ObservedTerminalEnded { .. } => {}
+                | ServerMessage::ObservedTerminalEnded { .. }
+                | ServerMessage::ObservedTerminalModes { .. } => {}
                 ServerMessage::Frame(frame_data) => {
                     let frame_data = if state.draw_host_cursor {
                         render_ansi::frame_with_drawn_cursor(frame_data)

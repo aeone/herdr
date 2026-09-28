@@ -467,6 +467,16 @@ fn apply_terminal_attach_scroll(
     Ok(())
 }
 
+/// `(application_cursor, kitty_keyboard_flags)` for an observed terminal.
+fn observed_input_modes(runtime: &crate::terminal::TerminalRuntime) -> (bool, u16) {
+    let application_cursor = runtime.application_cursor_enabled();
+    let kitty_keyboard_flags = match runtime.keyboard_protocol() {
+        crate::input::KeyboardProtocol::Legacy => 0,
+        crate::input::KeyboardProtocol::Kitty { flags } => flags,
+    };
+    (application_cursor, kitty_keyboard_flags)
+}
+
 fn apply_terminal_attach_input(
     runtime: &crate::terminal::TerminalRuntime,
     data: Vec<u8>,
@@ -567,8 +577,9 @@ enum ObservedRender {
     Gone,
     /// Unmoved since we last rendered it, so there is nothing to do.
     Unchanged,
-    /// Rendered, tagged with how far the terminal had got.
-    Frame(u64, FrameData),
+    /// Rendered, tagged with how far the terminal had got and the key modes
+    /// it was in.
+    Frame(u64, FrameData, (bool, u16)),
 }
 
 impl HeadlessServer {
@@ -2149,6 +2160,7 @@ impl HeadlessServer {
                 resize: target.resize,
                 render_state,
                 last_output_seq,
+                last_input_modes: None,
             });
         }
 
@@ -4928,6 +4940,7 @@ impl HeadlessServer {
             rendered.push(ObservedRender::Frame(
                 seq,
                 FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
+                observed_input_modes(runtime),
             ));
         }
 
@@ -4960,7 +4973,30 @@ impl HeadlessServer {
                     index += 1;
                     continue;
                 }
-                ObservedRender::Frame(seq, frame) => (seq, frame),
+                ObservedRender::Frame(seq, frame, modes) => {
+                    // Before the frame, and whether or not the frame turns out
+                    // identical: switching a mode draws nothing.
+                    if observed.last_input_modes != Some(modes) {
+                        let message = ServerMessage::ObservedTerminalModes {
+                            terminal_id: observed.terminal_id.clone(),
+                            target: observed.target.clone(),
+                            application_cursor: modes.0,
+                            kitty_keyboard_flags: modes.1,
+                        };
+                        // A slot of its own, so the next frame cannot replace it.
+                        let key = format!("{}#modes", observed.terminal_id);
+                        let sent =
+                            Self::frame_server_message(&message)
+                                .ok()
+                                .is_some_and(|serialized| {
+                                    writer.render.try_send_observed(&key, serialized).is_ok()
+                                });
+                        if sent {
+                            observed.last_input_modes = Some(modes);
+                        }
+                    }
+                    (seq, frame)
+                }
             };
             index += 1;
 
@@ -7670,6 +7706,7 @@ next_tab = ""
             server.render_and_stream();
 
             let mut sizes: Vec<(String, u16, u16)> = Vec::new();
+            let mut modes: Vec<(String, bool, u16)> = Vec::new();
             while let Ok(bytes) = render_rx.try_recv() {
                 match read_server_message(bytes) {
                     ServerMessage::ObservedTerminal(observed) => sizes.push((
@@ -7677,17 +7714,32 @@ next_tab = ""
                         observed.frame.width,
                         observed.frame.height,
                     )),
+                    // Each terminal's key modes go out with its first frame, so
+                    // a watcher typing into it encodes keys the way it wants.
+                    ServerMessage::ObservedTerminalModes {
+                        terminal_id,
+                        application_cursor,
+                        kitty_keyboard_flags,
+                        ..
+                    } => modes.push((terminal_id, application_cursor, kitty_keyboard_flags)),
                     other => panic!("unexpected message for an observer: {other:?}"),
                 }
             }
             sizes.sort();
+            modes.sort();
 
             let mut expected = vec![
-                (terminal_id_string, 40, 10),
-                (second_terminal_string, 20, 5),
+                (terminal_id_string.clone(), 40, 10),
+                (second_terminal_string.clone(), 20, 5),
             ];
             expected.sort();
             assert_eq!(sizes, expected);
+            let mut expected_modes = vec![
+                (terminal_id_string, false, 0),
+                (second_terminal_string, false, 0),
+            ];
+            expected_modes.sort();
+            assert_eq!(modes, expected_modes);
 
             shutdown_test_runtimes(server);
         });

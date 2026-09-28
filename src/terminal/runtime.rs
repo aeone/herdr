@@ -366,6 +366,10 @@ impl TerminalRuntime {
         self.0.bracketed_paste_enabled()
     }
 
+    pub fn application_cursor_enabled(&self) -> bool {
+        self.0.application_cursor_enabled()
+    }
+
     pub fn mouse_reporting_enabled(&self) -> bool {
         self.0.mouse_reporting_enabled()
     }
