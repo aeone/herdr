@@ -584,6 +584,12 @@ impl PaneTerminal {
         self.ghostty.clear_agent_osc_state()
     }
 
+    /// Drops kitty keyboard flags a foreground agent left behind; see
+    /// [`GhosttyPaneTerminal::reset_kitty_keyboard_after_agent_exit`].
+    pub fn reset_kitty_keyboard_after_agent_exit(&self) -> bool {
+        self.ghostty.reset_kitty_keyboard_after_agent_exit()
+    }
+
     pub fn keyboard_protocol(
         &self,
         fallback: crate::input::KeyboardProtocol,
@@ -1250,6 +1256,28 @@ impl GhosttyPaneTerminal {
         if let Ok(mut core) = self.core.lock() {
             core.agent_osc_state.clear_retained();
         }
+    }
+
+    /// Drops the kitty keyboard flags an agent left on when its process exited
+    /// and the shell took the pane back. Returns whether any were on.
+    ///
+    /// An agent is meant to pop what it pushed on the way out, and one that
+    /// quits abruptly does not -- Claude's "No, exit" among them. The terminal
+    /// then goes on encoding every key as a kitty escape code for a shell that
+    /// cannot read them: `ESC [ 1 ; 1 : 1 A` for an arrow, `ESC [ 13 u` for
+    /// Enter. Written into the terminal and its handoff tracker alike, so a live
+    /// update does not bring the flags back.
+    pub fn reset_kitty_keyboard_after_agent_exit(&self) -> bool {
+        const RESET: &[u8] = b"\x1b[<99u\x1b[=0;1u";
+        let Ok(mut core) = self.core.lock() else {
+            return false;
+        };
+        if core.terminal.kitty_keyboard_flags().unwrap_or(0) == 0 {
+            return false;
+        }
+        core.kitty_keyboard.observe(RESET);
+        core.terminal.write(RESET);
+        true
     }
 
     pub fn process_pty_bytes(
@@ -4696,6 +4724,44 @@ mod tests {
             Some(crate::input::KeyboardProtocol::Kitty { flags: 5 })
         );
         assert_eq!(encoded, b"\x1b[13;2u");
+    }
+
+    /// An agent that exits without popping its kitty flags leaves the shell
+    /// getting kitty escape codes for every key. The reset clears the whole
+    /// stack in the terminal and in the handoff tracker, and leaves a terminal
+    /// that never turned them on alone.
+    #[cfg(unix)]
+    #[test]
+    fn kitty_flags_left_by_an_exited_agent_are_reset_everywhere() {
+        let (tx, _rx) = mpsc::channel(4);
+        let terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let pane = GhosttyPaneTerminal::new(terminal, tx.clone()).unwrap();
+        let pane_id = PaneId::from_raw(1);
+        assert!(!pane.reset_kitty_keyboard_after_agent_exit());
+
+        pane.process_pty_bytes(pane_id, 0, b"\x1b[>1u\x1b[>31u", &tx);
+        assert_eq!(
+            pane.keyboard_protocol(),
+            Some(crate::input::KeyboardProtocol::Kitty { flags: 31 })
+        );
+
+        assert!(pane.reset_kitty_keyboard_after_agent_exit());
+
+        assert_eq!(
+            pane.keyboard_protocol(),
+            Some(crate::input::KeyboardProtocol::Legacy)
+        );
+        let (restored_tx, _restored_rx) = mpsc::channel(4);
+        let restored_terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        let restored = GhosttyPaneTerminal::new(restored_terminal, restored_tx).unwrap();
+        if let Some(ansi) = pane.kitty_keyboard_state_ansi() {
+            restored.seed_keyboard_protocol_ansi(&ansi);
+        }
+        assert_eq!(
+            restored.keyboard_protocol(),
+            Some(crate::input::KeyboardProtocol::Legacy),
+            "a live update must not bring the flags back"
+        );
     }
 
     #[cfg(unix)]

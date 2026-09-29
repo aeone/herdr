@@ -805,6 +805,9 @@ fn spawn_basic_detection_task(
                     foreground_is_pane_shell,
                     foreground_shell_exit_reported,
                 );
+                let exit_newly_seen = foreground_action
+                    == ForegroundShellAgentAction::ReportProcessExit
+                    && !pending_foreground_shell_clear;
                 let changed = apply_foreground_shell_agent_action(
                     &mut agent_presence,
                     foreground_action,
@@ -813,6 +816,14 @@ fn spawn_basic_detection_task(
                     &mut pending_foreground_shell_clear,
                     &mut foreground_shell_exit_reported,
                 );
+                // Once per exit, not on every pass while it is pending: a shell
+                // that turns kitty keys on for itself must be left to.
+                if exit_newly_seen && terminal.reset_kitty_keyboard_after_agent_exit() {
+                    debug!(
+                        pane = pane_id.raw(),
+                        "reset kitty keyboard flags left on by an exited agent"
+                    );
+                }
                 last_foreground_pgid = tracked_process_group_id;
                 if new_agent.is_some() {
                     acquisition_started_at = None;
