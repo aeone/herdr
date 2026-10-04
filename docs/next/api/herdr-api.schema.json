@@ -970,6 +970,19 @@
             "alternate_screen": {
               "type": "boolean"
             },
+            "application_cursor": {
+              "default": false,
+              "description": "DECCKM: arrows are encoded as `ESC O x` rather than `ESC [ x`.\n\nWith `kitty_keyboard_flags`, how keys sent to this pane are encoded. On\na mirror these are its local copy's, which has to match the host's for\nkeys typed at the mirror to reach the app the way it asked.",
+              "type": "boolean"
+            },
+            "kitty_keyboard_flags": {
+              "default": 0,
+              "description": "Current kitty keyboard protocol flags; 0 when the protocol is off.",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
             "mouse_alternate_scroll": {
               "type": "boolean"
             },
@@ -7769,6 +7782,19 @@
           "properties": {
             "alternate_screen": {
               "type": "boolean"
+            },
+            "application_cursor": {
+              "default": false,
+              "description": "DECCKM: arrows are encoded as `ESC O x` rather than `ESC [ x`.\n\nWith `kitty_keyboard_flags`, how keys sent to this pane are encoded. On\na mirror these are its local copy's, which has to match the host's for\nkeys typed at the mirror to reach the app the way it asked.",
+              "type": "boolean"
+            },
+            "kitty_keyboard_flags": {
+              "default": 0,
+              "description": "Current kitty keyboard protocol flags; 0 when the protocol is off.",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
             },
             "mouse_alternate_scroll": {
               "type": "boolean"

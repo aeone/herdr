@@ -546,6 +546,16 @@ pub struct PaneInputInfo {
     /// Unix ms of the most recent wheel event on this pane, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wheel_last_ms: Option<u64>,
+    /// DECCKM: arrows are encoded as `ESC O x` rather than `ESC [ x`.
+    ///
+    /// With `kitty_keyboard_flags`, how keys sent to this pane are encoded. On
+    /// a mirror these are its local copy's, which has to match the host's for
+    /// keys typed at the mirror to reach the app the way it asked.
+    #[serde(default)]
+    pub application_cursor: bool,
+    /// Current kitty keyboard protocol flags; 0 when the protocol is off.
+    #[serde(default)]
+    pub kitty_keyboard_flags: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

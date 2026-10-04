@@ -514,11 +514,12 @@ impl App {
         // Recomputed per request rather than cached: it reports what the
         // application has enabled right now, which is the whole point when
         // scrolling misbehaves intermittently.
-        let input = self
+        let runtime = self
             .state
-            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)
-            .and_then(|runtime| runtime.wheel_routing_detail())
-            .map(|detail| {
+            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id);
+        let input = runtime
+            .and_then(|runtime| Some((runtime, runtime.wheel_routing_detail()?)))
+            .map(|(runtime, detail)| {
                 let tally = self
                     .state
                     .wheel_events
@@ -534,6 +535,11 @@ impl App {
                     wheel_alternate_scroll: tally.alternate_scroll,
                     wheel_host_scroll: tally.host_scroll,
                     wheel_last_ms: (tally.last_ms > 0).then_some(tally.last_ms),
+                    application_cursor: runtime.application_cursor_enabled(),
+                    kitty_keyboard_flags: match runtime.keyboard_protocol() {
+                        crate::input::KeyboardProtocol::Legacy => 0,
+                        crate::input::KeyboardProtocol::Kitty { flags } => flags,
+                    },
                 }
             });
         let focused = self.state.active == Some(ws_idx)
