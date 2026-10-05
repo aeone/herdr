@@ -1805,7 +1805,7 @@ impl App {
         // when the set has not changed, or an idle terminal never repaints and
         // the mirror stays blank.
         if let Some(stream) = self.mirror_streams.get_mut(&host) {
-            stream.forget_targets();
+            stream.restart_target(&tab.remote_terminal);
         }
         Ok(self.state.workspaces.len() - 1)
     }
@@ -2267,7 +2267,7 @@ impl App {
             // This pane is empty and the host sends differences against the last
             // frame it sent, so the set has to be named again or it never paints.
             if let Some(stream) = self.mirror_streams.get_mut(&space.target) {
-                stream.forget_targets();
+                stream.restart_target(&spec.remote_terminal);
             }
         }
         Ok(())

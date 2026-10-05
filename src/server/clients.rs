@@ -44,6 +44,9 @@ pub(crate) struct ObservedTerminal {
     /// The key-encoding modes last sent for this terminal, as
     /// `(application_cursor, kitty_keyboard_flags)`, so they go out on change.
     pub(crate) last_input_modes: Option<(bool, u16)>,
+    /// When the modes last went out, so they are repeated every so often: a
+    /// watcher's copy that drifted for any reason corrects itself.
+    pub(crate) last_input_modes_at: Option<std::time::Instant>,
 }
 
 pub(crate) type RenderTarget = (

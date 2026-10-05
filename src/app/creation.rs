@@ -514,9 +514,9 @@ impl App {
         // Recomputed per request rather than cached: it reports what the
         // application has enabled right now, which is the whole point when
         // scrolling misbehaves intermittently.
-        let runtime = self
-            .state
-            .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id);
+        let runtime =
+            self.state
+                .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id);
         let input = runtime
             .and_then(|runtime| Some((runtime, runtime.wheel_routing_detail()?)))
             .map(|(runtime, detail)| {

@@ -1127,6 +1127,9 @@ struct ObserveManyTarget {
     /// size it. Absent from an older watcher, which never resized anything.
     #[serde(default)]
     resize: bool,
+    /// The watcher rebuilt its copy of this terminal; see `ObservedTarget`.
+    #[serde(default)]
+    fresh: bool,
 }
 
 fn observe_many_command_from_json(raw: &str) -> Result<ClientMessage, String> {
@@ -1151,6 +1154,7 @@ fn observe_many_command_from_json(raw: &str) -> Result<ClientMessage, String> {
                         cols: target.cols,
                         rows: target.rows,
                         resize: target.resize,
+                        fresh: target.fresh,
                     })
                     .collect(),
             })

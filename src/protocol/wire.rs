@@ -681,6 +681,12 @@ pub struct ObservedTarget {
     /// resized anything.
     #[serde(default)]
     pub resize: bool,
+    /// The watcher's copy of this terminal is new -- rebuilt on its side --
+    /// so it has to start over from a whole frame and the terminal's key
+    /// modes, rather than from differences against a frame it never saw.
+    /// Absent from an older watcher.
+    #[serde(default)]
+    pub fresh: bool,
 }
 
 /// A frame for one of several terminals observed over a single connection.

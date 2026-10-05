@@ -467,6 +467,36 @@ fn apply_terminal_attach_scroll(
     Ok(())
 }
 
+/// Tells a watcher an observed terminal's key modes, when they have changed
+/// since it was last told or `always` says to repeat them. Remembered only once
+/// queued, so a send that fails is tried again.
+fn send_observed_modes(
+    writer: &crate::server::client_transport::ClientWriter,
+    observed: &mut crate::server::clients::ObservedTerminal,
+    modes: (bool, u16),
+    always: bool,
+) -> bool {
+    if !always && observed.last_input_modes == Some(modes) {
+        return false;
+    }
+    let message = ServerMessage::ObservedTerminalModes {
+        terminal_id: observed.terminal_id.clone(),
+        target: observed.target.clone(),
+        application_cursor: modes.0,
+        kitty_keyboard_flags: modes.1,
+    };
+    // A slot of its own, so the next frame cannot replace it.
+    let key = format!("{}#modes", observed.terminal_id);
+    let sent = HeadlessServer::frame_server_message(&message)
+        .ok()
+        .is_some_and(|serialized| writer.render.try_send_observed(&key, serialized).is_ok());
+    if sent {
+        observed.last_input_modes = Some(modes);
+        observed.last_input_modes_at = Some(Instant::now());
+    }
+    sent
+}
+
 /// `(application_cursor, kitty_keyboard_flags)` for an observed terminal.
 fn observed_input_modes(runtime: &crate::terminal::TerminalRuntime) -> (bool, u16) {
     let application_cursor = runtime.application_cursor_enabled();
@@ -569,7 +599,17 @@ fn spawn_windows_client_accept_thread(
 /// One observed terminal as a render pass sees it: which terminal, the target
 /// the watcher named it by, the size to draw it at, and how far it had got when
 /// we last drew it.
-type ObservedPlan = (String, String, (u16, u16), Option<u64>);
+type ObservedPlan = (
+    String,
+    String,
+    (u16, u16),
+    Option<u64>,
+    Option<(bool, u16)>,
+    Option<Instant>,
+);
+
+/// How often an observed terminal's key modes are repeated though unchanged.
+const OBSERVED_MODES_REPEAT: Duration = Duration::from_secs(10);
 
 /// What one pass made of an observed terminal.
 enum ObservedRender {
@@ -580,6 +620,9 @@ enum ObservedRender {
     /// Rendered, tagged with how far the terminal had got and the key modes
     /// it was in.
     Frame(u64, FrameData, (bool, u16)),
+    /// Nothing new to draw, but the watcher has not been told this terminal's
+    /// key modes since it named it, so they go out on their own.
+    ModesOnly((bool, u16)),
 }
 
 impl HeadlessServer {
@@ -2145,9 +2188,11 @@ impl HeadlessServer {
                     }
                 }
             }
-            let (render_state, last_output_seq) = carried
-                .remove(&(terminal_id.clone(), size))
-                .unwrap_or_else(|| {
+            // A fresh copy on the watcher's side starts over: a whole frame and
+            // its modes, not differences against what its old copy had.
+            let kept = carried.remove(&(terminal_id.clone(), size));
+            let (render_state, last_output_seq) =
+                kept.filter(|_| !target.fresh).unwrap_or_else(|| {
                     (
                         crate::server::clients::ClientRenderState::new(encoding),
                         None,
@@ -2161,6 +2206,7 @@ impl HeadlessServer {
                 render_state,
                 last_output_seq,
                 last_input_modes: None,
+                last_input_modes_at: None,
             });
         }
 
@@ -4908,6 +4954,8 @@ impl HeadlessServer {
                     observed.target.clone(),
                     observed.size,
                     observed.last_output_seq,
+                    observed.last_input_modes,
+                    observed.last_input_modes_at,
                 )
             })
             .collect();
@@ -4919,7 +4967,8 @@ impl HeadlessServer {
         // map are both on `self`, and a terminal that has gone is reported once
         // and dropped rather than taking the rest of the connection with it.
         let mut rendered: Vec<ObservedRender> = Vec::with_capacity(plan.len());
-        for (terminal_id, _, (cols, rows), last_seq) in &plan {
+        let now = Instant::now();
+        for (terminal_id, _, (cols, rows), last_seq, last_modes, last_modes_at) in &plan {
             let Some(runtime) = self.runtime_for_terminal_id_string(terminal_id) else {
                 rendered.push(ObservedRender::Gone);
                 continue;
@@ -4930,7 +4979,16 @@ impl HeadlessServer {
             // -- and the person using it a visibly slower keyboard.
             let seq = runtime.output_seq();
             if *last_seq == Some(seq) {
-                rendered.push(ObservedRender::Unchanged);
+                // Naming a set again keeps each terminal's render baseline but
+                // not the modes it last sent, and a terminal that has printed
+                // nothing since would otherwise never send them again.
+                let due = last_modes_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= OBSERVED_MODES_REPEAT);
+                rendered.push(if last_modes.is_none() || due {
+                    ObservedRender::ModesOnly(observed_input_modes(runtime))
+                } else {
+                    ObservedRender::Unchanged
+                });
                 continue;
             }
             let area = Rect::new(0, 0, (*cols).max(1), (*rows).max(1));
@@ -4959,7 +5017,7 @@ impl HeadlessServer {
             let Some(observed) = client.observed.get_mut(index) else {
                 break;
             };
-            let (seq, frame) = match frame {
+            let (seq, frame, modes_told) = match frame {
                 ObservedRender::Gone => {
                     ended.push(ServerMessage::ObservedTerminalEnded {
                         terminal_id: observed.terminal_id.clone(),
@@ -4973,29 +5031,19 @@ impl HeadlessServer {
                     index += 1;
                     continue;
                 }
+                ObservedRender::ModesOnly(modes) => {
+                    send_observed_modes(&writer, observed, modes, true);
+                    index += 1;
+                    continue;
+                }
                 ObservedRender::Frame(seq, frame, modes) => {
                     // Before the frame, and whether or not the frame turns out
                     // identical: switching a mode draws nothing.
-                    if observed.last_input_modes != Some(modes) {
-                        let message = ServerMessage::ObservedTerminalModes {
-                            terminal_id: observed.terminal_id.clone(),
-                            target: observed.target.clone(),
-                            application_cursor: modes.0,
-                            kitty_keyboard_flags: modes.1,
-                        };
-                        // A slot of its own, so the next frame cannot replace it.
-                        let key = format!("{}#modes", observed.terminal_id);
-                        let sent =
-                            Self::frame_server_message(&message)
-                                .ok()
-                                .is_some_and(|serialized| {
-                                    writer.render.try_send_observed(&key, serialized).is_ok()
-                                });
-                        if sent {
-                            observed.last_input_modes = Some(modes);
-                        }
-                    }
-                    (seq, frame)
+                    let due = observed.last_input_modes_at.is_none_or(|at| {
+                        now.saturating_duration_since(at) >= OBSERVED_MODES_REPEAT
+                    });
+                    let told = send_observed_modes(&writer, observed, modes, due);
+                    (seq, frame, told)
                 }
             };
             index += 1;
@@ -5012,6 +5060,13 @@ impl HeadlessServer {
             let ServerMessage::Terminal(terminal_frame) = prepared.message().clone() else {
                 continue;
             };
+            // A full redraw is what a watcher's freshly built copy of the pane
+            // starts from, and that copy starts in default modes too.
+            if terminal_frame.full && !modes_told {
+                if let Some(modes) = observed.last_input_modes {
+                    send_observed_modes(&writer, observed, modes, true);
+                }
+            }
             let message = ServerMessage::ObservedTerminal(crate::protocol::ObservedTerminalFrame {
                 terminal_id: observed.terminal_id.clone(),
                 target: observed.target.clone(),
@@ -7614,6 +7669,7 @@ next_tab = ""
                         cols: 40,
                         rows: 10,
                         resize: false,
+                        fresh: false,
                     }],
                 })
             );
@@ -7626,6 +7682,7 @@ next_tab = ""
                         cols: 80,
                         rows: 24,
                         resize: false,
+                        fresh: false,
                     }],
                 }),
                 "naming the set again should be allowed"
@@ -7692,12 +7749,14 @@ next_tab = ""
                             cols: 40,
                             rows: 10,
                             resize: false,
+                            fresh: false,
                         },
                         crate::protocol::ObservedTarget {
                             target: second_terminal_string.clone(),
                             cols: 20,
                             rows: 5,
                             resize: false,
+                            fresh: false,
                         },
                     ],
                 })
@@ -7749,6 +7808,163 @@ next_tab = ""
     /// so rendering every watched terminal each pass was three quarters of a
     /// core spent proving nothing had changed -- and a slower keyboard for
     /// whoever was using the machine.
+    /// Naming the same set again keeps a terminal's render baseline, so a quiet
+    /// terminal draws nothing, but its key modes still have to go out: the
+    /// watcher may be holding a copy of the pane that was built since it last
+    /// heard them, and that copy is in default modes.
+    #[test]
+    fn naming_a_quiet_terminal_again_resends_its_key_modes() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (writer, _control_rx, render_rx) = test_client_writer_with_render_capacity(8);
+            assert!(server.handle_server_event(ServerEvent::ClientConnected {
+                client_id: 7,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: None,
+                direct_attach_requested: true,
+                direct_graphics: false,
+                writer,
+            }));
+            if let Some(runtime) = server.app.terminal_runtimes.get(&terminal_id) {
+                runtime.test_process_pty_bytes(b"\x1b[?1h\x1b[>5u");
+            }
+            let observe = |server: &mut HeadlessServer| {
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 40,
+                        rows: 10,
+                        resize: false,
+                        fresh: false,
+                    }],
+                })
+            };
+            let modes_sent = |render_rx: &std::sync::mpsc::Receiver<Vec<u8>>| {
+                std::iter::from_fn(|| render_rx.try_recv().ok())
+                    .filter_map(|bytes| match read_server_message(bytes) {
+                        ServerMessage::ObservedTerminalModes {
+                            application_cursor,
+                            kitty_keyboard_flags,
+                            ..
+                        } => Some((application_cursor, kitty_keyboard_flags)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            assert!(observe(server));
+            server.render_and_stream();
+            assert_eq!(modes_sent(&render_rx), vec![(true, 5)]);
+
+            server.render_and_stream();
+            assert_eq!(modes_sent(&render_rx), vec![], "unchanged, so not repeated");
+
+            assert!(observe(server));
+            server.render_and_stream();
+            assert_eq!(
+                modes_sent(&render_rx),
+                vec![(true, 5)],
+                "named again, so told again though nothing was drawn"
+            );
+
+            // And repeated every so often regardless, so a watcher's copy that
+            // drifted for any reason puts itself right.
+            if let Some(observed) = server
+                .clients
+                .get_mut(&7)
+                .and_then(|client| client.observed.first_mut())
+            {
+                observed.last_input_modes_at =
+                    Instant::now().checked_sub(OBSERVED_MODES_REPEAT + Duration::from_secs(1));
+            }
+            server.render_and_stream();
+            assert_eq!(modes_sent(&render_rx), vec![(true, 5)], "repeated once due");
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
+    /// A watcher that rebuilt its copy of a terminal names it as fresh, and the
+    /// host starts that one over: a whole frame and its key modes, even though
+    /// nothing has been printed and the size is the same.
+    #[test]
+    fn a_terminal_named_fresh_starts_over_with_a_whole_frame_and_its_modes() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (writer, _control_rx, render_rx) = test_client_writer_with_render_capacity(8);
+            assert!(server.handle_server_event(ServerEvent::ClientConnected {
+                client_id: 7,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: None,
+                direct_attach_requested: true,
+                direct_graphics: false,
+                writer,
+            }));
+            if let Some(runtime) = server.app.terminal_runtimes.get(&terminal_id) {
+                runtime.test_process_pty_bytes(b"\x1b[>5uhello");
+            }
+            let observe = |server: &mut HeadlessServer, fresh: bool| {
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 40,
+                        rows: 10,
+                        resize: false,
+                        fresh,
+                    }],
+                })
+            };
+            // (full frames, modes) received.
+            let received = |render_rx: &std::sync::mpsc::Receiver<Vec<u8>>| {
+                let mut full_frames = 0;
+                let mut modes = Vec::new();
+                for bytes in std::iter::from_fn(|| render_rx.try_recv().ok()) {
+                    match read_server_message(bytes) {
+                        ServerMessage::ObservedTerminal(observed) if observed.frame.full => {
+                            full_frames += 1;
+                        }
+                        ServerMessage::ObservedTerminalModes {
+                            kitty_keyboard_flags,
+                            ..
+                        } => modes.push(kitty_keyboard_flags),
+                        _ => {}
+                    }
+                }
+                (full_frames, modes)
+            };
+
+            assert!(observe(server, false));
+            server.render_and_stream();
+            assert_eq!(received(&render_rx), (1, vec![5]));
+
+            assert!(observe(server, false));
+            server.render_and_stream();
+            assert_eq!(
+                received(&render_rx),
+                (0, vec![5]),
+                "named again: baseline kept, so no frame, but the modes again"
+            );
+
+            assert!(observe(server, true));
+            server.render_and_stream();
+            assert_eq!(
+                received(&render_rx),
+                (1, vec![5]),
+                "named fresh: a whole frame and the modes"
+            );
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
     #[test]
     fn a_watched_terminal_that_has_not_moved_is_not_rendered_again() {
         with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
@@ -7773,6 +7989,7 @@ next_tab = ""
                         cols: 40,
                         rows: 10,
                         resize: false,
+                        fresh: false,
                     }],
                 })
             );
@@ -7855,6 +8072,7 @@ next_tab = ""
                         cols: 100,
                         rows: 40,
                         resize: true,
+                        fresh: false,
                     }],
                 })
             );
@@ -7874,6 +8092,7 @@ next_tab = ""
                         cols: 80,
                         rows: 24,
                         resize: true,
+                        fresh: false,
                     }],
                 })
             );
@@ -7890,6 +8109,7 @@ next_tab = ""
                         cols: 20,
                         rows: 5,
                         resize: false,
+                        fresh: false,
                     }],
                 })
             );
@@ -7920,6 +8140,7 @@ next_tab = ""
                             cols: $cols,
                             rows: 10,
                             resize: false,
+                            fresh: false,
                         }],
                     })
                 };
@@ -7972,12 +8193,14 @@ next_tab = ""
                             cols: 40,
                             rows: 10,
                             resize: false,
+                            fresh: false,
                         },
                         crate::protocol::ObservedTarget {
                             target: terminal_id_string.clone(),
                             cols: 40,
                             rows: 10,
                             resize: false,
+                            fresh: false,
                         },
                     ],
                 })
@@ -8029,6 +8252,7 @@ next_tab = ""
                         cols: 40,
                         rows: 10,
                         resize: false,
+                        fresh: false,
                     }],
                 })
             );
