@@ -2188,11 +2188,9 @@ impl HeadlessServer {
                     }
                 }
             }
-            // A fresh copy on the watcher's side starts over: a whole frame and
-            // its modes, not differences against what its old copy had.
-            let kept = carried.remove(&(terminal_id.clone(), size));
-            let (render_state, last_output_seq) =
-                kept.filter(|_| !target.fresh).unwrap_or_else(|| {
+            let (render_state, last_output_seq) = carried
+                .remove(&(terminal_id.clone(), size))
+                .unwrap_or_else(|| {
                     (
                         crate::server::clients::ClientRenderState::new(encoding),
                         None,
@@ -7669,7 +7667,6 @@ next_tab = ""
                         cols: 40,
                         rows: 10,
                         resize: false,
-                        fresh: false,
                     }],
                 })
             );
@@ -7682,7 +7679,6 @@ next_tab = ""
                         cols: 80,
                         rows: 24,
                         resize: false,
-                        fresh: false,
                     }],
                 }),
                 "naming the set again should be allowed"
@@ -7749,14 +7745,12 @@ next_tab = ""
                             cols: 40,
                             rows: 10,
                             resize: false,
-                            fresh: false,
                         },
                         crate::protocol::ObservedTarget {
                             target: second_terminal_string.clone(),
                             cols: 20,
                             rows: 5,
                             resize: false,
-                            fresh: false,
                         },
                     ],
                 })
@@ -7839,7 +7833,6 @@ next_tab = ""
                         cols: 40,
                         rows: 10,
                         resize: false,
-                        fresh: false,
                     }],
                 })
             };
@@ -7888,11 +7881,11 @@ next_tab = ""
         });
     }
 
-    /// A watcher that rebuilt its copy of a terminal names it as fresh, and the
-    /// host starts that one over: a whole frame and its key modes, even though
-    /// nothing has been printed and the size is the same.
+    /// A watcher that rebuilt its copy of a terminal names the set without it
+    /// and then with it, and the host starts that one over: a whole frame and
+    /// its key modes, though nothing has been printed and the size is the same.
     #[test]
-    fn a_terminal_named_fresh_starts_over_with_a_whole_frame_and_its_modes() {
+    fn a_terminal_dropped_and_named_again_starts_over_with_a_whole_frame_and_its_modes() {
         with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
             let (writer, _control_rx, render_rx) = test_client_writer_with_render_capacity(8);
             assert!(server.handle_server_event(ServerEvent::ClientConnected {
@@ -7910,16 +7903,18 @@ next_tab = ""
             if let Some(runtime) = server.app.terminal_runtimes.get(&terminal_id) {
                 runtime.test_process_pty_bytes(b"\x1b[>5uhello");
             }
-            let observe = |server: &mut HeadlessServer, fresh: bool| {
+            let observe = |server: &mut HeadlessServer, watched: bool| {
                 server.handle_server_event(ServerEvent::ClientObserveTerminals {
                     client_id: 7,
-                    targets: vec![crate::protocol::ObservedTarget {
-                        target: terminal_id_string.clone(),
-                        cols: 40,
-                        rows: 10,
-                        resize: false,
-                        fresh,
-                    }],
+                    targets: watched
+                        .then(|| crate::protocol::ObservedTarget {
+                            target: terminal_id_string.clone(),
+                            cols: 40,
+                            rows: 10,
+                            resize: false,
+                        })
+                        .into_iter()
+                        .collect(),
                 })
             };
             // (full frames, modes) received.
@@ -7941,11 +7936,11 @@ next_tab = ""
                 (full_frames, modes)
             };
 
-            assert!(observe(server, false));
+            assert!(observe(server, true));
             server.render_and_stream();
             assert_eq!(received(&render_rx), (1, vec![5]));
 
-            assert!(observe(server, false));
+            assert!(observe(server, true));
             server.render_and_stream();
             assert_eq!(
                 received(&render_rx),
@@ -7953,12 +7948,13 @@ next_tab = ""
                 "named again: baseline kept, so no frame, but the modes again"
             );
 
+            observe(server, false);
             assert!(observe(server, true));
             server.render_and_stream();
             assert_eq!(
                 received(&render_rx),
                 (1, vec![5]),
-                "named fresh: a whole frame and the modes"
+                "dropped then named: a whole frame and the modes"
             );
 
             shutdown_test_runtimes(server);
@@ -7989,7 +7985,6 @@ next_tab = ""
                         cols: 40,
                         rows: 10,
                         resize: false,
-                        fresh: false,
                     }],
                 })
             );
@@ -8072,7 +8067,6 @@ next_tab = ""
                         cols: 100,
                         rows: 40,
                         resize: true,
-                        fresh: false,
                     }],
                 })
             );
@@ -8092,7 +8086,6 @@ next_tab = ""
                         cols: 80,
                         rows: 24,
                         resize: true,
-                        fresh: false,
                     }],
                 })
             );
@@ -8109,7 +8102,6 @@ next_tab = ""
                         cols: 20,
                         rows: 5,
                         resize: false,
-                        fresh: false,
                     }],
                 })
             );
@@ -8140,7 +8132,6 @@ next_tab = ""
                             cols: $cols,
                             rows: 10,
                             resize: false,
-                            fresh: false,
                         }],
                     })
                 };
@@ -8193,14 +8184,12 @@ next_tab = ""
                             cols: 40,
                             rows: 10,
                             resize: false,
-                            fresh: false,
                         },
                         crate::protocol::ObservedTarget {
                             target: terminal_id_string.clone(),
                             cols: 40,
                             rows: 10,
                             resize: false,
-                            fresh: false,
                         },
                     ],
                 })
@@ -8252,7 +8241,6 @@ next_tab = ""
                         cols: 40,
                         rows: 10,
                         resize: false,
-                        fresh: false,
                     }],
                 })
             );

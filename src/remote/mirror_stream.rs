@@ -33,25 +33,17 @@ pub(crate) struct MirrorStreamTarget {
     pub(crate) resize: bool,
 }
 
-/// The line asking the host to watch exactly this set of terminals, with the
-/// ones in `fresh` marked to start over from a whole frame.
-pub(crate) fn observe_request_line(
-    targets: &[MirrorStreamTarget],
-    fresh: &std::collections::HashSet<String>,
-) -> String {
+/// The line asking the host to watch exactly this set of terminals.
+pub(crate) fn observe_request_line(targets: &[MirrorStreamTarget]) -> String {
     let targets: Vec<serde_json::Value> = targets
         .iter()
         .map(|target| {
-            let mut value = serde_json::json!({
+            serde_json::json!({
                 "target": target.terminal_id,
                 "cols": target.cols.max(1),
                 "rows": target.rows.max(1),
                 "resize": target.resize,
-            });
-            if fresh.contains(&target.terminal_id) {
-                value["fresh"] = serde_json::Value::Bool(true);
-            }
-            value
+            })
         })
         .collect();
     let mut line = serde_json::json!({"type": "terminal.observe", "targets": targets}).to_string();
@@ -345,18 +337,29 @@ impl MirrorStream {
     }
 
     /// The copy of `terminal_id` on this side was rebuilt: the next telling of
-    /// the set names it again and marks it to start over, so the host sends a
-    /// whole frame and its key modes instead of carrying on from a baseline the
-    /// new copy never had. Naming the set again alone does not do that -- a
-    /// watcher re-sends its whole set whenever any pane changes size, and the
-    /// host rightly keeps every unchanged terminal's baseline when it does.
+    /// the set first leaves it out and then names it, so the host drops what it
+    /// had for it and starts over with a whole frame and its key modes, instead
+    /// of carrying on from a baseline the new copy never had. Naming the set
+    /// again alone does not do that -- a watcher re-sends its whole set
+    /// whenever any pane changes size, and the host rightly keeps every
+    /// unchanged terminal's baseline when it does. Leaving it out needs nothing
+    /// from the host that any version does not already do.
     pub(crate) fn restart_target(&mut self, terminal_id: &str) {
         self.fresh.insert(terminal_id.to_owned());
         self.forget_targets();
     }
 
     pub(crate) fn set_targets(&mut self, targets: Vec<MirrorStreamTarget>) -> std::io::Result<()> {
-        let line = observe_request_line(&targets, &self.fresh);
+        let mut line = String::new();
+        if !self.fresh.is_empty() {
+            let without_fresh: Vec<MirrorStreamTarget> = targets
+                .iter()
+                .filter(|target| !self.fresh.contains(&target.terminal_id))
+                .cloned()
+                .collect();
+            line.push_str(&observe_request_line(&without_fresh));
+        }
+        line.push_str(&observe_request_line(&targets));
         #[cfg(test)]
         self.told.push(targets.clone());
         match self.stdin.as_mut() {
@@ -613,23 +616,20 @@ mod tests {
 
     #[test]
     fn the_observe_line_carries_a_size_per_terminal() {
-        let line = observe_request_line(
-            &[
-                MirrorStreamTarget {
-                    terminal_id: "term_a".into(),
-                    cols: 100,
-                    rows: 30,
-                    resize: false,
-                },
-                MirrorStreamTarget {
-                    terminal_id: "term_b".into(),
-                    cols: 40,
-                    rows: 8,
-                    resize: false,
-                },
-            ],
-            &std::collections::HashSet::new(),
-        );
+        let line = observe_request_line(&[
+            MirrorStreamTarget {
+                terminal_id: "term_a".into(),
+                cols: 100,
+                rows: 30,
+                resize: false,
+            },
+            MirrorStreamTarget {
+                terminal_id: "term_b".into(),
+                cols: 40,
+                rows: 8,
+                resize: false,
+            },
+        ]);
         let value: serde_json::Value = serde_json::from_str(line.trim()).expect("valid json");
         assert_eq!(value["type"], "terminal.observe");
         assert_eq!(value["targets"][0]["target"], "term_a");
@@ -642,24 +642,21 @@ mod tests {
     /// for at zero rows renders nothing at all.
     #[test]
     fn an_empty_size_is_asked_for_as_one_cell() {
-        let line = observe_request_line(
-            &[MirrorStreamTarget {
-                terminal_id: "term_a".into(),
-                cols: 0,
-                rows: 0,
-                resize: false,
-            }],
-            &std::collections::HashSet::new(),
-        );
+        let line = observe_request_line(&[MirrorStreamTarget {
+            terminal_id: "term_a".into(),
+            cols: 0,
+            rows: 0,
+            resize: false,
+        }]);
         let value: serde_json::Value = serde_json::from_str(line.trim()).expect("valid json");
         assert_eq!(value["targets"][0]["cols"], 1);
         assert_eq!(value["targets"][0]["rows"], 1);
     }
 
-    /// A terminal rebuilt here is marked fresh in the next set the host is
-    /// told, and only that one: after it, the set is plain again.
+    /// A terminal rebuilt here is left out of the next set and then named, so
+    /// the host starts it over; the telling after that is a plain one.
     #[test]
-    fn a_rebuilt_terminal_is_marked_fresh_once() {
+    fn a_rebuilt_terminal_is_dropped_then_named_once() {
         let target = |id: &str| MirrorStreamTarget {
             terminal_id: id.into(),
             cols: 80,
@@ -670,19 +667,10 @@ mod tests {
 
         stream.restart_target("term-b");
         assert!(!stream.is_watching(&[target("term-a"), target("term-b")]));
-        let line = observe_request_line(&[target("term-a"), target("term-b")], &stream.fresh);
-        assert!(line.contains(r#""fresh":true"#));
-        assert_eq!(
-            line.matches("fresh").count(),
-            1,
-            "only the rebuilt one: {line}"
-        );
-
         stream
             .set_targets(vec![target("term-a"), target("term-b")])
             .expect("a test connection records the set");
-        let line = observe_request_line(&[target("term-a"), target("term-b")], &stream.fresh);
-        assert!(!line.contains("fresh"), "marked once, then plain: {line}");
+        assert!(stream.fresh.is_empty(), "marked once, then plain");
     }
 
     #[test]
