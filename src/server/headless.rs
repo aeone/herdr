@@ -617,9 +617,9 @@ enum ObservedRender {
     Gone,
     /// Unmoved since we last rendered it, so there is nothing to do.
     Unchanged,
-    /// Rendered, tagged with how far the terminal had got and the key modes
-    /// it was in.
-    Frame(u64, FrameData, (bool, u16)),
+    /// Rendered, tagged with how far the terminal had got, the key modes it
+    /// was in, and whether its app had bracketed paste on.
+    Frame(u64, FrameData, (bool, u16), bool),
     /// Nothing new to draw, but the watcher has not been told this terminal's
     /// key modes since it named it, so they go out on their own.
     ModesOnly((bool, u16)),
@@ -2205,6 +2205,7 @@ impl HeadlessServer {
                 last_output_seq,
                 last_input_modes: None,
                 last_input_modes_at: None,
+                last_bracketed_paste: None,
             });
         }
 
@@ -4997,6 +4998,7 @@ impl HeadlessServer {
                 seq,
                 FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, cursor, &hyperlinks),
                 observed_input_modes(runtime),
+                runtime.bracketed_paste_enabled(),
             ));
         }
 
@@ -5015,7 +5017,7 @@ impl HeadlessServer {
             let Some(observed) = client.observed.get_mut(index) else {
                 break;
             };
-            let (seq, frame, modes_told) = match frame {
+            let (seq, frame, modes_told, bracketed_paste) = match frame {
                 ObservedRender::Gone => {
                     ended.push(ServerMessage::ObservedTerminalEnded {
                         terminal_id: observed.terminal_id.clone(),
@@ -5034,14 +5036,14 @@ impl HeadlessServer {
                     index += 1;
                     continue;
                 }
-                ObservedRender::Frame(seq, frame, modes) => {
+                ObservedRender::Frame(seq, frame, modes, bracketed_paste) => {
                     // Before the frame, and whether or not the frame turns out
                     // identical: switching a mode draws nothing.
                     let due = observed.last_input_modes_at.is_none_or(|at| {
                         now.saturating_duration_since(at) >= OBSERVED_MODES_REPEAT
                     });
                     let told = send_observed_modes(&writer, observed, modes, due);
-                    (seq, frame, told)
+                    (seq, frame, told, bracketed_paste)
                 }
             };
             index += 1;
@@ -5055,9 +5057,23 @@ impl HeadlessServer {
                 observed.last_output_seq = Some(seq);
                 continue;
             };
-            let ServerMessage::Terminal(terminal_frame) = prepared.message().clone() else {
+            let ServerMessage::Terminal(mut terminal_frame) = prepared.message().clone() else {
                 continue;
             };
+            // Bracketed paste rides in the frame itself, as the escape sequence
+            // that sets it: the watcher's copy of the terminal then has it on
+            // when the app does, and wraps a paste the way the app asked
+            // instead of typing it, where every newline is Enter. In the bytes
+            // rather than a message of its own, so no build has to understand
+            // anything new to receive it.
+            if terminal_frame.full || observed.last_bracketed_paste != Some(bracketed_paste) {
+                let set: &[u8] = if bracketed_paste {
+                    b"\x1b[?2004h"
+                } else {
+                    b"\x1b[?2004l"
+                };
+                terminal_frame.bytes.splice(0..0, set.iter().copied());
+            }
             // A full redraw is what a watcher's freshly built copy of the pane
             // starts from, and that copy starts in default modes too.
             if terminal_frame.full && !modes_told {
@@ -5092,6 +5108,7 @@ impl HeadlessServer {
                     // goes for how far we have rendered.
                     observed.render_state.commit_sent_frame(prepared);
                     observed.last_output_seq = Some(seq);
+                    observed.last_bracketed_paste = Some(bracketed_paste);
                     sent_any = true;
                 }
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -7806,6 +7823,57 @@ next_tab = ""
     /// terminal draws nothing, but its key modes still have to go out: the
     /// watcher may be holding a copy of the pane that was built since it last
     /// heard them, and that copy is in default modes.
+    /// A watcher's copy has to know the app turned bracketed paste on, or it
+    /// sends pastes as typing. The mode goes out in the frame bytes.
+    #[test]
+    fn a_watched_terminals_bracketed_paste_rides_in_its_frames() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (writer, _control_rx, render_rx) = test_client_writer_with_render_capacity(8);
+            assert!(server.handle_server_event(ServerEvent::ClientConnected {
+                client_id: 7,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: None,
+                direct_attach_requested: true,
+                direct_graphics: false,
+                writer,
+            }));
+            if let Some(runtime) = server.app.terminal_runtimes.get(&terminal_id) {
+                runtime.test_process_pty_bytes(b"\x1b[?2004hready");
+            }
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 40,
+                        rows: 10,
+                        resize: false,
+                    }],
+                })
+            );
+            server.render_and_stream();
+
+            let frames: Vec<Vec<u8>> = std::iter::from_fn(|| render_rx.try_recv().ok())
+                .filter_map(|bytes| match read_server_message(bytes) {
+                    ServerMessage::ObservedTerminal(observed) => Some(observed.frame.bytes),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(frames.len(), 1);
+            assert!(
+                frames[0].starts_with(b"\x1b[?2004h"),
+                "frame starts {:?}",
+                String::from_utf8_lossy(&frames[0][..frames[0].len().min(20)])
+            );
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
     #[test]
     fn naming_a_quiet_terminal_again_resends_its_key_modes() {
         with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {

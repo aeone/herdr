@@ -47,6 +47,9 @@ pub(crate) struct ObservedTerminal {
     /// When the modes last went out, so they are repeated every so often: a
     /// watcher's copy that drifted for any reason corrects itself.
     pub(crate) last_input_modes_at: Option<std::time::Instant>,
+    /// Whether the terminal's app last had bracketed paste on, as written into
+    /// this watcher's frames, so the change goes out with the next one.
+    pub(crate) last_bracketed_paste: Option<bool>,
 }
 
 pub(crate) type RenderTarget = (
