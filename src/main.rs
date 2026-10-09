@@ -239,6 +239,9 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Keep mirrors of an unreachable host in place, greyed, or hide them until it
 # answers again.
 # toggle_offline_mirrors = ""
+# Open the session navigator to put what you pick on a wall: a new tile of the
+# wall you are looking at, or a new wall when you are not looking at one.
+# wall_add = ""
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
 # They are independent from focus_pane_*. Do not include prefix+, esc, enter, tab, or 1..9 here.

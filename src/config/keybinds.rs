@@ -322,6 +322,7 @@ pub struct Keybinds {
     pub close_workspace: ActionKeybinds,
     pub workspace_picker: ActionKeybinds,
     pub goto: ActionKeybinds,
+    pub wall_add: ActionKeybinds,
     pub detach: ActionKeybinds,
     pub reload_config: ActionKeybinds,
     pub open_notification_target: ActionKeybinds,
@@ -496,6 +497,7 @@ impl Config {
             close_workspace: empty_action!(),
             workspace_picker: empty_action!(),
             goto: empty_action!(),
+            wall_add: empty_action!(),
             detach: empty_action!(),
             reload_config: empty_action!(),
             open_notification_target: empty_action!(),
@@ -646,6 +648,7 @@ impl Config {
             apply_action!(keybinds.close_workspace, close_workspace, source);
             apply_action!(keybinds.workspace_picker, workspace_picker, source);
             apply_action!(keybinds.goto, goto, source);
+            apply_action!(keybinds.wall_add, wall_add, source);
             apply_action!(keybinds.detach, detach, source);
             apply_action!(keybinds.reload_config, reload_config, source);
             apply_action!(
@@ -1622,6 +1625,64 @@ next_tab = "prefix+n"
                 KeyModifiers::empty()
             ))]
         );
+    }
+
+    #[test]
+    fn wall_add_is_unset_by_default() {
+        let kb = Config::default().keybinds();
+        assert!(kb.wall_add.bindings.is_empty());
+    }
+
+    #[test]
+    fn a_ctrl_shift_letter_binding_matches_only_the_shifted_chord() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+wall_add = ["ctrl+shift+g", "prefix+G"]
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+
+        // Kitty keyboard reporting tells the shifted chord apart, whether it
+        // reports the base key with the shifted one alongside or the shifted
+        // key itself.
+        assert!(kb.wall_add.matches_direct_key(
+            &TerminalKey::new(KeyCode::Char('g'), ctrl_shift).with_shifted_codepoint('G' as u32)
+        ));
+        assert!(kb
+            .wall_add
+            .matches_direct_key(&TerminalKey::new(KeyCode::Char('G'), ctrl_shift)));
+        // Plain ctrl+g is left to the terminal. In legacy encoding the shifted
+        // chord arrives as exactly this, so there it never reaches wall_add.
+        assert!(!kb
+            .wall_add
+            .matches_direct_key(&TerminalKey::new(KeyCode::Char('g'), KeyModifiers::CONTROL)));
+
+        assert!(kb
+            .wall_add
+            .matches_prefix_key(&TerminalKey::new(KeyCode::Char('G'), KeyModifiers::SHIFT)));
+        assert!(!kb
+            .wall_add
+            .matches_prefix_key(&TerminalKey::new(KeyCode::Char('g'), KeyModifiers::empty())));
+    }
+
+    #[test]
+    fn prefix_capital_g_for_wall_add_takes_new_worktree_s_default() {
+        let config: Config = toml::from_str(
+            r#"
+[keys]
+wall_add = "prefix+G"
+"#,
+        )
+        .unwrap();
+        let kb = config.keybinds();
+
+        // prefix+G is prefix+shift+g, which new_worktree has by default; a
+        // binding someone wrote wins over one they did not.
+        assert!(kb.new_worktree.bindings.is_empty());
+        assert_eq!(kb.wall_add.bindings.len(), 1);
     }
 
     #[test]

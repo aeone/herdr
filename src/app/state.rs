@@ -1056,8 +1056,33 @@ pub(crate) enum NavigatorStateFilter {
     Done,
 }
 
+/// What choosing an entry in the navigator does.
+///
+/// The navigator is one list with one set of keys whatever it is for; only
+/// what happens on enter or click differs, so the purpose rides along with
+/// the rest of its state rather than being a mode of its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) enum NavigatorPurpose {
+    /// Go to the entry, as `goto` does.
+    #[default]
+    Goto,
+    /// Show the entry's terminal on a wall: as a new tile of the wall that
+    /// was active when the navigator opened, or, with none, on a new wall.
+    AddToWall { wall_workspace_id: Option<String> },
+}
+
+/// A terminal to put on a wall, asked for from the navigator and carried out
+/// by the app, which owns the runtimes a new tile needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WallAddRequest {
+    /// The wall to add to, or `None` for a new wall.
+    pub wall_workspace_id: Option<String>,
+    pub terminal_id: crate::terminal::TerminalId,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NavigatorState {
+    pub purpose: NavigatorPurpose,
     pub query: String,
     pub selected: usize,
     pub scroll: usize,
@@ -1655,6 +1680,8 @@ pub struct AppState {
     pub request_submit_worktree_open: bool,
     pub request_submit_worktree_remove: bool,
     pub request_reload_config: bool,
+    /// Set when the navigator chose a terminal to put on a wall.
+    pub request_wall_add: Option<WallAddRequest>,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
@@ -2352,6 +2379,7 @@ impl AppState {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
+            request_wall_add: None,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,

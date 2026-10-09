@@ -9,6 +9,7 @@
 //! Walls are runtime-only and are not persisted, the same as mirrors: the
 //! terminals a wall shows need not come back under the same ids.
 
+use crate::api::schema::{Method, WorkspaceWallAddParams, WorkspaceWallParams};
 use crate::app::state::AppState;
 use crate::app::{App, Mode};
 use crate::terminal::TerminalId;
@@ -223,6 +224,41 @@ impl App {
         Ok(added)
     }
 
+    /// Carries out what the navigator asked to put on a wall, through the
+    /// API so it is announced like any other change. Returns whether there
+    /// was anything to do.
+    pub(crate) fn apply_requested_wall_add(&mut self) -> bool {
+        let Some(request) = self.state.request_wall_add.take() else {
+            return false;
+        };
+        let terminal_ids = vec![request.terminal_id.to_string()];
+        let response = match request.wall_workspace_id {
+            Some(workspace_id) => self.dispatch_runtime_mutation(
+                "tui.workspace.wall_add",
+                Method::WorkspaceWallAdd(WorkspaceWallAddParams {
+                    workspace_id: Some(workspace_id),
+                    terminal_ids,
+                }),
+            ),
+            None => self.dispatch_runtime_mutation(
+                "tui.workspace.create_wall",
+                Method::WorkspaceCreateWall(WorkspaceWallParams {
+                    terminal_ids,
+                    focus: true,
+                    label: None,
+                }),
+            ),
+        };
+        if let Ok(error) = serde_json::from_str::<crate::api::schema::ErrorResponse>(&response) {
+            tracing::warn!(
+                code = %error.error.code,
+                message = %error.error.message,
+                "could not put the chosen terminal on a wall"
+            );
+        }
+        true
+    }
+
     /// Ends the views of a terminal that is shutting down, leaving a line in
     /// each saying why it went still.
     pub(crate) fn end_views_of_terminal(&mut self, terminal_id: &TerminalId) {
@@ -237,6 +273,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::state::{NavigatorPurpose, NavigatorTarget};
     use crate::layout::PaneId;
     use crate::terminal::TerminalRuntime;
     use ratatui::backend::TestBackend;
@@ -578,6 +615,69 @@ mod tests {
         (app, fixture)
     }
 
+    /// Selects the navigator row for `target` and chooses it, as enter does.
+    fn choose_in_navigator(app: &mut App, target: NavigatorTarget) -> bool {
+        let rows = app.state.navigator_rows_from(&app.terminal_runtimes);
+        app.state.navigator.selected = rows
+            .iter()
+            .position(|row| row.target == target)
+            .expect("the navigator lists the target");
+        app.state
+            .accept_navigator_selection_from(&app.terminal_runtimes)
+    }
+
+    fn pane_row(app: &App, ws_idx: usize) -> NavigatorTarget {
+        let pane_id = app.state.workspaces[ws_idx].tabs[0].root_pane;
+        NavigatorTarget::Pane {
+            ws_idx,
+            tab_idx: 0,
+            pane_id,
+        }
+    }
+
+    fn shown_by(workspace: &Workspace) -> Vec<Option<TerminalId>> {
+        let tab = &workspace.tabs[0];
+        tab.layout
+            .pane_ids()
+            .iter()
+            .map(|pane_id| tab.panes[pane_id].view_of.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn choosing_a_pane_while_on_a_wall_adds_a_tile_for_it() {
+        let (mut app, fixture) = app_with_wall();
+        app.state.workspaces[2].tabs[0]
+            .layout
+            .focus_pane(fixture.tiles[1]);
+        app.state
+            .open_wall_add_navigator_from(&app.terminal_runtimes);
+        let target = pane_row(&app, 1);
+
+        assert!(choose_in_navigator(&mut app, target));
+        assert_eq!(app.state.mode, Mode::Terminal);
+        assert!(app.apply_requested_wall_add());
+
+        let wall = &app.state.workspaces[2];
+        assert_eq!(app.state.workspaces.len(), 3);
+        assert_eq!(app.state.active, Some(2));
+        assert_eq!(
+            shown_by(wall),
+            vec![
+                Some(fixture.target.clone()),
+                Some(fixture.other.clone()),
+                Some(fixture.other.clone()),
+            ]
+        );
+        // Focus stays on the tile that had it, so nothing changes size.
+        assert_eq!(wall.tabs[0].layout.focused(), fixture.tiles[1]);
+        let added = wall.tabs[0].layout.pane_ids()[2];
+        let placeholder = wall.tabs[0].panes[&added].attached_terminal_id.clone();
+        assert!(app.terminal_runtimes.get(&placeholder).is_some());
+        assert!(app.state.terminals.contains_key(&placeholder));
+        assert_eq!(wall.public_pane_numbers.len(), 3);
+    }
+
     #[tokio::test]
     async fn a_wall_with_new_tiles_is_laid_out_as_an_even_grid() {
         let (mut app, fixture) = app_with_wall();
@@ -597,6 +697,84 @@ mod tests {
             .all(|rect| rect.width == 60 && rect.height == 20));
         // The tiles that were there keep their place at the top.
         assert_eq!(&tab.layout.pane_ids()[..2], &fixture.tiles[..]);
+    }
+
+    #[tokio::test]
+    async fn choosing_a_tile_of_the_wall_adds_what_it_shows() {
+        let (mut app, fixture) = app_with_wall();
+        app.state
+            .open_wall_add_navigator_from(&app.terminal_runtimes);
+        let tile = NavigatorTarget::Pane {
+            ws_idx: 2,
+            tab_idx: 0,
+            pane_id: fixture.tiles[1],
+        };
+
+        assert!(choose_in_navigator(&mut app, tile));
+        app.apply_requested_wall_add();
+
+        let shown = shown_by(&app.state.workspaces[2]);
+        assert_eq!(shown.len(), 3);
+        assert_eq!(shown[2], Some(fixture.other.clone()));
+    }
+
+    #[tokio::test]
+    async fn choosing_a_space_or_tab_adds_its_focused_pane() {
+        let (app, fixture) = app_with_wall();
+        assert_eq!(
+            app.state
+                .navigator_wall_target(&NavigatorTarget::Workspace { ws_idx: 0 }),
+            Some(fixture.target.clone())
+        );
+        assert_eq!(
+            app.state.navigator_wall_target(&NavigatorTarget::Tab {
+                ws_idx: 1,
+                tab_idx: 0
+            }),
+            Some(fixture.other.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn choosing_a_pane_away_from_any_wall_opens_a_new_one() {
+        let (mut app, fixture) = app_with_wall();
+        app.state.active = Some(0);
+        app.state
+            .open_wall_add_navigator_from(&app.terminal_runtimes);
+        let target = pane_row(&app, 1);
+
+        assert!(choose_in_navigator(&mut app, target));
+        app.apply_requested_wall_add();
+
+        assert_eq!(app.state.workspaces.len(), 4);
+        assert_eq!(app.state.active, Some(3));
+        let wall = &app.state.workspaces[3];
+        assert!(wall.wall.is_some());
+        assert_eq!(shown_by(wall), vec![Some(fixture.other.clone())]);
+        // The wall that was not active is left as it was.
+        assert_eq!(app.state.workspaces[2].tabs[0].panes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_navigator_opened_normally_goes_to_what_is_chosen() {
+        let (mut app, _fixture) = app_with_wall();
+        app.state
+            .open_wall_add_navigator_from(&app.terminal_runtimes);
+        assert!(matches!(
+            app.state.navigator.purpose,
+            NavigatorPurpose::AddToWall {
+                wall_workspace_id: Some(_)
+            }
+        ));
+        app.state.mode = Mode::Terminal;
+
+        app.state.open_navigator_from(&app.terminal_runtimes);
+        assert_eq!(app.state.navigator.purpose, NavigatorPurpose::Goto);
+        let target = pane_row(&app, 1);
+        assert!(choose_in_navigator(&mut app, target));
+
+        assert_eq!(app.state.request_wall_add, None);
+        assert_eq!(app.state.active, Some(1));
     }
 
     #[tokio::test]

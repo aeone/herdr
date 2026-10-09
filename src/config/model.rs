@@ -386,6 +386,10 @@ pub struct KeysConfig {
     pub workspace_picker: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
     pub goto: BindingConfig,
+    /// Open the session navigator to put what is chosen on a wall: a new
+    /// tile of the active wall, or a new wall when the active workspace is
+    /// not one. Unset by default.
+    pub wall_add: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
     pub navigate_workspace_up: BindingConfig,
     /// Move workspace selection down in navigate mode. Default: "down".
@@ -524,6 +528,8 @@ pub(crate) struct KeysConfigOverlay {
     #[serde(skip_serializing_if = "Option::is_none")]
     goto: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    wall_add: Option<BindingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     navigate_workspace_up: Option<BindingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     navigate_workspace_down: Option<BindingConfig>,
@@ -659,6 +665,7 @@ impl<'de> Deserialize<'de> for KeysConfig {
         apply_field!(close_workspace);
         apply_field!(workspace_picker);
         apply_field!(goto);
+        apply_field!(wall_add);
         apply_field!(navigate_workspace_up);
         apply_field!(navigate_workspace_down);
         apply_field!(navigate_pane_left);
@@ -769,6 +776,7 @@ impl KeysConfig {
         copy_effective_action_field!(close_workspace, keybinds.close_workspace);
         copy_effective_action_field!(workspace_picker, keybinds.workspace_picker);
         copy_effective_action_field!(goto, keybinds.goto);
+        copy_effective_action_field!(wall_add, keybinds.wall_add);
         copy_effective_action_field!(navigate_workspace_up, keybinds.navigate.workspace_up);
         copy_effective_action_field!(navigate_workspace_down, keybinds.navigate.workspace_down);
         copy_effective_action_field!(navigate_pane_left, keybinds.navigate.pane_left);
@@ -1188,6 +1196,7 @@ impl Default for KeysConfig {
             close_workspace: BindingConfig::one("prefix+shift+d"),
             workspace_picker: BindingConfig::one("prefix+w"),
             goto: BindingConfig::one("prefix+g"),
+            wall_add: BindingConfig::empty(),
             navigate_workspace_up: BindingConfig::one("up"),
             navigate_workspace_down: BindingConfig::one("down"),
             navigate_pane_left: BindingConfig::one("h"),

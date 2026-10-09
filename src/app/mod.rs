@@ -704,6 +704,7 @@ impl App {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
+            request_wall_add: None,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -1249,6 +1250,10 @@ impl App {
 
             if let Some(ws_idx) = self.state.request_remove_linked_worktree.take() {
                 self.open_remove_linked_worktree_confirmation(ws_idx);
+                needs_render = true;
+            }
+
+            if self.apply_requested_wall_add() {
                 needs_render = true;
             }
 

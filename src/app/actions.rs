@@ -359,6 +359,7 @@ impl AppState {
         &mut self,
         terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
     ) {
+        self.navigator.purpose = super::state::NavigatorPurpose::Goto;
         self.navigator.query.clear();
         self.navigator.search_focused = false;
         self.navigator.state_filter = None;
@@ -374,6 +375,21 @@ impl AppState {
             .current_navigator_row_index_from(terminal_runtimes)
             .unwrap_or(0);
         self.ensure_navigator_selection_visible_from(terminal_runtimes);
+    }
+
+    /// Opens the navigator to choose a terminal for a wall: the active
+    /// workspace, if it is a wall, or a new one otherwise.
+    pub(crate) fn open_wall_add_navigator_from(
+        &mut self,
+        terminal_runtimes: &crate::terminal::TerminalRuntimeRegistry,
+    ) {
+        self.open_navigator_from(terminal_runtimes);
+        let wall_workspace_id = self
+            .active
+            .and_then(|ws_idx| self.workspaces.get(ws_idx))
+            .filter(|ws| ws.wall.is_some())
+            .map(|ws| ws.id.clone());
+        self.navigator.purpose = super::state::NavigatorPurpose::AddToWall { wall_workspace_id };
     }
 
     #[cfg(test)]
@@ -792,7 +808,65 @@ impl AppState {
         else {
             return false;
         };
+        if let super::state::NavigatorPurpose::AddToWall { wall_workspace_id } =
+            self.navigator.purpose.clone()
+        {
+            return self.request_wall_add_of(row.target, wall_workspace_id);
+        }
         self.focus_navigator_target(row.target)
+    }
+
+    /// The terminal a navigator entry stands for on a wall: a pane's own, or
+    /// for a tab or workspace the pane focused in it -- the one `herdr focus`
+    /// shows for a space. A view stands for the terminal it shows.
+    pub(crate) fn navigator_wall_target(
+        &self,
+        target: &NavigatorTarget,
+    ) -> Option<crate::terminal::TerminalId> {
+        let (ws_idx, pane_id) = match *target {
+            NavigatorTarget::Workspace { ws_idx } => {
+                (ws_idx, self.workspaces.get(ws_idx)?.focused_pane_id()?)
+            }
+            NavigatorTarget::Tab { ws_idx, tab_idx } => (
+                ws_idx,
+                self.workspaces
+                    .get(ws_idx)?
+                    .tabs
+                    .get(tab_idx)?
+                    .layout
+                    .focused(),
+            ),
+            NavigatorTarget::Pane {
+                ws_idx, pane_id, ..
+            } => (ws_idx, pane_id),
+        };
+        let pane = self.workspaces.get(ws_idx)?.pane_state(pane_id)?;
+        self.resolve_wall_target(pane.attached_terminal_id.as_str())
+    }
+
+    /// Asks the app to put a navigator entry's terminal on a wall, and closes
+    /// the navigator the way choosing an entry always does. An entry that
+    /// stands for no terminal -- a view whose terminal has gone -- leaves the
+    /// navigator open, as an entry that cannot be gone to does.
+    fn request_wall_add_of(
+        &mut self,
+        target: NavigatorTarget,
+        wall_workspace_id: Option<String>,
+    ) -> bool {
+        let Some(terminal_id) = self.navigator_wall_target(&target) else {
+            return false;
+        };
+        self.request_wall_add = Some(super::state::WallAddRequest {
+            wall_workspace_id,
+            terminal_id,
+        });
+        self.navigator.purpose = super::state::NavigatorPurpose::Goto;
+        self.mode = if self.active.is_some() {
+            Mode::Terminal
+        } else {
+            Mode::Navigate
+        };
+        true
     }
 
     pub(crate) fn focus_navigator_target(&mut self, target: NavigatorTarget) -> bool {

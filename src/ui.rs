@@ -1670,6 +1670,7 @@ mod tests {
                 "rename agent: on its own host, if it is a mirror",
                 "spaces listed under agents: hide or show",
                 "offline mirrors: keep or hide",
+                "add to wall: pick a pane for this wall, or a new one",
             ]
         );
         assert!(groups[0].1.iter().all(|(key, _)| key == "unset"));

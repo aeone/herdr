@@ -1189,6 +1189,11 @@ impl HeadlessServer {
             crate::render_prof::event("full_render_cause.deferred_worktree_dialog");
         }
 
+        if self.app.apply_requested_wall_add() {
+            needs_render = true;
+            crate::render_prof::event("full_render_cause.deferred_wall_add");
+        }
+
         if self.app.state.request_submit_worktree_create {
             self.app.state.request_submit_worktree_create = false;
             self.app.submit_worktree_create_via_api();

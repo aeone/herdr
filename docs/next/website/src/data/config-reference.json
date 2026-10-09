@@ -320,6 +320,12 @@
           "description": "Open the session navigator."
         },
         {
+          "key": "keys.wall_add",
+          "type": "keybinding",
+          "default": "unset",
+          "description": "Open the session navigator to put the chosen pane, tab or workspace on a wall: as a new tile of the active wall, or on a new wall when the active workspace is not one. Unset by default."
+        },
+        {
           "key": "keys.navigate_workspace_up",
           "type": "keybinding",
           "default": "\"up\"",

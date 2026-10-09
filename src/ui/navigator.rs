@@ -13,8 +13,8 @@ use super::{
     widgets::{panel_contrast_fg, render_panel_shell},
 };
 use crate::app::state::{
-    navigator_display_lines, AppState, NavigatorDisplayLine, NavigatorRow, NavigatorStateFilter,
-    NavigatorTarget,
+    navigator_display_lines, AppState, NavigatorDisplayLine, NavigatorPurpose, NavigatorRow,
+    NavigatorStateFilter, NavigatorTarget,
 };
 use crate::terminal::TerminalRuntimeRegistry;
 
@@ -91,16 +91,30 @@ fn render_search(app: &AppState, frame: &mut Frame, area: Rect) {
             app,
         ),
         None if query.is_empty() => spans.push(Span::styled(
-            "search panes",
+            match &app.navigator.purpose {
+                NavigatorPurpose::Goto => "search panes",
+                NavigatorPurpose::AddToWall {
+                    wall_workspace_id: Some(_),
+                } => "add to wall: search panes",
+                NavigatorPurpose::AddToWall {
+                    wall_workspace_id: None,
+                } => "new wall: search panes",
+            },
             Style::default().fg(p.overlay0),
         )),
         None => spans.push(Span::styled(query.to_string(), Style::default().fg(p.text))),
     }
+    // The count ends a column short of the right edge whatever came before
+    // it, so the longer placeholder of a wall-adding navigator does not push
+    // it off.
+    let used: usize = spans.iter().map(|span| span.width()).sum();
+    let count_text = format!("{count} panes");
+    let pad = (area.width as usize)
+        .saturating_sub(used + 1)
+        .saturating_sub(count_text.chars().count())
+        .max(1);
     spans.push(Span::styled(
-        format!(
-            "{count:>width$} panes",
-            width = area.width.saturating_sub(16) as usize
-        ),
+        format!("{}{count_text}", " ".repeat(pad)),
         Style::default().fg(p.overlay0),
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -532,6 +546,21 @@ fn display_state(state: crate::detect::AgentState, seen: bool) -> &'static str {
     }
 }
 
+/// What enter does, as the footer says it. The navigator looks the same
+/// whatever it was opened for, so this and the search placeholder are where
+/// it says when choosing will put something on a wall rather than go there.
+fn enter_label(app: &AppState) -> &'static str {
+    match &app.navigator.purpose {
+        NavigatorPurpose::Goto => " switch  ",
+        NavigatorPurpose::AddToWall {
+            wall_workspace_id: Some(_),
+        } => " add to wall  ",
+        NavigatorPurpose::AddToWall {
+            wall_workspace_id: None,
+        } => " new wall  ",
+    }
+}
+
 fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
     if area.height == 0 {
         return;
@@ -542,7 +571,7 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
     let line = if app.navigator.search_focused {
         Line::from(vec![
             Span::styled(" enter", key),
-            Span::styled(" switch  ", dim),
+            Span::styled(enter_label(app), dim),
             Span::styled("↑↓", key),
             Span::styled(" move  ", dim),
             Span::styled("ctrl+u", key),
@@ -553,7 +582,7 @@ fn render_footer(app: &AppState, frame: &mut Frame, area: Rect) {
     } else {
         Line::from(vec![
             Span::styled(" enter", key),
-            Span::styled(" switch  ", dim),
+            Span::styled(enter_label(app), dim),
             Span::styled("/", key),
             Span::styled(" search  ", dim),
             Span::styled("b/w/i/d/a", key),
