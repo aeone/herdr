@@ -128,6 +128,9 @@ pub struct App {
     pub(crate) input_rx: Option<mpsc::Receiver<crate::raw_input::RawInputEvent>>,
     pub(crate) last_terminal_size: Option<(u16, u16)>,
     pub(crate) config_diagnostic_deadline: Option<Instant>,
+    /// Fork-overlay warnings already put on screen, so each is shown once
+    /// when it appears rather than again on every manifest refresh.
+    pub(crate) reported_overlay_warnings: Vec<String>,
     pub(crate) toast_deadline: Option<Instant>,
     pub(crate) copy_feedback_deadline: Option<Instant>,
     pub(crate) last_api_notification_at: Option<Instant>,
@@ -911,6 +914,7 @@ impl App {
 
         let mut app = Self {
             config_diagnostic_deadline: None,
+            reported_overlay_warnings: Vec::new(),
             toast_deadline: None,
             copy_feedback_deadline: None,
             last_api_notification_at: None,
@@ -1001,6 +1005,7 @@ impl App {
         };
         app.configure_tab_bar_status(&config.ui.tab_bar_right, &config.ui.tab_bar_right_separator);
         app.configure_window_title(&config.ui.window_title);
+        app.surface_agent_manifest_overlay_warnings();
         app
     }
 

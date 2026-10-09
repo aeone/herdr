@@ -382,6 +382,7 @@ impl App {
         let pane_updates = self.state.handle_app_event(ev);
         if let Some(agents) = manifest_update_agents {
             self.reset_agent_detection_for_agents(&agents);
+            self.surface_agent_manifest_overlay_warnings();
         }
         if let Some((pane_id, agent)) = released_agent {
             if pane_updates.iter().any(|update| update.pane_id == pane_id) {
@@ -804,6 +805,46 @@ impl App {
         }
     }
 
+    /// Puts a fork-overlay warning on screen when one first appears.
+    ///
+    /// The warning lives in the manifest summaries, which are refreshed at
+    /// startup, when upstream manifests are downloaded, and on every manifest
+    /// API call -- so it is compared against what was already shown and only a
+    /// new one is raised, on the same timed status line config problems use.
+    /// A config error already on that line has no deadline and is not
+    /// replaced: it is the more urgent of the two, and `herdr server
+    /// agent-manifests` still reports the overlay warning.
+    pub(crate) fn surface_agent_manifest_overlay_warnings(&mut self) {
+        let warnings: Vec<String> = self
+            .state
+            .agent_manifest_summaries
+            .iter()
+            .filter_map(|summary| summary.overlay_warning.clone())
+            .collect();
+        if warnings == self.reported_overlay_warnings {
+            return;
+        }
+        let fresh: Vec<&str> = warnings
+            .iter()
+            .filter(|warning| !self.reported_overlay_warnings.contains(warning))
+            .map(String::as_str)
+            .collect();
+        let message = (!fresh.is_empty()).then(|| fresh.join("\n"));
+        self.reported_overlay_warnings = warnings;
+        let Some(message) = message else {
+            return;
+        };
+        let config_error_showing =
+            self.state.config_diagnostic.is_some() && self.config_diagnostic_deadline.is_none();
+        if config_error_showing {
+            return;
+        }
+        self.state.config_diagnostic = Some(message);
+        self.config_diagnostic_deadline = Some(Instant::now() + Duration::from_secs(10));
+        self.render_dirty.request_generic();
+        self.render_notify.notify_one();
+    }
+
     pub(crate) fn sync_toast_deadline(
         &mut self,
         previous_toast: Option<crate::app::state::ToastNotification>,
@@ -1038,6 +1079,7 @@ impl App {
             }
             Method::ServerAgentManifests(_) => {
                 self.state.refresh_agent_manifest_summaries();
+                self.surface_agent_manifest_overlay_warnings();
                 let update_status = crate::detect::manifest_update::load_status();
                 SuccessResponse {
                     id: request.id,
@@ -1057,6 +1099,7 @@ impl App {
             Method::ServerReloadAgentManifests(_) => {
                 let summaries = crate::detect::manifest::reload_manifests();
                 self.state.agent_manifest_summaries = summaries.clone();
+                self.surface_agent_manifest_overlay_warnings();
                 let update_status = crate::detect::manifest_update::load_status();
                 self.reset_all_agent_detection_runtimes();
                 SuccessResponse {
@@ -1424,6 +1467,8 @@ fn agent_manifest_info(
         remote_update_error: remote.as_ref().and_then(|status| status.last_error.clone()),
         remote_last_checked_unix: remote.and_then(|status| status.last_checked_unix),
         warning: summary.warning,
+        overlay_base_version: summary.overlay_base_version,
+        overlay_warning: summary.overlay_warning,
     }
 }
 
@@ -1534,6 +1579,60 @@ mod tests {
         )
         .await
         .expect("matching agent detection runtime should be reset");
+    }
+
+    #[tokio::test]
+    async fn an_unreviewed_fork_overlay_is_put_on_screen_once_per_change() {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &crate::config::Config::default(),
+            true,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        let summary = |version: &str| crate::detect::manifest::AgentManifestSummary {
+            agent: Agent::Claude,
+            active_source: crate::detect::manifest::ManifestSource::Bundled,
+            active_version: Some(version.to_string()),
+            cached_remote_version: None,
+            local_override_shadowing_remote: false,
+            warning: None,
+            overlay_base_version: Some("2026.09.11.1".to_string()),
+            overlay_warning: Some(format!("fork overlay for claude unreviewed on {version}")),
+        };
+
+        app.state.agent_manifest_summaries = vec![summary("2026.12.01.1")];
+        app.surface_agent_manifest_overlay_warnings();
+        assert_eq!(
+            app.state.config_diagnostic.as_deref(),
+            Some("fork overlay for claude unreviewed on 2026.12.01.1")
+        );
+        assert!(
+            app.config_diagnostic_deadline.is_some(),
+            "a warning, not a config error: it times out"
+        );
+
+        // The same warning on the next refresh is not raised again.
+        app.state.config_diagnostic = None;
+        app.config_diagnostic_deadline = None;
+        app.surface_agent_manifest_overlay_warnings();
+        assert_eq!(app.state.config_diagnostic, None);
+
+        // A newer upstream manifest is a new warning.
+        app.state.agent_manifest_summaries = vec![summary("2026.12.02.1")];
+        app.surface_agent_manifest_overlay_warnings();
+        assert_eq!(
+            app.state.config_diagnostic.as_deref(),
+            Some("fork overlay for claude unreviewed on 2026.12.02.1")
+        );
+
+        // A config error on the status line is left in place.
+        app.state.config_diagnostic = Some("config error".to_string());
+        app.config_diagnostic_deadline = None;
+        app.state.agent_manifest_summaries = vec![summary("2026.12.03.1")];
+        app.surface_agent_manifest_overlay_warnings();
+        assert_eq!(app.state.config_diagnostic.as_deref(), Some("config error"));
     }
 
     #[tokio::test]

@@ -1105,3 +1105,304 @@ fn repeated_lookups_share_one_manifest() {
         "each lookup copied the manifest instead of sharing the cached one"
     );
 }
+
+// --- Fork overlays ---
+
+/// The held-message dialog as Claude draws it, taken from a live pane.
+const HELD_MESSAGE_SCREEN: &str = "\
+──────────────────────────────────────────────────────────────────────────────\n\
+ Held message from another session\n\
+ Another Claude session sent a message: from uds:/run/user/1000/cc-socks/1.sock\n\
+ The sending session's permission mode class doesn't match this session's, so it wasn't\n\
+ delivered automatically.\n\
+ Message body (this is what will be delivered):\n\
+ │ test\n\
+ ❯ Deny — drop it and tell the sender it was declined\n\
+   Deliver this message to Claude\n";
+
+fn claude_manifest(version: Option<&str>, extra: &str, rules: &str) -> String {
+    let version = version
+        .map(|version| format!("version = \"{version}\"\nmin_engine_version = 2\n"))
+        .unwrap_or_default();
+    format!(
+        r#"
+id = "claude"
+{version}{extra}
+
+{rules}
+"#
+    )
+}
+
+const CLAUDE_PROMPT_RULE: &str = r#"
+[[rules]]
+id = "live_prompt_box"
+state = "idle"
+priority = 950
+region = "prompt_box_body"
+visible_idle = true
+line_regex = ['^\s*❯']
+"#;
+
+fn write_remote_claude(content: &str) {
+    let path = crate::detect::manifest_update::remote_manifest_path(Agent::Claude);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+    reload_manifests();
+}
+
+fn write_local_claude(content: &str) {
+    let path = override_path(Agent::Claude).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+    reload_manifests();
+}
+
+fn test_overlay(rules: &str) -> AgentOverlay {
+    parse_overlay(&format!("base_version = \"2026.09.11.1\"\n{rules}")).unwrap()
+}
+
+fn rule_ids(manifest: &AgentManifest) -> Vec<(&str, RuleSource)> {
+    manifest
+        .rules
+        .iter()
+        .map(|rule| (rule.id.as_str(), rule.source()))
+        .collect()
+}
+
+#[test]
+fn overlay_rules_replace_by_id_and_add_new_rules_in_priority_order() {
+    let mut manifest = parse_manifest(&rules_manifest(
+        r#"
+[[rules]]
+id = "high"
+state = "working"
+priority = 990
+contains = ["high"]
+
+[[rules]]
+id = "shared"
+state = "idle"
+priority = 980
+contains = ["upstream"]
+
+[[rules]]
+id = "low"
+state = "idle"
+priority = 900
+contains = ["low"]
+"#,
+    ))
+    .unwrap();
+    let overlay = test_overlay(
+        r#"
+[[rules]]
+id = "shared"
+state = "blocked"
+priority = 980
+contains = ["fork"]
+
+[[rules]]
+id = "added"
+state = "blocked"
+priority = 980
+contains = ["added"]
+"#,
+    );
+
+    merge_overlay_rules(&mut manifest, &overlay);
+
+    assert_eq!(
+        rule_ids(&manifest),
+        vec![
+            ("high", RuleSource::Manifest),
+            // Ahead of the equal-priority rule, so the overlay wins the tie.
+            ("added", RuleSource::Overlay),
+            // Replaced where it stood rather than appended.
+            ("shared", RuleSource::Overlay),
+            ("low", RuleSource::Manifest),
+        ]
+    );
+    let shared = manifest
+        .rules
+        .iter()
+        .find(|rule| rule.id == "shared")
+        .unwrap();
+    assert_eq!(shared.contains, vec!["fork".to_string()]);
+    assert_eq!(shared.state, Some(ManifestState::Blocked));
+}
+
+#[test]
+fn bundled_overlays_parse_and_merge_into_their_bundled_manifests() {
+    for (id, content) in BUNDLED_OVERLAYS {
+        let overlay = parse_overlay(content)
+            .unwrap_or_else(|err| panic!("bundled {id} overlay is invalid: {err}"));
+        let agent = parse_agent_label(id).unwrap_or_else(|| panic!("unknown overlay agent {id}"));
+        let mut manifest = bundled_manifest(agent).unwrap();
+        assert_eq!(
+            manifest.version.as_ref(),
+            Some(&overlay.base_version),
+            "the bundled {id} manifest is upstream's base, the one its overlay names"
+        );
+        merge_overlay_rules(&mut manifest, &overlay);
+        validate_manifest(&manifest).unwrap();
+        compile_manifest(&manifest).unwrap();
+    }
+}
+
+#[test]
+fn bundled_claude_manifest_carries_no_fork_rules_of_its_own() {
+    let manifest = bundled_manifest(Agent::Claude).unwrap();
+    for fork_rule in ["background_shell_working", "held_cross_session_message"] {
+        assert!(
+            manifest.rules.iter().all(|rule| rule.id != fork_rule),
+            "{fork_rule} belongs in the overlay, not the bundled manifest"
+        );
+    }
+}
+
+#[test]
+fn overlay_is_applied_over_the_bundled_manifest_without_a_warning() {
+    with_manifest_dirs("overlay-bundled", || {
+        let result = explain(Agent::Claude, HELD_MESSAGE_SCREEN);
+
+        assert!(matches!(result.source, Some(ManifestSource::Bundled)));
+        assert_eq!(result.state, AgentState::Blocked);
+        let matched = result.matched_rule.as_ref().unwrap();
+        assert_eq!(matched.id, "held_cross_session_message");
+        assert_eq!(matched.source, RuleSource::Overlay);
+        assert_eq!(result.overlay_base_version.as_deref(), Some("2026.09.11.1"));
+        assert_eq!(result.overlay_warning, None);
+    });
+}
+
+#[test]
+fn overlay_is_applied_over_a_newer_remote_manifest_and_warns() {
+    with_manifest_dirs("overlay-newer-remote", || {
+        write_remote_claude(&claude_manifest(
+            Some("2026.12.01.1"),
+            "",
+            CLAUDE_PROMPT_RULE,
+        ));
+
+        let result = explain(Agent::Claude, HELD_MESSAGE_SCREEN);
+
+        assert!(matches!(result.source, Some(ManifestSource::Remote { .. })));
+        assert_eq!(result.manifest_version.as_deref(), Some("2026.12.01.1"));
+        assert_eq!(
+            result.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+            Some("held_cross_session_message"),
+            "the fork's rule survives upstream publishing a manifest without it"
+        );
+        let warning = result.overlay_warning.expect("an unreviewed overlay warns");
+        assert!(warning.contains("claude"), "{warning}");
+        assert!(warning.contains("2026.09.11.1"), "{warning}");
+        assert!(warning.contains("2026.12.01.1"), "{warning}");
+
+        let summary = manifest_summaries()
+            .into_iter()
+            .find(|summary| summary.agent == Agent::Claude)
+            .unwrap();
+        assert_eq!(summary.overlay_warning.as_deref(), Some(warning.as_str()));
+        assert_eq!(
+            summary.overlay_base_version.as_deref(),
+            Some("2026.09.11.1")
+        );
+    });
+}
+
+#[test]
+fn overlay_over_a_remote_at_its_base_version_does_not_warn() {
+    with_manifest_dirs("overlay-base-remote", || {
+        write_remote_claude(&claude_manifest(
+            Some("2026.09.11.1"),
+            "",
+            CLAUDE_PROMPT_RULE,
+        ));
+
+        let result = explain(Agent::Claude, HELD_MESSAGE_SCREEN);
+
+        assert!(matches!(result.source, Some(ManifestSource::Remote { .. })));
+        assert_eq!(result.state, AgentState::Blocked);
+        assert_eq!(result.overlay_warning, None);
+    });
+}
+
+#[test]
+fn local_override_gets_the_overlay_unless_it_opts_out() {
+    with_manifest_dirs("overlay-local-override", || {
+        write_local_claude(&claude_manifest(None, "", CLAUDE_PROMPT_RULE));
+        let with_overlay = explain(Agent::Claude, HELD_MESSAGE_SCREEN);
+        assert!(matches!(
+            with_overlay.source,
+            Some(ManifestSource::Override(_))
+        ));
+        assert_eq!(with_overlay.state, AgentState::Blocked);
+        // An override without a version cannot be compared with the base.
+        assert_eq!(with_overlay.overlay_warning, None);
+
+        write_local_claude(&claude_manifest(
+            None,
+            "overlay = false",
+            CLAUDE_PROMPT_RULE,
+        ));
+        let without = explain(Agent::Claude, HELD_MESSAGE_SCREEN);
+        assert_eq!(
+            without.fallback_reason.as_deref(),
+            Some(DEFAULT_KNOWN_AGENT_IDLE_FALLBACK)
+        );
+        assert_eq!(without.overlay_base_version, None);
+        assert!(without
+            .evaluated_rules
+            .iter()
+            .all(|rule| rule.source == RuleSource::Manifest));
+    });
+}
+
+#[test]
+fn shell_rules_still_name_the_overlay_background_shell_rule() {
+    with_manifest_dirs("overlay-shell-rules", || {
+        let screen = concat!(
+            "───────────────────────────────────────\n",
+            "❯\n",
+            "───────────────────────────────────────\n",
+            "   ryi@lute  ~/lifestream  main ?\n",
+            "  ⏵⏵ auto mode on · 2 shells · ← for agents\n",
+        );
+        crate::detect::set_shell_rules(&["claude:background_shell_working".to_string()]);
+        let result = explain(Agent::Claude, screen);
+        crate::detect::set_shell_rules(&[]);
+
+        assert_eq!(result.background_shells, Some(2));
+        assert_eq!(result.state, AgentState::Idle);
+        let shell_rule = result
+            .evaluated_rules
+            .iter()
+            .find(|rule| rule.id == "background_shell_working")
+            .expect("the overlay rule is evaluated");
+        assert_eq!(shell_rule.source, RuleSource::Overlay);
+    });
+}
+
+#[test]
+fn explain_json_marks_overlay_rules() {
+    with_manifest_dirs("overlay-explain-json", || {
+        let value = explain_to_json_value(&explain(Agent::Claude, HELD_MESSAGE_SCREEN));
+
+        assert_eq!(value["matched_rule"]["source"], "overlay");
+        assert_eq!(value["overlay_base_version"], "2026.09.11.1");
+        let sources: Vec<(&str, &str)> = value["evaluated_rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| {
+                (
+                    rule["id"].as_str().unwrap(),
+                    rule["source"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert!(sources.contains(&("held_cross_session_message", "overlay")));
+        assert!(sources.contains(&("live_prompt_box", "manifest")));
+    });
+}

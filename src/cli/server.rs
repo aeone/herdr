@@ -173,7 +173,8 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
         let local_override_shadowing_remote = manifest["local_override_shadowing_remote"]
             .as_bool()
             .unwrap_or(false);
-        let marker = if local_override_shadowing_remote {
+        let overlay_warning = manifest["overlay_warning"].as_str();
+        let marker = if local_override_shadowing_remote || overlay_warning.is_some() {
             "!"
         } else if manifest["remote_update_error"].as_str().is_some() {
             "x"
@@ -189,6 +190,13 @@ fn print_agent_manifest_status(response: &serde_json::Value) {
             println!("  local override shadows cached remote rules");
         } else if let Some(warning) = manifest["warning"].as_str() {
             println!("  {warning}");
+        }
+        // Printed on its own line rather than folded into the chain above: an
+        // unreviewed overlay is worth saying even when something else is too.
+        if let Some(warning) = overlay_warning {
+            println!("  {warning}");
+        } else if let Some(base) = manifest["overlay_base_version"].as_str() {
+            println!("  fork overlay applied (reviewed against {base})");
         }
     }
 }

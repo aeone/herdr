@@ -289,4 +289,12 @@ pub struct AgentManifestInfo {
     pub remote_last_checked_unix: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
+    /// The upstream manifest version the fork overlay laid over this one was
+    /// reviewed against, when an overlay is applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_base_version: Option<String>,
+    /// Set when the manifest in force is newer than `overlay_base_version`, so
+    /// the overlay's rules are applied to rules nobody has checked them beside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_warning: Option<String>,
 }

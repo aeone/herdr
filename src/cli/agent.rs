@@ -156,6 +156,16 @@ fn agent_explain(args: &[String]) -> std::io::Result<i32> {
     Ok(0)
 }
 
+/// Marks a rule the fork overlay contributed, which otherwise reads exactly like
+/// one of the manifest's own.
+fn overlay_marker(source: Option<&serde_json::Value>) -> &'static str {
+    if source.and_then(|value| value.as_str()) == Some("overlay") {
+        " [overlay]"
+    } else {
+        ""
+    }
+}
+
 fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
     println!("agent: {}", explain["agent"].as_str().unwrap_or("unknown"));
     println!("state: {}", explain["state"].as_str().unwrap_or("unknown"));
@@ -164,13 +174,16 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
         explain["manifest_source"].as_str().unwrap_or("none"),
         explain["manifest_version"].as_str().unwrap_or("unknown")
     );
+    if let Some(base) = explain["overlay_base_version"].as_str() {
+        println!("overlay: fork rules reviewed against {base}");
+    }
     if let Some(rule) = explain["matched_rule"].as_object() {
         let rule_id = rule
             .get("id")
             .and_then(|value| value.as_str())
             .unwrap_or("-");
         println!(
-            "rule: {} (region={} priority={})",
+            "rule: {} (region={} priority={}){}",
             rule_id,
             rule.get("region")
                 .and_then(|value| value.as_str())
@@ -178,6 +191,7 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
             rule.get("priority")
                 .and_then(|value| value.as_i64())
                 .unwrap_or(0),
+            overlay_marker(rule.get("source")),
         );
         if let Some(preview) = matched_rule_region_preview(explain, rule_id) {
             println!("evidence: {preview:?}");
@@ -196,6 +210,9 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
     }
     if let Some(warning) = explain["warning"].as_str() {
         println!("warning: {warning}");
+    }
+    if let Some(warning) = explain["overlay_warning"].as_str() {
+        println!("overlay_warning: {warning}");
     }
 
     if !verbose {
@@ -231,7 +248,7 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
         println!("evaluated_rules:");
         for rule in evaluated_rules {
             println!(
-                "  {} {} priority={} region={} state={}",
+                "  {} {} priority={} region={} state={}{}",
                 if rule["matched"].as_bool().unwrap_or(false) {
                     "✓"
                 } else {
@@ -240,7 +257,8 @@ fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
                 rule["id"].as_str().unwrap_or("-"),
                 rule["priority"].as_i64().unwrap_or(0),
                 rule["region"].as_str().unwrap_or("-"),
-                rule["state"].as_str().unwrap_or("unknown")
+                rule["state"].as_str().unwrap_or("unknown"),
+                overlay_marker(Some(&rule["source"])),
             );
             let evidence = &rule["evidence"];
             println!(

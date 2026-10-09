@@ -41,6 +41,10 @@ pub struct DetectionExplain {
     pub evaluated_rules: Vec<EvaluatedRule>,
     pub warning: Option<String>,
     pub manifest_version: Option<String>,
+    /// The upstream version the fork overlay applied to this manifest was
+    /// reviewed against, when one was applied.
+    pub overlay_base_version: Option<String>,
+    pub overlay_warning: Option<String>,
     pub cached_remote_version: Option<String>,
     pub local_override_shadowing_remote: bool,
     pub remote_update_status: Option<String>,
@@ -72,6 +76,26 @@ impl ManifestSource {
     }
 }
 
+/// Where a rule in the manifest in force came from.
+///
+/// Explain reports it so a rule the fork laid over upstream's can be told
+/// apart from upstream's own: they look identical once merged, and it is the
+/// overlay's rules that need checking when upstream publishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleSource {
+    Manifest,
+    Overlay,
+}
+
+impl RuleSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Manifest => "manifest",
+            Self::Overlay => "overlay",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AgentManifestSummary {
     pub(crate) agent: Agent,
@@ -80,6 +104,10 @@ pub(crate) struct AgentManifestSummary {
     pub(crate) cached_remote_version: Option<String>,
     pub(crate) local_override_shadowing_remote: bool,
     pub(crate) warning: Option<String>,
+    pub(crate) overlay_base_version: Option<String>,
+    /// Set when the manifest in force is newer than the one the fork overlay
+    /// was reviewed against.
+    pub(crate) overlay_warning: Option<String>,
 }
 
 pub(crate) fn manifest_summaries() -> Vec<AgentManifestSummary> {
@@ -97,6 +125,7 @@ pub struct MatchedRule {
     pub priority: i32,
     pub region: String,
     pub state: AgentState,
+    pub source: RuleSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +136,7 @@ pub struct EvaluatedRule {
     pub evidence: RuleEvidence,
     pub state: AgentState,
     pub matched: bool,
+    pub source: RuleSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,6 +159,14 @@ struct LoadedManifest {
     warning: Option<String>,
     cached_remote_version: Option<String>,
     local_override_shadowing_remote: bool,
+    overlay: Option<AppliedOverlay>,
+}
+
+/// The fork overlay as applied to one loaded manifest.
+#[derive(Debug, Clone)]
+struct AppliedOverlay {
+    base_version: String,
+    warning: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,7 +187,27 @@ pub(crate) struct AgentManifest {
     _updated_at: Option<String>,
     #[serde(default)]
     aliases: Vec<String>,
+    /// Whether the fork overlay for this agent is laid over this manifest.
+    /// Only worth setting in a local override, to have it used exactly as
+    /// written -- for instance while working on a rule the overlay also
+    /// carries.
+    #[serde(default = "default_true")]
+    overlay: bool,
     #[serde(default)]
+    rules: Vec<ManifestRule>,
+}
+
+/// Rules the fork keeps on top of whichever manifest is in force for an agent.
+///
+/// Upstream's manifests replace one another whole: a newer remote copy shadows
+/// the bundled one entirely, so rules the fork kept in its bundled copy were
+/// lost each time upstream published. An overlay is applied after the manifest
+/// in force is chosen, whatever its source, so the fork's rules survive.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct AgentOverlay {
+    /// The upstream manifest version these rules were last reviewed against.
+    base_version: ManifestVersion,
     rules: Vec<ManifestRule>,
 }
 
@@ -182,6 +240,19 @@ struct ManifestRule {
     regex: Vec<String>,
     #[serde(default)]
     line_regex: Vec<String>,
+    /// Set on rules merged in from a fork overlay; never read from a file.
+    #[serde(skip)]
+    from_overlay: bool,
+}
+
+impl ManifestRule {
+    fn source(&self) -> RuleSource {
+        if self.from_overlay {
+            RuleSource::Overlay
+        } else {
+            RuleSource::Manifest
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -240,6 +311,10 @@ fn default_region() -> String {
     "whole_recent".to_string()
 }
 
+fn default_true() -> bool {
+    true
+}
+
 const BUNDLED_MANIFESTS: &[(&str, &str)] = &[
     ("amp", include_str!("manifests/amp.toml")),
     ("agy", include_str!("manifests/antigravity.toml")),
@@ -262,6 +337,10 @@ const BUNDLED_MANIFESTS: &[(&str, &str)] = &[
     ("qwen", include_str!("manifests/qwen.toml")),
     ("copilot", include_str!("manifests/github-copilot.toml")),
 ];
+
+/// Fork overlays, keyed like `BUNDLED_MANIFESTS`. See [`AgentOverlay`].
+const BUNDLED_OVERLAYS: &[(&str, &str)] =
+    &[("claude", include_str!("manifests/overlays/claude.toml"))];
 
 static MANIFEST_CACHE: OnceLock<RwLock<ManifestCache>> = OnceLock::new();
 static MANIFEST_RELOAD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -321,6 +400,8 @@ fn manifest_summary_from_loaded(agent: Agent, loaded: &LoadedManifest) -> AgentM
         cached_remote_version: loaded.cached_remote_version.clone(),
         local_override_shadowing_remote: loaded.local_override_shadowing_remote,
         warning: loaded.warning.clone(),
+        overlay_base_version: overlay_base_version(loaded),
+        overlay_warning: overlay_warning(loaded),
     }
 }
 
@@ -379,6 +460,8 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
             evaluated_rules: Vec::new(),
             warning: None,
             manifest_version: None,
+            overlay_base_version: None,
+            overlay_warning: None,
             cached_remote_version: None,
             local_override_shadowing_remote: false,
             remote_update_status: None,
@@ -441,6 +524,7 @@ fn evaluate_loaded_manifest(
                 .map(AgentState::from)
                 .unwrap_or(AgentState::Unknown),
             matched: matched_rule,
+            source: rule.source(),
         });
 
         // A rule this machine reads as a background-shell signal says nothing
@@ -502,6 +586,7 @@ fn evaluate_loaded_manifest(
             priority: rule.priority,
             region: region_name,
             state,
+            source: rule.source(),
         }),
         screen_detection_skipped: false,
         visible_idle: rule.visible_idle && state == AgentState::Idle,
@@ -514,6 +599,8 @@ fn evaluate_loaded_manifest(
         evaluated_rules,
         warning: loaded.warning.clone(),
         manifest_version: loaded.manifest.version.as_ref().map(ToString::to_string),
+        overlay_base_version: overlay_base_version(loaded),
+        overlay_warning: overlay_warning(loaded),
         cached_remote_version: loaded.cached_remote_version.clone(),
         local_override_shadowing_remote: loaded.local_override_shadowing_remote,
         remote_update_status: remote_update_status
@@ -528,6 +615,12 @@ fn fallback_explain(
     context: Option<(&LoadedManifest, Vec<EvaluatedRule>)>,
     include_update_status: bool,
 ) -> DetectionExplain {
+    let overlay_base_version = context
+        .as_ref()
+        .and_then(|(loaded, _)| overlay_base_version(loaded));
+    let overlay_warning = context
+        .as_ref()
+        .and_then(|(loaded, _)| overlay_warning(loaded));
     let (
         source,
         evaluated_rules,
@@ -572,6 +665,8 @@ fn fallback_explain(
         evaluated_rules,
         warning,
         manifest_version,
+        overlay_base_version,
+        overlay_warning,
         cached_remote_version,
         local_override_shadowing_remote,
         remote_update_status: remote_update_status
@@ -594,7 +689,129 @@ fn load_manifest(agent: Agent) -> Option<Arc<LoadedManifest>> {
         .and_then(|(_, loaded)| loaded.clone())
 }
 
+fn overlay_base_version(loaded: &LoadedManifest) -> Option<String> {
+    loaded
+        .overlay
+        .as_ref()
+        .map(|overlay| overlay.base_version.clone())
+}
+
+fn overlay_warning(loaded: &LoadedManifest) -> Option<String> {
+    loaded
+        .overlay
+        .as_ref()
+        .and_then(|overlay| overlay.warning.clone())
+}
+
 fn load_manifest_uncached(agent: Agent) -> Option<LoadedManifest> {
+    let loaded = load_base_manifest_uncached(agent)?;
+    match bundled_overlay(agent) {
+        Some(overlay) => Some(apply_overlay(agent, loaded, &overlay)),
+        None => Some(loaded),
+    }
+}
+
+/// Lays an agent's fork overlay over the manifest chosen for it.
+///
+/// Applied whatever the manifest's source, because the point is that the fork's
+/// rules outlive upstream publishing a newer manifest. A local override can opt
+/// out with `overlay = false`. If the merged manifest does not validate -- an
+/// override already at the rule limit, say -- the manifest is used without the
+/// overlay and says so, rather than detection breaking for the agent.
+fn apply_overlay(
+    agent: Agent,
+    mut loaded: LoadedManifest,
+    overlay: &AgentOverlay,
+) -> LoadedManifest {
+    if !loaded.manifest.overlay {
+        return loaded;
+    }
+    let mut manifest = loaded.manifest.clone();
+    merge_overlay_rules(&mut manifest, overlay);
+    match validate_manifest(&manifest).and_then(|()| compile_manifest(&manifest)) {
+        Ok(compiled_rules) => {
+            let warning = overlay_drift_warning(agent, &manifest, overlay);
+            loaded.manifest = manifest;
+            loaded.compiled_rules = compiled_rules;
+            loaded.overlay = Some(AppliedOverlay {
+                base_version: overlay.base_version.to_string(),
+                warning,
+            });
+        }
+        Err(err) => {
+            let message = format!("fork overlay not applied: {err}");
+            loaded.warning = Some(match loaded.warning.take() {
+                Some(existing) => format!("{existing}; {message}"),
+                None => message,
+            });
+        }
+    }
+    loaded
+}
+
+/// Merges overlay rules into a manifest: a rule replaces the manifest's rule
+/// with the same id where it stands, and any other is added.
+///
+/// Evaluation takes the highest-priority match and, between equal priorities,
+/// the earliest. An added rule is therefore placed ahead of the first rule
+/// whose priority it meets or beats, which keeps the file's priority order and
+/// lets the overlay's rule win a tie -- an overlay rule exists because the fork
+/// wanted something upstream's rules do not say.
+fn merge_overlay_rules(manifest: &mut AgentManifest, overlay: &AgentOverlay) {
+    for rule in &overlay.rules {
+        let mut rule = rule.clone();
+        rule.from_overlay = true;
+        if let Some(existing) = manifest
+            .rules
+            .iter_mut()
+            .find(|existing| existing.id == rule.id)
+        {
+            *existing = rule;
+            continue;
+        }
+        let position = manifest
+            .rules
+            .iter()
+            .position(|existing| existing.priority <= rule.priority)
+            .unwrap_or(manifest.rules.len());
+        manifest.rules.insert(position, rule);
+    }
+}
+
+/// The warning for an overlay applied over a manifest newer than the one it was
+/// reviewed against: upstream may have changed or dropped what its rules lean
+/// on, and nobody has looked yet.
+fn overlay_drift_warning(
+    agent: Agent,
+    manifest: &AgentManifest,
+    overlay: &AgentOverlay,
+) -> Option<String> {
+    let version = manifest.version.as_ref()?;
+    (version > &overlay.base_version).then(|| {
+        format!(
+            "{} fork overlay was reviewed against {}, not the {version} in use",
+            agent_label(agent),
+            overlay.base_version
+        )
+    })
+}
+
+fn bundled_overlay(agent: Agent) -> Option<AgentOverlay> {
+    let id = agent_label(agent);
+    BUNDLED_OVERLAYS
+        .iter()
+        .find(|(overlay_id, _)| *overlay_id == id)
+        .map(|(_, content)| {
+            parse_overlay(content)
+                .unwrap_or_else(|err| panic!("bundled {id} overlay is invalid: {err}"))
+        })
+}
+
+fn parse_overlay(content: &str) -> Result<AgentOverlay, String> {
+    toml::from_str::<AgentOverlay>(content).map_err(|err| err.to_string())
+}
+
+fn load_base_manifest_uncached(agent: Agent) -> Option<LoadedManifest> {
     let bundled = bundled_manifest(agent)?;
     let mut remote = read_remote_manifest(agent, &bundled);
     let cached_remote_version = remote.as_ref().and_then(|loaded| match &loaded.source {
@@ -708,6 +925,7 @@ fn loaded_manifest(
         warning,
         cached_remote_version,
         local_override_shadowing_remote,
+        overlay: None,
     })
 }
 
@@ -833,6 +1051,7 @@ pub fn explain_to_json_value(explain: &DetectionExplain) -> serde_json::Value {
             "priority": rule.priority,
             "region": rule.region,
             "state": agent_state_label(rule.state),
+            "source": rule.source.label(),
         })
     });
     let evaluated_rules: Vec<_> = explain
@@ -845,6 +1064,7 @@ pub fn explain_to_json_value(explain: &DetectionExplain) -> serde_json::Value {
                 "region": rule.region,
                 "state": agent_state_label(rule.state),
                 "matched": rule.matched,
+                "source": rule.source.label(),
                 "evidence": {
                     "contains": &rule.evidence.contains,
                     "regex": &rule.evidence.regex,
@@ -864,6 +1084,8 @@ pub fn explain_to_json_value(explain: &DetectionExplain) -> serde_json::Value {
         "state": agent_state_label(explain.state),
         "manifest_source": explain.source.as_ref().map(|source| source.label()),
         "manifest_version": &explain.manifest_version,
+        "overlay_base_version": &explain.overlay_base_version,
+        "overlay_warning": &explain.overlay_warning,
         "cached_remote_version": &explain.cached_remote_version,
         "local_override_shadowing_remote": explain.local_override_shadowing_remote,
         "remote_update_status": &explain.remote_update_status,

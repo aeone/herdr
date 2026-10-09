@@ -6467,6 +6467,20 @@
             "local_override_shadowing_remote": {
               "type": "boolean"
             },
+            "overlay_base_version": {
+              "description": "The upstream manifest version the fork overlay laid over this one was\nreviewed against, when an overlay is applied.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "overlay_warning": {
+              "description": "Set when the manifest in force is newer than `overlay_base_version`, so\nthe overlay's rules are applied to rules nobody has checked them beside.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "remote_last_checked_unix": {
               "format": "uint64",
               "minimum": 0,
