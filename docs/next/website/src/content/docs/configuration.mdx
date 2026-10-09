@@ -176,6 +176,36 @@ focus_agent = "prefix+alt+1..9"
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
 
+## Walls
+
+`herdr wall` opens a client of its own that tiles several terminals: agents, panes, or the focused pane of a space, the things `herdr focus` can show. Like `herdr focus` it is private to that client. Nothing it shows appears in the session's workspaces, and other clients carry on as they were. `herdr wall --remote <ssh-target>` opens one on another machine through the same bridge as `herdr focus --remote`, so image paste works there too.
+
+A wall starts empty and opens a picker straight away: [fzf](https://github.com/junegunn/fzf) when it is installed (tab marks several to add at once), otherwise a built-in list you filter by typing, move through with the arrows, and choose from with enter. Cancelling the first pick closes the wall. Tiles are laid out in an even grid that is redone as they come and go.
+
+One tile is active. Its terminal is held at the tile's size, the way `herdr focus` holds it, and it takes typing, pastes, clicks and the scroll wheel. The other tiles show their terminals at their own size, re-wrapped to the tile's width and anchored to the bottom, without resizing them. Moving to another tile lets go of the previous terminal, which goes back to the size its own layout gives it. A terminal another client already has attached is shown view only rather than taken.
+
+After the prefix (`ctrl+b` unless configured), the wall uses these keys, read from the config of the machine it runs on:
+
+| Key | Action |
+| --- | --- |
+| `wall_add`, or `goto` (`prefix+g`) | Add a tile |
+| arrows, or `focus_pane_*` (`prefix+h/j/k/l`) | Move to the tile in that direction (a click does too) |
+| `cycle_pane_next` / `cycle_pane_previous` (`prefix+tab` / `prefix+shift+tab`) | Next / previous tile |
+| `close_pane` (`prefix+x`) | Close the active tile, leaving its terminal running |
+| `q`, or `detach` (`prefix+q`) | Quit |
+| prefix twice | Send the prefix to the active tile |
+
+`wall_add` is unset by default, which leaves adding tiles to `goto`. It can also be a direct key:
+
+```toml
+[keys]
+wall_add = ["ctrl+shift+g", "prefix+y"]
+```
+
+`ctrl+shift+g` can only be told apart from `ctrl+g` by terminals that report modified keys, such as those using the kitty keyboard protocol; elsewhere it arrives as plain `ctrl+g` and goes to the active tile. `prefix+G` is the same key as `prefix+shift+g`, which `new_worktree` uses by default, so binding it to `wall_add` takes it from `new_worktree`.
+
+A tile that is only watched gets its terminal as cells, without the marks that say where the terminal soft-wrapped a long line, so a line longer than its terminal is wide shows broken where that terminal broke it as well as at the tile's edge.
+
 ## Custom command keybindings
 
 Custom commands use the same keybinding syntax.

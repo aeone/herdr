@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Added
+- Added `herdr wall`, a client of its own that tiles several agents, panes or spaces, picked as you go with fzf or a built-in list, and private to that client: nothing appears in the session's workspaces and other clients are unaffected. The active tile holds its terminal at the tile's size and takes typing, as `herdr focus` does; the rest show their terminals re-wrapped without resizing them. `herdr wall --remote <ssh-target>` opens one through the `herdr focus --remote` bridge. The optional `wall_add` key opens the picker; `goto` does when it is unset.
+- Pane info from the API now reports the terminal's current size as `size`, which can differ from its pane's layout while a client or mirror holds it.
 - Claude Code panes now report their session title as the agent's display name: the `/rename` name when one is set, otherwise the generated title. Herdr reads it from the session transcript, so it also reaches mirrored panes.
 - New `agent_title` and `agent_title_with_workspace` agent sidebar tokens show the agent's title, else its given name, else its tab, the second followed by its workspace in parentheses.
 
