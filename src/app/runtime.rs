@@ -35,6 +35,7 @@ impl App {
             terminal_id: terminal_id.clone(),
         };
         self.release_input_target_headless(&target);
+        self.end_views_of_terminal(&terminal_id);
         if let Some(runtime) = self.terminal_runtimes.remove(&terminal_id) {
             runtime.shutdown();
         }

@@ -33,6 +33,7 @@ mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
+mod wall;
 mod window_title;
 mod worktrees;
 
@@ -680,6 +681,7 @@ impl App {
             jump_input: String::new(),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
+            view_size_claim: None,
             wheel_events: std::collections::HashMap::new(),
             renaming_agent: false,
             pane_id_aliases: std::collections::HashMap::new(),

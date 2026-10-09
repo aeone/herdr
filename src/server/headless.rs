@@ -1453,9 +1453,11 @@ impl HeadlessServer {
             // their runtimes to; handing them over fails the whole update with
             // "handoff import did not consume N pane runtime(s)". Leave them
             // behind — their ssh clients exit with the old server, and the
-            // host workers rebuild the mirrors on the next update.
+            // host workers rebuild the mirrors on the next update. A wall's
+            // placeholders have no PTY to hand over either, and the wall is
+            // not in the snapshot, so it is left behind the same way.
             #[cfg(unix)]
-            if ws.remote_mirror.is_some() {
+            if ws.is_runtime_only() {
                 continue;
             }
             for tab in &ws.tabs {
@@ -4712,10 +4714,20 @@ impl HeadlessServer {
         let Some(tab) = workspace.active_tab() else {
             return false;
         };
-        if !tab.panes.contains_key(&pane_id) {
+        if tab.panes.contains_key(&pane_id) {
+            return !tab.zoomed || tab.layout.focused() == pane_id;
+        }
+        // A terminal whose own pane is hidden is still on screen when a view
+        // on screen shows it. Hidden output is the common case here, so the
+        // walk to find the pane's terminal is only paid while a wall is up.
+        if workspace.wall.is_none() {
             return false;
         }
-        !tab.zoomed || tab.layout.focused() == pane_id
+        self.app.find_pane(pane_id).is_some_and(|(_, pane)| {
+            self.app
+                .state
+                .view_on_screen_shows(&pane.attached_terminal_id)
+        })
     }
 
     fn render_retained_pty_update_and_stream(&mut self) -> bool {
@@ -4802,6 +4814,14 @@ impl HeadlessServer {
             ) else {
                 retained_fallback!("missing_runtime");
             };
+            // A dirty patch is cut from the terminal's own grid, cell for
+            // cell, which a view drawn re-wrapped does not keep. A view sized
+            // to its tile is drawn cell for cell and can be patched as usual.
+            if self.app.state.pane_view_target(ws_idx, info.id).is_some()
+                && !runtime.fits(info.inner_rect)
+            {
+                retained_fallback!("rewrapped_view");
+            }
             match runtime.collect_dirty_patch(info.inner_rect.width, info.inner_rect.height) {
                 crate::pane::TerminalDirtyPatchOutcome::Clean => {
                     crate::render_prof::event("retained.pane_clean");
@@ -11600,6 +11620,77 @@ next_tab = ""
         assert!(server.app.render_dirty.request_pty(background_pane));
         assert!(server.has_pending_presentation_work(false, false));
         assert!(server.app.render_dirty.request_pty(hidden_pane));
+    }
+
+    #[test]
+    fn a_hidden_terminal_shown_by_a_wall_on_screen_stays_renderable() {
+        let (mut server, background_pane) = hidden_pty_visibility_test_server(&[(120, 40)]);
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(background_pane)
+            .expect("background terminal id")
+            .clone();
+        server
+            .app
+            .state
+            .workspaces
+            .push(crate::workspace::Workspace::test_wall(
+                "wall",
+                &[terminal_id],
+            ));
+        // The wall exists but is not on screen: the terminal is still hidden.
+        assert!(!server.pty_sources_visible_to_any_render_target(&HashSet::from([background_pane])));
+
+        server.app.state.active = Some(1);
+
+        assert!(server.pty_sources_visible_to_any_render_target(&HashSet::from([background_pane])));
+    }
+
+    #[tokio::test]
+    async fn retained_pty_update_declines_for_a_view_drawn_rewrapped() {
+        let (mut server, client_rx, pane_id) = retained_test_server(b"aaaa");
+        let terminal_id = server.app.state.workspaces[0]
+            .terminal_id(pane_id)
+            .expect("terminal id")
+            .clone();
+        server
+            .app
+            .state
+            .workspaces
+            .push(crate::workspace::Workspace::test_wall(
+                "wall",
+                &[terminal_id.clone(), terminal_id.clone()],
+            ));
+        server.app.state.active = Some(1);
+        // Held by an attach client, so neither half-width view can take its
+        // size and both have to draw it re-wrapped.
+        server
+            .app
+            .state
+            .direct_attach_resize_locks
+            .insert(terminal_id);
+        server.render_and_stream();
+        let first = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("initial frame"),
+        );
+        assert!(frame_text(&first).contains("aaaa"));
+
+        let runtime = server
+            .app
+            .state
+            .runtime_for_pane_in_workspace(&server.app.terminal_runtimes, 0, pane_id)
+            .expect("runtime");
+        runtime.test_process_pty_bytes(b"\rZ");
+
+        assert!(!server.render_retained_pty_update_and_stream());
+        server.render_and_stream();
+        let full = read_server_frame(
+            client_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("full frame"),
+        );
+        assert!(frame_text(&full).contains("Zaaa"));
     }
 
     #[tokio::test]

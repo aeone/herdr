@@ -427,6 +427,7 @@ fn restore_workspace(
             tabs,
             // Mirrors are never persisted, so a restored workspace is local.
             remote_mirror: None,
+            wall: None,
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         })

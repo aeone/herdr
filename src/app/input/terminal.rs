@@ -138,7 +138,9 @@ impl App {
         let ws_idx = self.state.active?;
         let ws = self.state.workspaces.get(ws_idx)?;
         let pane_id = ws.focused_pane_id()?;
-        let terminal_id = ws.terminal_id(pane_id)?.clone();
+        // A view types into the terminal it shows, so that is what the input
+        // and any key-release lease are addressed to.
+        let terminal_id = ws.pane_state(pane_id)?.effective_terminal_id().clone();
         let rt =
             self.state
                 .runtime_for_pane_in_workspace(&self.terminal_runtimes, ws_idx, pane_id)?;
