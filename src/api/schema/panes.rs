@@ -486,6 +486,13 @@ pub struct PaneInfo {
     /// that decided it. Present only when the pane has a live runtime to ask.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<PaneInputInfo>,
+    /// The terminal's size in cells right now, which is not always the size
+    /// its pane is laid out at: an attached client or a mirror may be holding
+    /// it at theirs. A client that draws the terminal somewhere else, without
+    /// resizing it, needs this to ask for frames that show all of it. Present
+    /// only when the pane has a live runtime to ask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<PaneTerminalSize>,
     /// Unix ms of the agent's last state change. Mirrors carry this across so a
     /// mirrored agent is aged by when it actually went idle on its own host,
     /// not by when the mirror happened to be built.
@@ -556,6 +563,12 @@ pub struct PaneInputInfo {
     /// Current kitty keyboard protocol flags; 0 when the protocol is off.
     #[serde(default)]
     pub kitty_keyboard_flags: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneTerminalSize {
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

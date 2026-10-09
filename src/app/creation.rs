@@ -542,6 +542,10 @@ impl App {
                     },
                 }
             });
+        let size = runtime.map(|runtime| {
+            let (rows, cols) = runtime.current_size();
+            crate::api::schema::PaneTerminalSize { cols, rows }
+        });
         let focused = self.state.active == Some(ws_idx)
             && ws.active_tab == tab_idx
             && ws
@@ -618,6 +622,7 @@ impl App {
             agent_session: terminal_agent_session_info(terminal),
             scroll,
             input,
+            size,
             mirror_origin,
             agent_state_changed_at_ms: terminal.agent_state_changed_at_ms,
             revision: terminal.revision,

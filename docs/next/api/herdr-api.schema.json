@@ -909,6 +909,17 @@
                 }
               ]
             },
+            "size": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/PaneTerminalSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The terminal's size in cells right now, which is not always the size\nits pane is laid out at: an attached client or a mirror may be holding\nit at theirs. A client that draws the terminal somewhere else, without\nresizing it, needs this to ask for frames that show all of it. Present\nonly when the pane has a live runtime to ask."
+            },
             "state_labels": {
               "additionalProperties": {
                 "type": "string"
@@ -1172,6 +1183,27 @@
             "offset_from_bottom",
             "max_offset_from_bottom",
             "viewport_rows"
+          ],
+          "type": "object"
+        },
+        "PaneTerminalSize": {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cols",
+            "rows"
           ],
           "type": "object"
         },
@@ -7801,6 +7833,17 @@
                 }
               ]
             },
+            "size": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/PaneTerminalSize"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The terminal's size in cells right now, which is not always the size\nits pane is laid out at: an attached client or a mirror may be holding\nit at theirs. A client that draws the terminal somewhere else, without\nresizing it, needs this to ask for frames that show all of it. Present\nonly when the pane has a live runtime to ask."
+            },
             "state_labels": {
               "additionalProperties": {
                 "type": "string"
@@ -8394,6 +8437,27 @@
             "source_pane_id",
             "focused_pane_id",
             "layout"
+          ],
+          "type": "object"
+        },
+        "PaneTerminalSize": {
+          "properties": {
+            "cols": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "rows": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cols",
+            "rows"
           ],
           "type": "object"
         },

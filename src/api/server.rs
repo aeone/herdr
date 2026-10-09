@@ -1013,6 +1013,7 @@ mod tests {
             scroll: None,
             input: None,
             agent_state_changed_at_ms: None,
+            size: None,
             mirror_origin: None,
             revision: 0,
         }
