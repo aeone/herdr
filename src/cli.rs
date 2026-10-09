@@ -42,6 +42,8 @@ mod wall;
 mod workspace;
 mod worktree;
 
+pub(crate) use wall::{list_wall_targets, WALL_REMOTE_HERDR_ENV_VAR, WALL_REMOTE_TARGET_ENV_VAR};
+
 const TERMINAL_SESSION_OBSERVE_USAGE: &str =
     "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
 const TERMINAL_SESSION_CONTROL_USAGE: &str =

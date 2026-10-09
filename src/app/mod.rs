@@ -424,6 +424,14 @@ fn theme_runtime_config(
     }
 }
 
+/// The palette a configuration asks for, for clients that draw some of
+/// herdr's chrome without running the app: the theme by name, with its custom
+/// colours and the legacy accent applied, and no light or dark switching.
+pub(crate) fn palette_for_config(config: &crate::config::Config) -> state::Palette {
+    let runtime = theme_runtime_config(config, true);
+    resolve_palette_for_theme_name(&runtime.manual_name, "catppuccin", &runtime)
+}
+
 fn resolve_palette_for_theme_name(
     name: &str,
     fallback_name: &str,

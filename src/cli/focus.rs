@@ -436,7 +436,7 @@ fn resolve_pane_or_space(target: &str) -> std::io::Result<Option<Resolved>> {
 /// A space can hold several panes across several tabs and this shows exactly
 /// one of them, which is the accepted limit of wrapping `terminal attach`
 /// rather than teaching the server about per-client spaces.
-fn pick_space_pane<'a>(
+pub(super) fn pick_space_pane<'a>(
     panes: &'a [Value],
     workspace_id: &str,
     active_tab_id: Option<&str>,

@@ -239,8 +239,7 @@ const DEFAULT_CONFIG: &str = r##"# herdr configuration
 # Keep mirrors of an unreachable host in place, greyed, or hide them until it
 # answers again.
 # toggle_offline_mirrors = ""
-# Open the session navigator to put what you pick on a wall: a new tile of the
-# wall you are looking at, or a new wall when you are not looking at one.
+# In `herdr wall`, open the picker to add a tile. prefix+g (goto) does the same.
 # wall_add = ""
 
 # Navigate-mode movement. These local shortcuts win while navigate mode is open.
@@ -686,8 +685,7 @@ fn main() -> io::Result<()> {
         println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr focus <agent|space|pane> [--observe]");
-        println!("       herdr wall <agent|space|pane>... [--label NAME]");
-        println!("       herdr wall add <agent|space|pane>... [--wall WORKSPACE]");
+        println!("       herdr wall [--remote <ssh-target>]");
         println!("       herdr session <subcommand> ...");
         println!("       herdr integration <subcommand> ...");
         println!();
@@ -699,8 +697,8 @@ fn main() -> io::Result<()> {
                 "Open a client showing just that one thing, independent of other clients",
             ),
             (
-                "herdr wall <target>...",
-                "Open a workspace tiled with live views of several agents or panes",
+                "herdr wall",
+                "Open a private client tiling several agents or panes, picked as you go",
             ),
             (
                 "herdr status [server|client]",

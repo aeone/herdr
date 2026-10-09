@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::state::Palette;
 
-pub(super) fn render_panel_shell(
+pub(crate) fn render_panel_shell(
     frame: &mut Frame,
     area: Rect,
     border_color: Color,

@@ -15,6 +15,7 @@
 #[cfg(unix)]
 mod direct_graphics;
 mod input;
+pub(crate) mod wall;
 
 use std::collections::HashSet;
 #[cfg(unix)]

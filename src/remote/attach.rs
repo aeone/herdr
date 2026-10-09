@@ -74,7 +74,9 @@ pub(crate) fn extract_remote_args(
     // `cli::focus::run_focus_command` instead of being mistaken here for the
     // top-level launch flag and rejected by the "only with the default
     // launch command" check in `main.rs`.
-    if args.get(1).map(String::as_str) == Some("focus") {
+    //
+    // `wall` owns its `--remote` the same way (see `run_wall_remote`).
+    if matches!(args.get(1).map(String::as_str), Some("focus" | "wall")) {
         return Ok((args.to_vec(), None));
     }
 
@@ -405,6 +407,114 @@ fn run_focus_bridge_client(
         .stderr(Stdio::inherit())
         .status()?;
     Ok(status.code().unwrap_or(1))
+}
+
+/// Runs `herdr wall` against another machine through the bridge
+/// `focus --remote` uses.
+///
+/// The wall speaks only the client socket -- one observer for every tile and
+/// one attach for the active one -- which is exactly what the bridge carries.
+/// Listing what to show needs the far side's API, which the bridge does not
+/// carry, so the wall lists over ssh with `herdr wall --targets-json`, the way
+/// focus resolves its target with `--resolve-json`.
+pub(crate) fn run_wall_remote(remote_target: String) -> io::Result<i32> {
+    match run_wall_remote_inner(&remote_target) {
+        Ok(code) => Ok(code),
+        Err(err) => {
+            eprintln!("error: {err}");
+            crate::remote::print_remote_error_hint(&err, &remote_target);
+            Ok(1)
+        }
+    }
+}
+
+fn run_wall_remote_inner(remote_target: &str) -> io::Result<i32> {
+    let session_name = crate::session::active_name()
+        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+    let remote_ssh = RemoteSsh::new(remote_target.to_owned(), manage_ssh_config);
+    let prepared_remote = prepare_remote_herdr(&remote_ssh, false)?;
+    ensure_remote_server_ready(
+        &remote_ssh,
+        &prepared_remote.remote_herdr,
+        prepared_remote.installed_or_replaced,
+        prepared_remote.stop_after_install_approved,
+        false,
+    )?;
+    let remote_herdr_path = prepared_remote.remote_herdr.shell_path.clone();
+
+    let local_socket = local_forward_socket_path(remote_target, &session_name);
+    let program = std::env::args()
+        .next()
+        .unwrap_or_else(|| "herdr".to_string());
+    let reattach_command = wall_reattach_command(&program, remote_target);
+
+    let _bridge = SshStdioBridge::start(
+        remote_target.to_owned(),
+        prepared_remote.remote_herdr,
+        local_socket.clone(),
+        session_name,
+        remote_ssh.options(),
+    )?;
+
+    let exe = std::env::current_exe()?;
+    let status = Command::new(exe)
+        .arg("wall")
+        .env(
+            crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
+            &local_socket,
+        )
+        .env(REATTACH_COMMAND_ENV_VAR, &reattach_command)
+        .env(
+            REMOTE_KEYBINDINGS_ENV_VAR,
+            RemoteKeybindings::Local.as_str(),
+        )
+        .env(crate::cli::WALL_REMOTE_TARGET_ENV_VAR, remote_target)
+        .env(crate::cli::WALL_REMOTE_HERDR_ENV_VAR, &remote_herdr_path)
+        .env_remove(crate::api::SOCKET_PATH_ENV_VAR)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()?;
+    Ok(status.code().unwrap_or(1))
+}
+
+/// The command that opens the same remote wall again, for the message shown
+/// when its connection drops.
+fn wall_reattach_command(program: &str, remote_target: &str) -> String {
+    let program = crate::platform::remote_reattach_program(program);
+    let remote_target = crate::platform::remote_reattach_argument(remote_target);
+    format!("{program} wall --remote {remote_target}")
+}
+
+/// Lists what a wall on `remote_target` can show, by running
+/// `herdr wall --targets-json` there over the ssh connection `prepare_remote_herdr`
+/// left open. `remote_herdr` is the far side's herdr, already quoted for its
+/// shell.
+pub(crate) fn list_wall_targets_over_ssh(
+    remote_target: &str,
+    remote_herdr: &str,
+) -> io::Result<Vec<crate::client::wall::WallTarget>> {
+    let manage_ssh_config = crate::config::Config::load()
+        .config
+        .remote
+        .manage_ssh_config;
+    let ssh = RemoteSsh::new(remote_target.to_owned(), manage_ssh_config);
+    let output = ssh.sh_output(&format!("exec {remote_herdr} wall --targets-json\n"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = stderr.trim();
+        return Err(io::Error::other(if stderr.is_empty() {
+            format!("listing targets on {remote_target} failed")
+        } else {
+            format!("listing targets on {remote_target}: {stderr}")
+        }));
+    }
+    crate::client::wall::parse_targets_json(&String::from_utf8_lossy(&output.stdout))
+        .map_err(io::Error::other)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
