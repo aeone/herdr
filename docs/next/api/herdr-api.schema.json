@@ -4233,6 +4233,7 @@
               "type": "object"
             },
             {
+              "description": "With `pane_id`, that pane's status, checked against a fresh snapshot as\nwell as the event stream. Without it, every pane's status events as\nthey are emitted, with no per-pane snapshot polling -- the cheap way to\nfollow many panes at once.",
               "properties": {
                 "agent_status": {
                   "anyOf": [
@@ -4245,7 +4246,10 @@
                   ]
                 },
                 "pane_id": {
-                  "type": "string"
+                  "type": [
+                    "string",
+                    "null"
+                  ]
                 },
                 "type": {
                   "const": "pane.agent_status_changed",
@@ -4253,8 +4257,7 @@
                 }
               },
               "required": [
-                "type",
-                "pane_id"
+                "type"
               ],
               "type": "object"
             },

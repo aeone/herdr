@@ -261,7 +261,25 @@ impl ActiveSubscription {
                 }))
             }
             Subscription::PaneAgentStatusChanged {
-                pane_id,
+                pane_id: None,
+                agent_status: None,
+            } => Ok(Self::Event(ActiveEventSubscription {
+                event_kind: crate::api::schema::EventKind::PaneAgentStatusChanged,
+                last_sequence: event_hub.current_sequence(),
+            })),
+            Subscription::PaneAgentStatusChanged {
+                pane_id: None,
+                agent_status: Some(_),
+            } => Err(ErrorResponse {
+                id: request_id.to_string(),
+                error: ErrorBody {
+                    code: "invalid_request".into(),
+                    message: "pane.agent_status_changed takes agent_status only with a pane_id"
+                        .into(),
+                },
+            }),
+            Subscription::PaneAgentStatusChanged {
+                pane_id: Some(pane_id),
                 agent_status,
             } => {
                 let last_sequence = event_hub.current_sequence();
@@ -760,6 +778,53 @@ mod tests {
         assert_eq!(data.pane_id, "pane_1");
         assert_eq!(data.workspace_id, "workspace_1");
         assert_eq!(data.scroll, scrolled_back);
+    }
+
+    #[test]
+    fn paneless_agent_status_subscription_follows_events_without_snapshots() {
+        let event_hub = EventHub::default();
+        event_hub.push(presentation_event(Some("before subscribing")));
+        let (api_tx, mut api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut subscription = ActiveSubscription::new(
+            Subscription::PaneAgentStatusChanged {
+                pane_id: None,
+                agent_status: None,
+            },
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+        )
+        .expect("pane-less subscription");
+
+        assert!(subscription.poll(&api_tx, &event_hub).is_none());
+        event_hub.push(presentation_event(Some("after subscribing")));
+        let event = subscription
+            .poll(&api_tx, &event_hub)
+            .expect("status event");
+        assert_eq!(event["data"]["title"], "after subscribing");
+        assert!(subscription.poll(&api_tx, &event_hub).is_none());
+        assert!(
+            api_rx.try_recv().is_err(),
+            "following every pane must not snapshot any of them"
+        );
+    }
+
+    #[test]
+    fn paneless_agent_status_subscription_rejects_a_status_filter() {
+        let event_hub = EventHub::default();
+        let (api_tx, _api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = ActiveSubscription::new(
+            Subscription::PaneAgentStatusChanged {
+                pane_id: None,
+                agent_status: Some(AgentStatus::Done),
+            },
+            "test",
+            0,
+            &api_tx,
+            &event_hub,
+        );
+        assert!(matches!(result, Err(err) if err.error.code == "invalid_request"));
     }
 
     #[test]

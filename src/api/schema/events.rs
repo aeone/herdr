@@ -72,9 +72,14 @@ pub enum Subscription {
         #[serde(default = "super::common::default_true")]
         strip_ansi: bool,
     },
+    /// With `pane_id`, that pane's status, checked against a fresh snapshot as
+    /// well as the event stream. Without it, every pane's status events as
+    /// they are emitted, with no per-pane snapshot polling -- the cheap way to
+    /// follow many panes at once.
     #[serde(rename = "pane.agent_status_changed")]
     PaneAgentStatusChanged {
-        pane_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_status: Option<AgentStatus>,
     },

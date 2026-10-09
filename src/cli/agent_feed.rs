@@ -6,9 +6,10 @@
 //! this over SSH so it tracks the host live instead of polling on a timer.
 //!
 //! Structure changes (panes and workspaces appearing or leaving) come from
-//! global event subscriptions; per-agent-pane status changes come from
-//! `pane.agent_status_changed` subscriptions, which the feed rebuilds whenever
-//! the set of agent panes changes.
+//! global event subscriptions, and status changes from one `pane.agent_status_changed`
+//! subscription without a pane, which follows every pane's status events. A
+//! server too old to take that is followed the way it used to be: one
+//! subscription per agent pane, rebuilt whenever the set of agent panes changes.
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -50,9 +51,17 @@ pub(super) fn run_agent_feed(args: &[String]) -> std::io::Result<i32> {
     // than one interval stale.
     spawn_heartbeat(tx.clone());
 
+    // Every pane's status over one connection. A per-pane subscription has the
+    // server snapshot its pane on every 100ms tick, process tree and all, so
+    // following a hundred agents that way kept the watched server's main loop
+    // busy for most of a core while every one of them sat idle.
+    let all_status_rejected = Arc::new(AtomicBool::new(false));
+    spawn_all_status_watch(tx.clone(), Arc::clone(&all_status_rejected));
+
     let mut stdout = std::io::stdout().lock();
     let mut agent_pane_ids = emit_block(&mut stdout, &herdr_bin)?;
-    let mut status_watch = StatusWatch::new(&agent_pane_ids, &tx);
+    // Only used against a server that turned the all-panes watch down.
+    let mut status_watch: Option<StatusWatch> = None;
 
     loop {
         // Block until something changes, then drain and coalesce the burst.
@@ -62,12 +71,14 @@ pub(super) fn run_agent_feed(args: &[String]) -> std::io::Result<i32> {
         while rx.recv_timeout(COALESCE_WINDOW).is_ok() {}
 
         let new_agent_pane_ids = emit_block(&mut stdout, &herdr_bin)?;
-        if new_agent_pane_ids != agent_pane_ids {
+        if all_status_rejected.load(Ordering::Relaxed)
+            && (status_watch.is_none() || new_agent_pane_ids != agent_pane_ids)
+        {
             // The agent-pane set moved, so the per-pane status watches have to
             // follow it.
-            agent_pane_ids = new_agent_pane_ids;
-            status_watch = StatusWatch::new(&agent_pane_ids, &tx);
+            status_watch = Some(StatusWatch::new(&new_agent_pane_ids, &tx));
         }
+        agent_pane_ids = new_agent_pane_ids;
         let _ = &status_watch;
     }
 }
@@ -153,6 +164,27 @@ fn spawn_structure_watch(tx: mpsc::Sender<Change>) {
     spawn_subscription_watch(subscriptions, tx, Arc::new(AtomicBool::new(false)));
 }
 
+/// One status subscription for every pane, signalling a change on each status
+/// event. A server that rejects the pane-less form sets `rejected`, signals once
+/// so the feed falls back to per-pane watches straight away, and is left alone.
+fn spawn_all_status_watch(tx: mpsc::Sender<Change>, rejected: Arc<AtomicBool>) {
+    let subscriptions = serde_json::json!([{ "type": "pane.agent_status_changed" }]);
+    std::thread::spawn(move || {
+        let never = AtomicBool::new(false);
+        loop {
+            match watch_subscription(&subscriptions, &tx, &never, true) {
+                WatchEnd::Retry => std::thread::sleep(Duration::from_secs(1)),
+                WatchEnd::Stop => break,
+                WatchEnd::Rejected => {
+                    rejected.store(true, Ordering::Relaxed);
+                    let _ = tx.send(Change);
+                    break;
+                }
+            }
+        }
+    });
+}
+
 /// Per-agent-pane status subscriptions. Dropping this joins nothing — the
 /// watcher threads exit on their own when their connection is closed, which the
 /// server does when the client goes away; a stale thread just re-signals a
@@ -213,8 +245,34 @@ fn watch_subscription_once(
     tx: &mpsc::Sender<Change>,
     stop: &AtomicBool,
 ) -> bool {
+    !matches!(
+        watch_subscription(subscriptions, tx, stop, false),
+        WatchEnd::Stop
+    )
+}
+
+/// How one subscription connection ended.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchEnd {
+    /// The connection failed or closed; try again.
+    Retry,
+    /// `tx` is closed or the watch was told to stop.
+    Stop,
+    /// The server answered the subscribe request with an error.
+    Rejected,
+}
+
+/// One subscription connection. With `detect_rejection`, an error answer to
+/// the subscribe request ends it as [`WatchEnd::Rejected`] instead of counting
+/// as a change.
+fn watch_subscription(
+    subscriptions: &serde_json::Value,
+    tx: &mpsc::Sender<Change>,
+    stop: &AtomicBool,
+    detect_rejection: bool,
+) -> WatchEnd {
     let Ok(mut stream) = connect_local_stream(&crate::api::socket_path()) else {
-        return true;
+        return WatchEnd::Retry;
     };
     // Read in short waits rather than blocking for ever, so a watch that is no
     // longer wanted lets go of its connection promptly instead of when its pane
@@ -233,7 +291,7 @@ fn watch_subscription_once(
         .and_then(|()| stream.flush())
         .is_err()
     {
-        return true;
+        return WatchEnd::Retry;
     }
     // Read a line at a time rather than through `lines()`, so a wait that times
     // out is a quiet moment -- keep the connection, keep any half-read line, and
@@ -243,10 +301,10 @@ fn watch_subscription_once(
     let mut line = String::new();
     loop {
         if stop.load(Ordering::Relaxed) {
-            return false;
+            return WatchEnd::Stop;
         }
         match reader.read_line(&mut line) {
-            Ok(0) => return true,
+            Ok(0) => return WatchEnd::Retry,
             Ok(_) => {}
             Err(err)
                 if matches!(
@@ -256,7 +314,7 @@ fn watch_subscription_once(
             {
                 continue;
             }
-            Err(_) => return true,
+            Err(_) => return WatchEnd::Retry,
         }
         if !line.ends_with('\n') {
             // A line still arriving; wait for the rest of it.
@@ -271,10 +329,18 @@ fn watch_subscription_once(
         if complete.contains("subscription_started") {
             continue;
         }
+        if detect_rejection && is_error_response(complete) {
+            return WatchEnd::Rejected;
+        }
         if tx.send(Change).is_err() {
-            return false;
+            return WatchEnd::Stop;
         }
     }
+}
+
+/// Whether a line is an API error response rather than an event.
+fn is_error_response(line: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(line).is_ok_and(|value| value.get("error").is_some())
 }
 
 #[cfg(test)]
@@ -287,6 +353,19 @@ mod tests {
     /// and connections running for the life of the feed, and a host whose
     /// mirrors were churning reached the descriptor limit within the quarter
     /// hour -- with the server it was watching holding the other end of each.
+    /// An older server turns the pane-less status subscription down with an
+    /// error line; that, and only that, sends the feed back to per-pane watches.
+    #[test]
+    fn an_error_answer_reads_as_a_rejection_and_events_do_not() {
+        assert!(is_error_response(
+            r#"{"id":"cli:agent:feed:sub","error":{"code":"invalid_request","message":"missing field `pane_id`"}}"#
+        ));
+        assert!(!is_error_response(
+            r#"{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1","agent_status":"idle"}}"#
+        ));
+        assert!(!is_error_response("not json"));
+    }
+
     #[test]
     fn dropping_a_generation_of_watches_stops_them() {
         let (tx, _rx) = mpsc::channel::<Change>();
