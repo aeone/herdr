@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- Added walls: `herdr wall <target>...` (and `workspace.create_wall`) opens a workspace tiled with live views of agents, panes or spaces that live elsewhere, named the way `herdr focus` names them. A tile that is only watched draws its terminal re-wrapped to fit and never resizes it; the tile being typed into takes the terminal's size while it is focused and gives it back when focus moves on, so the agent's own pane and every other watcher are left alone. Closing a tile closes only the view. Walls are not saved with the session.
+- Added `herdr wall add <target>... [--wall WORKSPACE]` (and `workspace.wall_add`), adding tiles to an open wall, the active one by default, and re-tiling it into an even grid without moving focus.
+- Added a `wall_add` keybind, unset by default, which opens the session navigator to pick what goes on a wall: a new tile of the active wall, or a new wall when the active workspace is not one. A tab or space stands for its focused pane, and a tile for the terminal it shows.
 - Claude Code panes now report their session title as the agent's display name: the `/rename` name when one is set, otherwise the generated title. Herdr reads it from the session transcript, so it also reaches mirrored panes.
 - New `agent_title` and `agent_title_with_workspace` agent sidebar tokens show the agent's title, else its given name, else its tab, the second followed by its workspace in parentheses.
 

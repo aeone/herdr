@@ -176,6 +176,19 @@ focus_agent = "prefix+alt+1..9"
 
 The legacy `[keys.indexed]` table is still parsed for compatibility, but new configs should prefer the explicit action fields.
 
+## Walls
+
+A wall is a workspace tiled with live views of terminals that live elsewhere: agents, panes, or the focused pane of a space. `herdr wall <target>...` opens one, naming targets the way `herdr focus` does, and `herdr wall add <target>... [--wall WORKSPACE]` adds tiles to an open wall (the active one by default). A tile draws its terminal re-wrapped to fit without resizing it; the tile you type into takes the terminal's size while it is focused and gives it back when you move on. Closing a tile closes only the view, never the terminal it shows. Walls are not saved with the session.
+
+`wall_add` opens the session navigator, with its usual search and keys, to pick what goes on a wall. Choosing a pane adds that pane's terminal; choosing a tab or workspace adds its focused pane. When the active workspace is a wall, the choice becomes a new tile and the wall is re-tiled into an even grid, with focus left where it was. Otherwise the choice opens a new wall. It is unset by default:
+
+```toml
+[keys]
+wall_add = ["ctrl+shift+g", "prefix+y"]
+```
+
+`ctrl+shift+g` can only be told apart from `ctrl+g` by terminals that report modified keys, such as those using the kitty keyboard protocol; elsewhere it arrives as plain `ctrl+g` and does not reach `wall_add`. `prefix+G` is the same key as `prefix+shift+g`, which `new_worktree` uses by default, so binding it to `wall_add` takes it from `new_worktree`.
+
 ## Custom command keybindings
 
 Custom commands use the same keybinding syntax.
