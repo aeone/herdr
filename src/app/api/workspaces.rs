@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
     WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
-    WorkspaceReportMetadataParams, WorkspaceTarget, WorkspaceWallParams,
+    WorkspaceReportMetadataParams, WorkspaceTarget, WorkspaceWallAddParams, WorkspaceWallParams,
 };
 use crate::app::App;
 
@@ -87,6 +87,41 @@ impl App {
                         "the new wall has no pane to report",
                     ),
                 }
+            }
+            Err((code, message)) => encode_error(id, &code, message),
+        }
+    }
+
+    pub(super) fn handle_workspace_wall_add(
+        &mut self,
+        id: String,
+        params: WorkspaceWallAddParams,
+    ) -> String {
+        let index = match params.workspace_id.as_deref() {
+            Some(workspace_id) => match self.parse_workspace_id(workspace_id) {
+                Some(index) => index,
+                None => return workspace_not_found(id, workspace_id),
+            },
+            None => match self.state.active {
+                Some(index) => index,
+                None => return encode_error(id, "not_a_wall", "no workspace is active"),
+            },
+        };
+        match self.add_to_wall(index, &params.terminal_ids) {
+            Ok(added) => {
+                let panes: Vec<_> = added
+                    .into_iter()
+                    .filter_map(|pane_id| self.pane_info(index, pane_id))
+                    .collect();
+                for pane in &panes {
+                    self.emit_event(EventEnvelope {
+                        event: EventKind::PaneCreated,
+                        data: EventData::PaneCreated { pane: pane.clone() },
+                    });
+                }
+                let tab_idx = self.state.workspaces[index].active_tab;
+                self.emit_layout_updated_event(index, tab_idx);
+                encode_success(id, ResponseResult::PaneList { panes })
             }
             Err((code, message)) => encode_error(id, &code, message),
         }
@@ -829,5 +864,96 @@ mod tests {
 
         assert!(response.contains("invalid_params"), "{response}");
         assert_eq!(app.state.workspaces.len(), 1);
+    }
+
+    fn wall_add_request(
+        workspace_id: Option<String>,
+        terminal_ids: Vec<String>,
+    ) -> crate::api::schema::Request {
+        crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorkspaceWallAdd(WorkspaceWallAddParams {
+                workspace_id,
+                terminal_ids,
+            }),
+        }
+    }
+
+    fn root_terminal(app: &crate::app::App, ws_idx: usize) -> String {
+        app.state.workspaces[ws_idx].tabs[0]
+            .panes
+            .values()
+            .next()
+            .map(|pane| pane.attached_terminal_id.to_string())
+            .expect("terminal")
+    }
+
+    /// Two ordinary workspaces and a wall of the first, which is active.
+    fn app_with_wall() -> (crate::app::App, String) {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        let first = root_terminal(&app, 0);
+        let index = app.create_wall(&[first], None, true).expect("wall opens");
+        let wall_id = app.state.workspaces[index].id.clone();
+        (app, wall_id)
+    }
+
+    #[tokio::test]
+    async fn adding_to_a_wall_adds_a_tile_per_terminal() {
+        let (mut app, wall_id) = app_with_wall();
+        let first = root_terminal(&app, 0);
+        let second = root_terminal(&app, 1);
+
+        let response = app.handle_api_request(wall_add_request(
+            Some(wall_id),
+            vec![second.clone(), first.clone()],
+        ));
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success");
+        let ResponseResult::PaneList { panes } = success.result else {
+            panic!("expected the new tiles: {response}");
+        };
+        assert_eq!(panes.len(), 2);
+        let wall = &app.state.workspaces[2];
+        let shown: Vec<_> = wall.tabs[0]
+            .layout
+            .pane_ids()
+            .iter()
+            .filter_map(|pane_id| wall.tabs[0].panes[pane_id].view_of.clone())
+            .map(|terminal_id| terminal_id.to_string())
+            .collect();
+        assert_eq!(shown, vec![first.clone(), second, first]);
+        assert_eq!(wall.wall.as_ref().map(|wall| wall.targets.len()), Some(3));
+    }
+
+    #[tokio::test]
+    async fn adding_without_a_wall_named_adds_to_the_active_one() {
+        let (mut app, _wall_id) = app_with_wall();
+        let second = root_terminal(&app, 1);
+
+        let response = app.handle_api_request(wall_add_request(None, vec![second]));
+
+        assert!(!response.contains("error"), "{response}");
+        assert_eq!(app.state.workspaces[2].tabs[0].panes.len(), 2);
+
+        app.state.active = Some(0);
+        let first = root_terminal(&app, 0);
+        let response = app.handle_api_request(wall_add_request(None, vec![first]));
+        assert!(response.contains("not_a_wall"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn adding_to_an_unknown_wall_or_an_unknown_terminal_is_refused() {
+        let (mut app, wall_id) = app_with_wall();
+        let second = root_terminal(&app, 1);
+
+        let response =
+            app.handle_api_request(wall_add_request(Some("w_missing".into()), vec![second]));
+        assert!(response.contains("workspace_not_found"), "{response}");
+
+        let response =
+            app.handle_api_request(wall_add_request(Some(wall_id), vec!["term_missing".into()]));
+        assert!(response.contains("terminal_not_found"), "{response}");
+        assert_eq!(app.state.workspaces[2].tabs[0].panes.len(), 1);
     }
 }

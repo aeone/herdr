@@ -271,6 +271,28 @@ impl TileLayout {
         true
     }
 
+    /// Give the pane `from` the id `to`, keeping its place in the tree and,
+    /// if it had it, the focus. Returns false, changing nothing, when `from`
+    /// is not in the layout or `to` already is.
+    ///
+    /// This is how a freshly built layout takes over panes that already
+    /// exist: build the shape with new ids, then hand each place to the pane
+    /// that should sit there.
+    pub fn rename_pane(&mut self, from: PaneId, to: PaneId) -> bool {
+        let ids = self.pane_ids();
+        if from == to || !ids.contains(&from) || ids.contains(&to) {
+            return false;
+        }
+        swap_pane_ids(&mut self.root, from, to);
+        if self.focus == from {
+            self.focus = to;
+        }
+        if self.prev_focus == Some(from) {
+            self.prev_focus = Some(to);
+        }
+        true
+    }
+
     /// Set the ratio of a split node at the given path.
     pub fn set_ratio_at(&mut self, path: &[bool], ratio: f32) -> bool {
         set_ratio_at(&mut self.root, path, ratio.clamp(0.1, 0.9))

@@ -28,6 +28,16 @@ pub struct WorkspaceWallParams {
     pub label: Option<String>,
 }
 
+/// More views for a wall, each added as a tile after the ones it has. The
+/// wall is re-tiled into the grid for its new count, and focus stays put.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceWallAddParams {
+    /// The wall to add to. Omitted, the active workspace, which must be one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    pub terminal_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceRenameParams {
     pub workspace_id: String,

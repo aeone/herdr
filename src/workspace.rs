@@ -593,6 +593,39 @@ impl Workspace {
         Ok((workspace, placeholders))
     }
 
+    /// Adds a view of `target` to this wall's active tab, re-tiling it, and
+    /// returns the new tile's placeholder for the caller to register.
+    ///
+    /// Refuses a workspace that is not a wall: a view among ordinary panes
+    /// would be re-tiled along with them, throwing away a layout someone made.
+    pub fn add_wall_view(
+        &mut self,
+        target: &TerminalId,
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<NewPane> {
+        if self.wall.is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "workspace is not a wall",
+            ));
+        }
+        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "wall has no tab",
+            ));
+        };
+        let tile = tab.add_view(target, initial_cwd, rows, cols, host_terminal_theme)?;
+        self.register_new_pane(tile.pane_id);
+        if let Some(wall) = &mut self.wall {
+            wall.targets.push(target.clone());
+        }
+        Ok(tile)
+    }
+
     /// Whether this workspace exists only while the server runs: a mirror
     /// rebuilt from its host, or a wall of views. Neither is persisted.
     pub fn is_runtime_only(&self) -> bool {

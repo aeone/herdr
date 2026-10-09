@@ -67,6 +67,8 @@ pub enum Method {
     WorkspaceCreate(WorkspaceCreateParams),
     #[serde(rename = "workspace.create_wall")]
     WorkspaceCreateWall(WorkspaceWallParams),
+    #[serde(rename = "workspace.wall_add")]
+    WorkspaceWallAdd(WorkspaceWallAddParams),
     #[serde(rename = "workspace.list")]
     WorkspaceList(EmptyParams),
     #[serde(rename = "workspace.get")]

@@ -684,6 +684,7 @@ fn main() -> io::Result<()> {
         println!("       herdr pane <subcommand> ...");
         println!("       herdr focus <agent|space|pane> [--observe]");
         println!("       herdr wall <agent|space|pane>... [--label NAME]");
+        println!("       herdr wall add <agent|space|pane>... [--wall WORKSPACE]");
         println!("       herdr session <subcommand> ...");
         println!("       herdr integration <subcommand> ...");
         println!();

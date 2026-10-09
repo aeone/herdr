@@ -85,6 +85,35 @@ pub(crate) fn tile_grid(layout: &mut TileLayout, root: PaneId, count: usize) -> 
     tiles
 }
 
+/// Lays `tiles` out afresh as the grid `tile_grid` makes for that many, in
+/// the order given, keeping focus on the pane that had it.
+///
+/// Splitting one tile to make room would leave the grid lopsided -- one tile
+/// halved while the rest stay whole -- so the shape is rebuilt with new ids
+/// and each place then handed to the pane that belongs in it.
+pub(crate) fn regrid(layout: &mut TileLayout, tiles: &[PaneId]) {
+    let Some(&first) = tiles.first() else {
+        return;
+    };
+    let focused = layout.focused();
+    let (mut grid, root) = TileLayout::new();
+    let places = tile_grid(&mut grid, root, tiles.len());
+    if places.len() != tiles.len() {
+        // tile_grid only comes up short if a split it just made vanished,
+        // which cannot happen; keep the old layout rather than lose a pane.
+        return;
+    }
+    for (place, tile) in places.iter().zip(tiles) {
+        grid.rename_pane(*place, *tile);
+    }
+    grid.focus_pane(if tiles.contains(&focused) {
+        focused
+    } else {
+        first
+    });
+    *layout = grid;
+}
+
 pub struct Tab {
     pub custom_name: Option<String>,
     /// Which remote pane this tab mirrors, when its space is a mirror.
@@ -224,10 +253,7 @@ impl Tab {
     /// A tab tiled with one view per target, in reading order.
     ///
     /// Every tile is a view pane: it shows its target and holds a placeholder
-    /// terminal of its own. The placeholder is a streamed runtime nobody feeds,
-    /// and what it would send back -- input, resizes -- goes into a channel
-    /// whose receiver is dropped here, so it goes nowhere. Input never reaches
-    /// it anyway: a view types into the terminal it shows.
+    /// terminal of its own (see `view_tile`).
     #[allow(clippy::too_many_arguments)]
     pub fn new_wall(
         number: usize,
@@ -240,53 +266,106 @@ impl Tab {
         render_notify: Arc<Notify>,
         render_dirty: Arc<RenderSignal>,
     ) -> std::io::Result<(Self, Vec<NewPane>)> {
-        let (mut layout, root_id) = TileLayout::new();
-        let pane_ids = tile_grid(&mut layout, root_id, targets.len());
-        let mut panes = HashMap::new();
+        let (layout, root_id) = TileLayout::new();
+        let mut tab = Self {
+            custom_name: None,
+            remote_mirror: None,
+            number,
+            root_pane: root_id,
+            layout,
+            panes: HashMap::new(),
+            #[cfg(test)]
+            runtimes: HashMap::new(),
+            zoomed: false,
+            events,
+            render_notify,
+            render_dirty,
+        };
+        let pane_ids = tile_grid(&mut tab.layout, root_id, targets.len());
         let mut tiles = Vec::with_capacity(pane_ids.len());
         for (pane_id, target) in pane_ids.into_iter().zip(targets) {
-            let (requests, _) = mpsc::channel(1);
-            let runtime = TerminalRuntime::streamed(
+            tiles.push(tab.view_tile(
                 pane_id,
+                target,
+                initial_cwd.clone(),
                 rows,
                 cols,
-                // The placeholder only ever holds a line saying its view has
-                // ended, so it needs no scrollback to speak of.
-                0,
                 host_terminal_theme,
-                events.clone(),
-                render_notify.clone(),
-                render_dirty.clone(),
-                requests,
-            )?;
-            let terminal_id = TerminalId::alloc();
-            let terminal = TerminalState::new(terminal_id.clone(), initial_cwd.clone());
-            panes.insert(pane_id, PaneState::view(terminal_id, target.clone()));
-            tiles.push(NewPane {
-                pane_id,
-                terminal,
-                runtime,
-            });
+            )?);
         }
-        layout.focus_pane(root_id);
+        tab.layout.focus_pane(root_id);
+        Ok((tab, tiles))
+    }
 
-        Ok((
-            Self {
-                custom_name: None,
-                remote_mirror: None,
-                number,
-                root_pane: root_id,
-                layout,
-                panes,
-                #[cfg(test)]
-                runtimes: HashMap::new(),
-                zoomed: false,
-                events,
-                render_notify,
-                render_dirty,
-            },
-            tiles,
-        ))
+    /// Adds a view of `target` to a tab of views, and lays every tile out
+    /// again as the grid `tile_grid` makes for one more.
+    ///
+    /// The existing tiles keep what they show and their reading order, and
+    /// the new one goes last. Focus stays where it was: adding to a wall is
+    /// done while looking at something else, and moving focus would hand the
+    /// typing size to the new tile's terminal.
+    pub fn add_view(
+        &mut self,
+        target: &TerminalId,
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<NewPane> {
+        let pane_id = PaneId::alloc();
+        let tile = self.view_tile(
+            pane_id,
+            target,
+            initial_cwd,
+            rows,
+            cols,
+            host_terminal_theme,
+        )?;
+        let mut order = self.layout.pane_ids();
+        order.push(pane_id);
+        regrid(&mut self.layout, &order);
+        Ok(tile)
+    }
+
+    /// Makes `pane_id` a view of `target`, with a placeholder terminal of
+    /// its own, and returns the placeholder for the caller to register.
+    ///
+    /// The placeholder is a streamed runtime nobody feeds, and what it would
+    /// send back -- input, resizes -- goes into a channel whose receiver is
+    /// dropped here, so it goes nowhere. Input never reaches it anyway: a
+    /// view types into the terminal it shows.
+    fn view_tile(
+        &mut self,
+        pane_id: PaneId,
+        target: &TerminalId,
+        initial_cwd: PathBuf,
+        rows: u16,
+        cols: u16,
+        host_terminal_theme: crate::terminal_theme::TerminalTheme,
+    ) -> std::io::Result<NewPane> {
+        let (requests, _) = mpsc::channel(1);
+        let runtime = TerminalRuntime::streamed(
+            pane_id,
+            rows,
+            cols,
+            // The placeholder only ever holds a line saying its view has
+            // ended, so it needs no scrollback to speak of.
+            0,
+            host_terminal_theme,
+            self.events.clone(),
+            self.render_notify.clone(),
+            self.render_dirty.clone(),
+            requests,
+        )?;
+        let terminal_id = TerminalId::alloc();
+        let terminal = TerminalState::new(terminal_id.clone(), initial_cwd);
+        self.panes
+            .insert(pane_id, PaneState::view(terminal_id, target.clone()));
+        Ok(NewPane {
+            pane_id,
+            terminal,
+            runtime,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]

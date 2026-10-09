@@ -92,6 +92,14 @@ impl AppState {
     }
 }
 
+/// Where a view's placeholder says it is. Nothing runs in it, but a
+/// terminal has to be somewhere, and a wall's views come from anywhere.
+fn wall_cwd() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
 /// What a view says in place of a terminal that has gone.
 const VIEW_ENDED_MESSAGE: &[u8] =
     b"\r\n\x1b[2m[view ended: the terminal it showed has closed]\x1b[0m";
@@ -125,12 +133,9 @@ impl App {
         }
 
         let (rows, cols) = self.state.estimate_pane_size();
-        let cwd = std::env::var_os("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
         let (mut workspace, placeholders) = Workspace::new_wall(
             targets,
-            cwd,
+            wall_cwd(),
             rows,
             cols,
             self.state.host_terminal_theme,
@@ -158,6 +163,64 @@ impl App {
             self.state.mode = Mode::Terminal;
         }
         Ok(idx)
+    }
+
+    /// Adds a tile to the wall at `ws_idx` for each terminal, in order, and
+    /// returns the new tiles. The wall is re-tiled into the grid for its new
+    /// count, and focus stays on the tile that had it.
+    ///
+    /// Terminals are resolved as `create_wall` resolves them, and all of them
+    /// before anything is added, so a bad id adds nothing. A terminal the wall
+    /// already shows gets a second tile: it is no harder to close one than to
+    /// explain why nothing happened. Errors are `(code, message)` for the API
+    /// to pass on.
+    pub(crate) fn add_to_wall(
+        &mut self,
+        ws_idx: usize,
+        terminal_ids: &[String],
+    ) -> Result<Vec<crate::layout::PaneId>, (String, String)> {
+        let Some(workspace) = self.state.workspaces.get(ws_idx) else {
+            return Err(("workspace_not_found".into(), "workspace not found".into()));
+        };
+        if workspace.wall.is_none() {
+            return Err((
+                "not_a_wall".into(),
+                format!("workspace {} is not a wall", workspace.id),
+            ));
+        }
+        if terminal_ids.is_empty() {
+            return Err((
+                "invalid_params".into(),
+                "nothing to add: no terminal ids given".into(),
+            ));
+        }
+        let mut targets = Vec::with_capacity(terminal_ids.len());
+        for terminal_id in terminal_ids {
+            let Some(target) = self.state.resolve_wall_target(terminal_id) else {
+                return Err((
+                    "terminal_not_found".into(),
+                    format!("terminal {terminal_id} not found"),
+                ));
+            };
+            targets.push(target);
+        }
+
+        let (rows, cols) = self.state.estimate_pane_size();
+        let theme = self.state.host_terminal_theme;
+        let mut added = Vec::with_capacity(targets.len());
+        for target in &targets {
+            let tile = self.state.workspaces[ws_idx]
+                .add_wall_view(target, wall_cwd(), rows, cols, theme)
+                .map_err(|err| ("wall_add_failed".to_string(), err.to_string()))?;
+            self.terminal_runtimes
+                .insert(tile.terminal.id.clone(), tile.runtime);
+            self.state
+                .terminals
+                .insert(tile.terminal.id.clone(), tile.terminal);
+            self.state.remove_alias_shadowed_by_new_pane(tile.pane_id);
+            added.push(tile.pane_id);
+        }
+        Ok(added)
     }
 
     /// Ends the views of a terminal that is shutting down, leaving a line in
@@ -502,6 +565,118 @@ mod tests {
             wall.tabs[0].panes[&root].view_of,
             Some(fixture.other.clone())
         );
+    }
+
+    /// An app holding the fixture's workspaces: two homes and a wall of both,
+    /// with the wall active.
+    fn app_with_wall() -> (App, Fixture) {
+        let mut app = crate::app::tests::test_app();
+        let mut fixture = Fixture::new();
+        app.state.workspaces = std::mem::take(&mut fixture.state.workspaces);
+        app.state.active = Some(2);
+        app.state.mode = Mode::Terminal;
+        (app, fixture)
+    }
+
+    #[tokio::test]
+    async fn a_wall_with_new_tiles_is_laid_out_as_an_even_grid() {
+        let (mut app, fixture) = app_with_wall();
+        app.add_to_wall(2, &[fixture.target.to_string(), fixture.other.to_string()])
+            .expect("added");
+
+        let tab = &app.state.workspaces[2].tabs[0];
+        let rects: Vec<_> = tab
+            .layout
+            .panes(AREA)
+            .into_iter()
+            .map(|info| info.rect)
+            .collect();
+        assert_eq!(rects.len(), 4);
+        assert!(rects
+            .iter()
+            .all(|rect| rect.width == 60 && rect.height == 20));
+        // The tiles that were there keep their place at the top.
+        assert_eq!(&tab.layout.pane_ids()[..2], &fixture.tiles[..]);
+    }
+
+    #[tokio::test]
+    async fn adding_to_a_wall_refuses_what_it_cannot_show_and_adds_nothing() {
+        let (mut app, fixture) = app_with_wall();
+
+        let unknown = app.add_to_wall(2, &[fixture.other.to_string(), "term_missing".into()]);
+        assert_eq!(
+            unknown.map_err(|(code, _)| code),
+            Err("terminal_not_found".to_string())
+        );
+        let not_a_wall = app.add_to_wall(0, &[fixture.other.to_string()]);
+        assert_eq!(
+            not_a_wall.map_err(|(code, _)| code),
+            Err("not_a_wall".to_string())
+        );
+
+        assert_eq!(app.state.workspaces[2].tabs[0].panes.len(), 2);
+        assert_eq!(app.state.workspaces[0].tabs[0].panes.len(), 1);
+    }
+
+    /// An app with the target's terminal registered the way a real one is,
+    /// and a wall made by `create_wall`, so its placeholders are real too.
+    fn app_with_live_target() -> (App, Fixture, usize) {
+        let (mut app, fixture) = app_with_wall();
+        app.terminal_runtimes.insert(
+            fixture.target.clone(),
+            TerminalRuntime::test_with_screen_bytes(80, 24, b"target"),
+        );
+        app.state.terminals.insert(
+            fixture.target.clone(),
+            crate::terminal::TerminalState::new(fixture.target.clone(), "/".into()),
+        );
+        let index = app
+            .create_wall(
+                &[fixture.target.to_string(), fixture.other.to_string()],
+                None,
+                true,
+            )
+            .expect("wall");
+        (app, fixture, index)
+    }
+
+    fn target_is_alive(app: &App, target: &TerminalId) -> bool {
+        app.terminal_runtimes.get(target).is_some()
+            && app.state.terminals.contains_key(target)
+            && !app.state.terminal_runtime_shutdowns.contains(target)
+            && app.state.workspaces[0].tabs[0]
+                .panes
+                .values()
+                .any(|pane| &pane.attached_terminal_id == target)
+    }
+
+    #[tokio::test]
+    async fn closing_a_tile_closes_the_view_and_not_the_terminal_it_shows() {
+        let (mut app, fixture, index) = app_with_live_target();
+        let tab = &app.state.workspaces[index].tabs[0];
+        let tile = tab.layout.focused();
+        let placeholder = tab.panes[&tile].attached_terminal_id.clone();
+        assert_eq!(tab.panes[&tile].view_of, Some(fixture.target.clone()));
+
+        app.close_focused_pane_via_api_requires_confirmation();
+
+        let tab = &app.state.workspaces[index].tabs[0];
+        assert_eq!(tab.panes.len(), 1);
+        assert!(app.terminal_runtimes.get(&placeholder).is_none());
+        assert!(!app.state.terminals.contains_key(&placeholder));
+        assert!(target_is_alive(&app, &fixture.target));
+    }
+
+    #[tokio::test]
+    async fn closing_the_last_tile_closes_the_wall_and_not_the_terminal_it_shows() {
+        let (mut app, fixture, index) = app_with_live_target();
+        app.close_focused_pane_via_api_requires_confirmation();
+        assert_eq!(app.state.workspaces.len(), index + 1);
+
+        app.close_focused_pane_via_api_requires_confirmation();
+
+        assert_eq!(app.state.workspaces.len(), index);
+        assert!(target_is_alive(&app, &fixture.target));
     }
 
     #[tokio::test]
