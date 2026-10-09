@@ -135,7 +135,10 @@ pub(crate) fn group_by_status(
     offline: &dyn Fn(&AgentPanelEntry) -> bool,
     mark: &dyn Fn(&AgentPanelEntry) -> Option<crate::app::MarkLevel>,
 ) -> Vec<AgentGroup> {
-    entries.sort_by_key(|entry| {
+    // Cached: a mark is looked up by a key formatted from the space and pane,
+    // and an uncached sort asks for it on every comparison rather than once
+    // per row.
+    entries.sort_by_cached_key(|entry| {
         let group = AgentGroup::of_with_offline(entry, now_ms, offline(entry));
         (
             group,

@@ -416,6 +416,11 @@ pub fn render_with_runtime_registry(
     terminal_runtimes: &TerminalRuntimeRegistry,
     frame: &mut Frame,
 ) {
+    // The draw pass asks for the agent rows from as many places as the view
+    // pass does -- the list itself, its scroll metrics, where it starts -- so it
+    // shares one walk of the panes the same way. `app` is borrowed immutably
+    // for the whole draw, so nothing can go stale inside it.
+    let _view_compute_epoch = self::sidebar::ViewComputeEpochGuard::enter();
     let tab_bar_area = app.view.tab_bar_rect;
     let terminal_area = app.view.terminal_area;
 

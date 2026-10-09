@@ -33,9 +33,9 @@ std::thread_local! {
     /// against this value, and a stored entry can only match while its guard
     /// -- or a guard opened after it, since ids only increase -- is live.
     static ACTIVE_VIEW_COMPUTE_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// The last [`agent_panel_entries_with_runtimes`] result computed with no
-    /// explicit `terminal_runtimes`, alongside the epoch it was computed in.
-    static AGENT_PANEL_ENTRIES_CACHE: std::cell::RefCell<Option<(u64, Vec<AgentPanelEntry>)>> =
+    /// The last [`agent_panel_entries_with_runtimes`] result, alongside the
+    /// epoch it was computed in and which `terminal_runtimes` it was given.
+    static AGENT_PANEL_ENTRIES_CACHE: std::cell::RefCell<Option<(AgentPanelEntriesKey, Vec<AgentPanelEntry>)>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -88,6 +88,12 @@ impl Drop for ViewComputeEpochGuard {
         ACTIVE_VIEW_COMPUTE_EPOCH.with(|active| active.set(self.previous_active_epoch));
     }
 }
+
+/// What an [`AGENT_PANEL_ENTRIES_CACHE`] entry was computed against: the view
+/// epoch, and the address of the runtime registry it was handed, if any. The
+/// address is enough to tell registries apart because a registry is borrowed
+/// for the whole of the guarded pass and cannot change or move under it.
+type AgentPanelEntriesKey = (u64, Option<usize>);
 
 #[cfg(test)]
 std::thread_local! {
@@ -308,22 +314,26 @@ fn agent_panel_entries_with_runtimes(
     app: &AppState,
     terminal_runtimes: Option<&TerminalRuntimeRegistry>,
 ) -> Vec<AgentPanelEntry> {
-    // Only the no-explicit-registry path is cached: it's the one every
-    // sidebar/agent-panel helper calls internally within a view computation,
-    // and caching against an arbitrary `&TerminalRuntimeRegistry` would need
-    // a key that actually reflects the registry's content, not just whether
-    // a reference happened to be passed.
+    // Cached per view pass and per registry. The server's draw pass hands every
+    // sidebar helper its runtime registry, and while only the registry-less
+    // calls were cached, each of the half-dozen helpers a sidebar draw calls
+    // rebuilt and re-sorted every agent row on its own -- most of a full
+    // render's cost with a hundred agents listed.
     //
     // active_epoch == 0 means no ViewComputeEpochGuard is open right now, so
     // the cache is bypassed entirely -- see the guard's doc comment for why
     // that matters.
     let active_epoch = ACTIVE_VIEW_COMPUTE_EPOCH.with(|active| active.get());
-    if terminal_runtimes.is_none() && active_epoch != 0 {
+    if active_epoch != 0 {
+        let key: AgentPanelEntriesKey = (
+            active_epoch,
+            terminal_runtimes.map(|registry| std::ptr::from_ref(registry) as usize),
+        );
         let cached = AGENT_PANEL_ENTRIES_CACHE.with(|cache| {
             cache
                 .borrow()
                 .as_ref()
-                .filter(|(cached_epoch, _)| *cached_epoch == active_epoch)
+                .filter(|(cached_key, _)| *cached_key == key)
                 .map(|(_, entries)| entries.clone())
         });
         if let Some(entries) = cached {
@@ -331,8 +341,7 @@ fn agent_panel_entries_with_runtimes(
         }
 
         let entries = compute_agent_panel_entries(app, terminal_runtimes);
-        AGENT_PANEL_ENTRIES_CACHE
-            .with(|cache| *cache.borrow_mut() = Some((active_epoch, entries.clone())));
+        AGENT_PANEL_ENTRIES_CACHE.with(|cache| *cache.borrow_mut() = Some((key, entries.clone())));
         return entries;
     }
 
@@ -2308,6 +2317,29 @@ mod tests {
             agent_panel_entries(&app); // outer epoch again, cache holds inner's: compute (3)
         }
         assert_eq!(test_agent_panel_entries_compute_count(), 3);
+    }
+
+    /// The server's draw pass hands every helper its runtime registry. Those
+    /// calls share one computation per registry too, and never one made
+    /// without a registry, whose rows can differ.
+    #[test]
+    fn agent_panel_entries_cache_keys_on_the_registry_it_was_given() {
+        let app = app_with_workspaces(20);
+        let registry = TerminalRuntimeRegistry::new();
+        let other_registry = TerminalRuntimeRegistry::new();
+
+        test_reset_agent_panel_entries_compute_count();
+        {
+            let _epoch = ViewComputeEpochGuard::enter();
+            for _ in 0..5 {
+                agent_panel_entries_from(&app, &registry);
+            }
+            assert_eq!(test_agent_panel_entries_compute_count(), 1);
+            agent_panel_entries(&app);
+            assert_eq!(test_agent_panel_entries_compute_count(), 2);
+            agent_panel_entries_from(&app, &other_registry);
+            assert_eq!(test_agent_panel_entries_compute_count(), 3);
+        }
     }
 
     #[test]
