@@ -240,8 +240,6 @@ impl Picker {
     }
 }
 
-/// Whether every character of `needle` appears in `haystack` in order, the
-
 /// How well `term` matches `line`: 0 for a whole word, 1 for a substring, 2
 /// for its letters in order, `None` for no match.
 fn match_rank(term: &str, line: &str) -> Option<u8> {
@@ -259,6 +257,7 @@ fn match_rank(term: &str, line: &str) -> Option<u8> {
     }
 }
 
+/// Whether every character of `needle` appears in `haystack` in order, the
 /// loose match fzf makes by default.
 fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut haystack = haystack.chars();
