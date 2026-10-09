@@ -67,6 +67,8 @@ struct PanePresentationSnapshot {
     title: Option<String>,
     display_agent: Option<String>,
     state_labels: std::collections::HashMap<String, String>,
+    attention: Option<crate::api::schema::AgentAttentionKind>,
+    attention_label: Option<String>,
 }
 
 impl PanePresentationSnapshot {
@@ -75,6 +77,8 @@ impl PanePresentationSnapshot {
             title: pane.title.clone(),
             display_agent: pane.display_agent.clone(),
             state_labels: pane.state_labels.clone(),
+            attention: pane.attention,
+            attention_label: pane.attention_label.clone(),
         }
     }
 
@@ -82,11 +86,15 @@ impl PanePresentationSnapshot {
         title: &Option<String>,
         display_agent: &Option<String>,
         state_labels: &std::collections::HashMap<String, String>,
+        attention: Option<crate::api::schema::AgentAttentionKind>,
+        attention_label: &Option<String>,
     ) -> Self {
         Self {
             title: title.clone(),
             display_agent: display_agent.clone(),
             state_labels: state_labels.clone(),
+            attention,
+            attention_label: attention_label.clone(),
         }
     }
 }
@@ -270,6 +278,8 @@ impl ActiveSubscription {
                         title: probe.title,
                         display_agent: probe.display_agent,
                         state_labels: probe.state_labels,
+                        attention: probe.attention,
+                        attention_label: probe.attention_label,
                     });
 
                 Ok(Self::AgentStatusChanged(Box::new(
@@ -402,6 +412,8 @@ impl ActiveAgentStatusChangedSubscription {
                 title,
                 display_agent,
                 state_labels,
+                attention,
+                attention_label,
             } = event.data
             else {
                 continue;
@@ -414,8 +426,13 @@ impl ActiveAgentStatusChangedSubscription {
             }
             saw_status_event = true;
 
-            let current_presentation =
-                PanePresentationSnapshot::from_event(&title, &display_agent, &state_labels);
+            let current_presentation = PanePresentationSnapshot::from_event(
+                &title,
+                &display_agent,
+                &state_labels,
+                attention,
+                &attention_label,
+            );
             self.last_status = Some(agent_status);
             self.last_presentation = Some(current_presentation);
             if self
@@ -436,6 +453,8 @@ impl ActiveAgentStatusChangedSubscription {
                     title,
                     display_agent,
                     state_labels,
+                    attention,
+                    attention_label,
                 }),
             }));
         }
@@ -502,6 +521,8 @@ impl ActiveAgentStatusChangedSubscription {
                 title: pane.title,
                 display_agent: pane.display_agent,
                 state_labels: pane.state_labels,
+                attention: pane.attention,
+                attention_label: pane.attention_label,
             }),
         })
     }
@@ -648,6 +669,8 @@ mod tests {
                 title: title.map(str::to_string),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                attention: None,
+                attention_label: None,
             },
         }
     }
@@ -670,6 +693,8 @@ mod tests {
             display_agent: None,
             agent_status: AgentStatus::Unknown,
             state_labels: HashMap::new(),
+            attention: None,
+            attention_label: None,
             tokens: HashMap::new(),
             agent_session: None,
             scroll,
@@ -748,6 +773,8 @@ mod tests {
                 title: None,
                 display_agent: None,
                 state_labels: HashMap::new(),
+                attention: None,
+                attention_label: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: None,
@@ -785,6 +812,8 @@ mod tests {
                 title: None,
                 display_agent: None,
                 state_labels: HashMap::new(),
+                attention: None,
+                attention_label: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
@@ -795,6 +824,8 @@ mod tests {
                 title: None,
                 display_agent: None,
                 state_labels: HashMap::new(),
+                attention: None,
+                attention_label: None,
             }),
             request_prefix: "test".into(),
         };
@@ -830,6 +861,8 @@ mod tests {
                 title: Some("short lived".into()),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                attention: None,
+                attention_label: None,
             }),
             last_sequence: event_hub.current_sequence(),
             initial_event: Some(PaneAgentStatusChangedEvent {
@@ -840,6 +873,8 @@ mod tests {
                 title: Some("short lived".into()),
                 display_agent: None,
                 state_labels: HashMap::new(),
+                attention: None,
+                attention_label: None,
             }),
             request_prefix: "test".into(),
         };

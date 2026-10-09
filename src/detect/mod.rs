@@ -19,8 +19,23 @@ pub enum AgentState {
     Unknown,
 }
 
+/// Time-sensitive attention a blocked agent needs, beyond being blocked.
+///
+/// Blocked says the agent is waiting on its user; it says nothing about how
+/// long it will wait. Some dialogs give up -- a message held from another
+/// Claude session expires if nobody answers it -- and those are urgent. Kept
+/// beside the state rather than as a state of its own so that everything that
+/// already understands blocked (mirrors, hooks, notifications, `agent_status`)
+/// keeps working, and only what wants the distinction reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAttention {
+    /// A short word for what is waiting, such as "message", shown in place of
+    /// "blocked" where the state is spelled out.
+    pub label: Option<String>,
+}
+
 /// Screen-derived agent state plus confidence metadata used for source arbitration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentDetection {
     pub state: AgentState,
     /// True when the current screen is an agent-owned viewer that shows
@@ -38,6 +53,8 @@ pub struct AgentDetection {
     pub visible_working: bool,
     /// Background shells the agent left running, when a rule reported them.
     pub background_shells: Option<u32>,
+    /// Set when the rule that decided a blocked state marks it urgent.
+    pub attention: Option<AgentAttention>,
 }
 
 /// Which agent we detected running in a pane.
@@ -279,6 +296,7 @@ pub fn detect_agent_with_osc(
             visible_blocker: false,
             visible_working: false,
             background_shells: None,
+            attention: None,
         };
     };
     manifest::detect_with_osc(

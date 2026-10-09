@@ -41,6 +41,10 @@ pub struct EffectivePresentation {
     pub title: Option<String>,
     pub display_agent: Option<String>,
     pub state_labels: HashMap<String, String>,
+    /// Time-sensitive attention, present only while the agent is blocked:
+    /// urgency is about how long a block will wait, so it means nothing once
+    /// the agent has moved on, whatever was last reported.
+    pub attention: Option<crate::detect::AgentAttention>,
 }
 
 impl EffectivePresentation {
@@ -49,6 +53,7 @@ impl EffectivePresentation {
             title: None,
             display_agent: None,
             state_labels: HashMap::new(),
+            attention: None,
         }
     }
 }
@@ -394,7 +399,7 @@ impl TerminalState {
 
     fn effective_presentation_for_state_at_with_ttl(
         &self,
-        _state: AgentState,
+        state: AgentState,
         now: Instant,
         enforce_ttl: bool,
     ) -> EffectivePresentation {
@@ -402,6 +407,9 @@ impl TerminalState {
         presentation.title = self.newest_metadata_title(now, enforce_ttl);
         presentation.display_agent = self.newest_metadata_display_agent(now, enforce_ttl);
         presentation.state_labels = self.effective_metadata_state_labels(now, enforce_ttl);
+        if state == AgentState::Blocked {
+            presentation.attention = self.reported_attention().cloned();
+        }
         presentation
     }
 

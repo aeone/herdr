@@ -2725,6 +2725,12 @@ impl AppState {
                 self.set_background_shells(pane_id, shells);
                 Vec::new()
             }
+            AppEvent::AttentionReported { pane_id, attention } => self
+                .update_terminal_state(pane_id, |terminal| {
+                    terminal.set_reported_attention_at(attention, Instant::now())
+                })
+                .into_iter()
+                .collect(),
             AppEvent::UpdateReady {
                 version,
                 install_command,
@@ -3256,6 +3262,12 @@ impl AppState {
             );
         }
 
+        // The delay exists to let a block that clears itself go unannounced.
+        // An urgent one will not clear itself -- it expires -- so it is queued
+        // due now rather than delivered here, which sends it down the same
+        // path as every delayed notification, terminal and desktop delivery
+        // included, on the next tick.
+        let urgent = change.state == AgentState::Blocked && change.presentation.attention.is_some();
         self.pending_agent_notifications.insert(
             pane_id,
             PendingAgentNotification {
@@ -3267,10 +3279,13 @@ impl AppState {
                 state: change.state,
                 deadline: {
                     let now = std::time::Instant::now();
-                    let delay_seconds = self
-                        .toast_config
-                        .delay_seconds
-                        .min(crate::config::MAX_TOAST_DELAY_SECONDS);
+                    let delay_seconds = if urgent {
+                        0
+                    } else {
+                        self.toast_config
+                            .delay_seconds
+                            .min(crate::config::MAX_TOAST_DELAY_SECONDS)
+                    };
                     now.checked_add(std::time::Duration::from_secs(delay_seconds))
                         .unwrap_or(now)
                 },
@@ -5283,6 +5298,62 @@ mod tests {
         assert_eq!(toast.title, "pi needs attention");
         assert_eq!(toast.context, "background · 2");
         assert!(state.pending_agent_notifications.is_empty());
+    }
+
+    /// An urgent block expires if nobody answers it, so the notification delay
+    /// -- there to let a block that clears itself go unannounced -- does not
+    /// hold it back: it is due at once, on the delayed path.
+    #[test]
+    fn urgent_block_is_announced_without_the_notification_delay() {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.active = Some(0);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = 30;
+        let bg_pane_id = *state.workspaces[1].panes.keys().next().unwrap();
+        let attention = crate::detect::AgentAttention {
+            label: Some("message".into()),
+        };
+
+        // Attention lands first and changes nothing while the agent is idle.
+        let before = state.handle_app_event(AppEvent::AttentionReported {
+            pane_id: bg_pane_id,
+            attention: Some(attention.clone()),
+        });
+        assert!(before.is_empty());
+        let updates = state.handle_app_event(AppEvent::StateChanged {
+            pane_id: bg_pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Blocked,
+            visible_blocker: true,
+            visible_working: false,
+            process_exited: false,
+            observed_at: std::time::Instant::now(),
+        });
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].presentation.attention, Some(attention));
+
+        let deadline = state.next_pending_agent_notification_deadline().unwrap();
+        assert!(deadline <= std::time::Instant::now());
+        assert_eq!(
+            state
+                .drain_due_agent_notifications(std::time::Instant::now())
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.toast.as_ref().unwrap().kind,
+            ToastKind::NeedsAttention
+        );
+
+        // The dialog goes: still blocked for a moment, but no longer urgent,
+        // and that alone is a presentation change clients hear about.
+        let cleared = state.handle_app_event(AppEvent::AttentionReported {
+            pane_id: bg_pane_id,
+            attention: None,
+        });
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0].state, AgentState::Blocked);
+        assert_eq!(cleared[0].presentation.attention, None);
     }
 
     #[test]

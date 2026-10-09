@@ -713,6 +713,7 @@ fn spawn_basic_detection_task(
         let mut agent_startup_grace_until = None;
         let mut pending_idle = PendingIdleConfirmation::default();
         let mut last_background_shells: Option<Option<u32>> = None;
+        let mut last_attention: Option<Option<crate::detect::AgentAttention>> = None;
 
         loop {
             let sleep_duration = if pending_idle.active() {
@@ -741,6 +742,7 @@ fn spawn_basic_detection_task(
                     last_screen_scan_detection_content_seq = None;
                     agent_startup_grace_until = None;
                     pending_idle.clear();
+                    last_attention = None;
                 }
             }
 
@@ -842,6 +844,8 @@ fn spawn_basic_detection_task(
                     if agent_changed {
                         pending_idle.clear();
                         last_screen_scan_detection_content_seq = None;
+                        // Nor what the last one was waiting on.
+                        last_attention = None;
                         // A new foreground agent must not inherit OSC
                         // title/progress evidence from the previous process.
                         terminal.clear_agent_osc_state();
@@ -945,6 +949,17 @@ fn spawn_basic_detection_task(
                     .send(AppEvent::BackgroundShellsReported {
                         pane_id,
                         shells: screen_detection.background_shells,
+                    })
+                    .await;
+            }
+            // Ahead of the state it goes with, so a pane turning blocked
+            // already knows it is urgent when the change lands.
+            if last_attention.as_ref() != Some(&screen_detection.attention) {
+                last_attention = Some(screen_detection.attention.clone());
+                let _ = state_events
+                    .send(AppEvent::AttentionReported {
+                        pane_id,
+                        attention: screen_detection.attention.clone(),
                     })
                     .await;
             }
@@ -2491,6 +2506,7 @@ impl PaneRuntime {
                 let mut agent_startup_grace_until = None;
                 let mut pending_idle = PendingIdleConfirmation::default();
                 let mut last_background_shells: Option<Option<u32>> = None;
+                let mut last_attention: Option<Option<crate::detect::AgentAttention>> = None;
 
                 tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -2529,6 +2545,7 @@ impl PaneRuntime {
                             last_screen_scan_detection_content_seq = None;
                             agent_startup_grace_until = None;
                             pending_idle.clear();
+                            last_attention = None;
                         }
                     }
 
@@ -2655,6 +2672,8 @@ impl PaneRuntime {
                                 {
                                     pending_idle.clear();
                                     last_screen_scan_detection_content_seq = None;
+                                    // Nor what the last one was waiting on.
+                                    last_attention = None;
                                     // A new foreground agent must not inherit OSC
                                     // title/progress evidence from the previous process.
                                     terminal.clear_agent_osc_state();
@@ -2788,6 +2807,17 @@ impl PaneRuntime {
                             .send(AppEvent::BackgroundShellsReported {
                                 pane_id,
                                 shells: screen_detection.background_shells,
+                            })
+                            .await;
+                    }
+                    // Ahead of the state it goes with, so a pane turning blocked
+                    // already knows it is urgent when the change lands.
+                    if last_attention.as_ref() != Some(&screen_detection.attention) {
+                        last_attention = Some(screen_detection.attention.clone());
+                        let _ = state_events
+                            .send(AppEvent::AttentionReported {
+                                pane_id,
+                                attention: screen_detection.attention.clone(),
                             })
                             .await;
                     }

@@ -137,6 +137,38 @@ pub enum ClientWindowTitleReason {
     NoForegroundClient,
 }
 
+/// Attention a blocked agent needs beyond being blocked.
+///
+/// `urgent` means the thing the agent is waiting on gives up if nobody answers
+/// it, such as a message held from another Claude session, so it wants the
+/// user sooner than an ordinary block. The agent's status stays `blocked`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentAttentionKind {
+    Urgent,
+}
+
+impl AgentAttentionKind {
+    /// The API form of a terminal's effective attention: the kind, and the
+    /// short label naming what is waiting.
+    pub(crate) fn from_attention(
+        attention: Option<&crate::detect::AgentAttention>,
+    ) -> (Option<Self>, Option<String>) {
+        match attention {
+            Some(attention) => (Some(Self::Urgent), attention.label.clone()),
+            None => (None, None),
+        }
+    }
+
+    /// The other way, for a mirror reading what its host reported.
+    pub(crate) fn to_attention(
+        kind: Option<Self>,
+        label: Option<String>,
+    ) -> Option<crate::detect::AgentAttention> {
+        kind.map(|Self::Urgent| crate::detect::AgentAttention { label })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PaneAgentState {

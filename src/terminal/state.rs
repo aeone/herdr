@@ -123,6 +123,10 @@ pub struct TerminalState {
     pub detected_agent: Option<Agent>,
     /// Background shells the agent left running, as its screen last reported.
     pub background_shells: Option<u32>,
+    /// Time-sensitive attention as last reported for this terminal, by its
+    /// screen or by the host a mirror stands for. Held as reported and only
+    /// presented while the state is blocked; see `EffectivePresentation`.
+    reported_attention: Option<crate::detect::AgentAttention>,
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
     fallback_observed_at: Option<Instant>,
@@ -174,6 +178,7 @@ impl TerminalState {
             fallback_visible_blocker: false,
             fallback_observed_at: None,
             background_shells: None,
+            reported_attention: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
@@ -207,6 +212,8 @@ impl TerminalState {
         agent: Agent,
         now: Instant,
     ) -> TerminalStateMutation {
+        // A new process is not waiting on whatever the last one was.
+        self.reported_attention = None;
         let starts_acquisition = !self
             .should_ignore_detected_state_under_full_lifecycle_hook(Some(agent), false)
             && !self.detected_state_observed_before_release_suppression(Some(agent), now);
@@ -223,6 +230,41 @@ impl TerminalState {
             self.agent_process_acquisition_pending = true;
         }
         mutation
+    }
+
+    /// Records whether this terminal's agent needs time-sensitive attention.
+    ///
+    /// Goes through the effective-state recompute like any other presentation
+    /// change, so a pane already blocked that turns urgent, or stops being,
+    /// is reported to clients and redrawn without waiting for a state change.
+    pub fn set_reported_attention_at(
+        &mut self,
+        attention: Option<crate::detect::AgentAttention>,
+        now: Instant,
+    ) -> Option<TerminalStateMutation> {
+        if self.reported_attention == attention {
+            return None;
+        }
+        let previous_agent_label = self.effective_agent_label().map(str::to_string);
+        let previous_known_agent = self.effective_known_agent();
+        let previous_state = self.state;
+        let previous_presentation = self.effective_presentation_for_state_at(previous_state, now);
+        self.reported_attention = attention;
+        Some(TerminalStateMutation {
+            effective_state_change: self.recompute_effective_state(
+                previous_agent_label,
+                previous_known_agent,
+                previous_state,
+                previous_presentation,
+                now,
+            ),
+            session_ref_changed: false,
+            agent_released: false,
+        })
+    }
+
+    pub(crate) fn reported_attention(&self) -> Option<&crate::detect::AgentAttention> {
+        self.reported_attention.as_ref()
     }
 
     /// Records a state change against the idle clock.
@@ -2237,7 +2279,7 @@ impl TerminalState {
     }
 }
 
-pub(crate) fn stabilize_agent_detection(detection: crate::detect::AgentDetection) -> AgentState {
+pub(crate) fn stabilize_agent_detection(detection: &crate::detect::AgentDetection) -> AgentState {
     detection.state
 }
 
@@ -2354,9 +2396,10 @@ mod tests {
             visible_blocker: false,
             visible_working: false,
             background_shells: None,
+            attention: None,
         };
 
-        assert_eq!(stabilize_agent_detection(detection), AgentState::Idle);
+        assert_eq!(stabilize_agent_detection(&detection), AgentState::Idle);
     }
 
     #[test]

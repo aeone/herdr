@@ -39,6 +39,13 @@
     },
     "event": {
       "$defs": {
+        "AgentAttentionKind": {
+          "description": "Attention a blocked agent needs beyond being blocked.\n\n`urgent` means the thing the agent is waiting on gives up if nobody answers\nit, such as a message held from another Claude session, so it wants the\nuser sooner than an ordinary block. The agent's status stays `blocked`.",
+          "enum": [
+            "urgent"
+          ],
+          "type": "string"
+        },
         "AgentSessionInfo": {
           "properties": {
             "agent": {
@@ -684,6 +691,22 @@
                 "agent_status": {
                   "$ref": "#/schemas/event/$defs/AgentStatus"
                 },
+                "attention": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/event/$defs/AgentAttentionKind"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "attention_label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "display_agent": {
                   "type": [
                     "string",
@@ -841,6 +864,24 @@
             },
             "agent_status": {
               "$ref": "#/schemas/event/$defs/AgentStatus"
+            },
+            "attention": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/event/$defs/AgentAttentionKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set when the agent is blocked on something that gives up if nobody\nanswers it. `agent_status` stays `blocked`; this says how urgently."
+            },
+            "attention_label": {
+              "description": "A short word for what an urgent agent is waiting on, such as \"message\".",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "cwd": {
               "type": [
@@ -6095,6 +6136,13 @@
     },
     "subscription_event": {
       "$defs": {
+        "AgentAttentionKind": {
+          "description": "Attention a blocked agent needs beyond being blocked.\n\n`urgent` means the thing the agent is waiting on gives up if nobody answers\nit, such as a message held from another Claude session, so it wants the\nuser sooner than an ordinary block. The agent's status stays `blocked`.",
+          "enum": [
+            "urgent"
+          ],
+          "type": "string"
+        },
         "AgentStatus": {
           "oneOf": [
             {
@@ -6128,6 +6176,22 @@
             },
             "agent_status": {
               "$ref": "#/schemas/subscription_event/$defs/AgentStatus"
+            },
+            "attention": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/subscription_event/$defs/AgentAttentionKind"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attention_label": {
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "display_agent": {
               "type": [
@@ -6321,6 +6385,13 @@
     },
     "success_response": {
       "$defs": {
+        "AgentAttentionKind": {
+          "description": "Attention a blocked agent needs beyond being blocked.\n\n`urgent` means the thing the agent is waiting on gives up if nobody answers\nit, such as a message held from another Claude session, so it wants the\nuser sooner than an ordinary block. The agent's status stays `blocked`.",
+          "enum": [
+            "urgent"
+          ],
+          "type": "string"
+        },
         "AgentInfo": {
           "properties": {
             "agent": {
@@ -6341,6 +6412,24 @@
             },
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "attention": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentAttentionKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set when the agent is blocked on something that gives up if nobody\nanswers it. `agent_status` stays `blocked`; this says how urgently."
+            },
+            "attention_label": {
+              "description": "A short word for what an urgent agent is waiting on, such as \"message\".",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "cwd": {
               "type": [
@@ -7183,6 +7272,22 @@
                 "agent_status": {
                   "$ref": "#/schemas/success_response/$defs/AgentStatus"
                 },
+                "attention": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentAttentionKind"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "attention_label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
                 "display_agent": {
                   "type": [
                     "string",
@@ -7700,6 +7805,24 @@
             },
             "agent_status": {
               "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "attention": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentAttentionKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Set when the agent is blocked on something that gives up if nobody\nanswers it. `agent_status` stays `blocked`; this says how urgently."
+            },
+            "attention_label": {
+              "description": "A short word for what an urgent agent is waiting on, such as \"message\".",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "cwd": {
               "type": [

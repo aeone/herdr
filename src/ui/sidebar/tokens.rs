@@ -288,6 +288,7 @@ mod tests {
             last_agent_state_change_seq: None,
             agent_state_changed_at_ms: None,
             state_labels: std::collections::HashMap::new(),
+            attention: None,
             tokens: std::collections::HashMap::new(),
         }
     }

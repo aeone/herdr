@@ -473,6 +473,13 @@ pub struct PaneInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_agent: Option<String>,
     pub agent_status: AgentStatus,
+    /// Set when the agent is blocked on something that gives up if nobody
+    /// answers it. `agent_status` stays `blocked`; this says how urgently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<super::common::AgentAttentionKind>,
+    /// A short word for what an urgent agent is waiting on, such as "message".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_label: Option<String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub state_labels: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]

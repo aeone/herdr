@@ -29,10 +29,15 @@ line_regex = ['^\s*[⏸⏵].*·\s+[1-9]\d*\s+shells?\s+(?:·|$)']
 # blocked -- otherwise it reads as idle and nothing says a message is sitting
 # there. The title and the deliver option are both required: the title alone
 # can stay in scrollback after the dialog is gone.
+#
+# Urgent, because unlike a permission prompt the message does not wait: it
+# expires if nobody answers, so this wants the user sooner than other blocks.
 [[rules]]
 id = "held_cross_session_message"
 state = "blocked"
 priority = 985
 region = "whole_recent"
 visible_blocker = true
+urgent = true
+label = "message"
 contains = ["held message from another session", "deliver this message to claude"]

@@ -35,6 +35,8 @@ pub struct DetectionExplain {
     pub visible_blocker: bool,
     pub visible_working: bool,
     pub background_shells: Option<u32>,
+    /// Set when the matched rule marks its blocked state urgent.
+    pub attention: Option<super::AgentAttention>,
     pub skip_state_update: bool,
     pub skipped_update_reason: Option<String>,
     pub fallback_reason: Option<String>,
@@ -228,6 +230,14 @@ struct ManifestRule {
     visible_working: bool,
     #[serde(default)]
     skip_state_update: bool,
+    /// Marks a blocked state as time-sensitive: the dialog behind it gives up
+    /// if nobody answers. Only valid with `state = "blocked"`.
+    #[serde(default)]
+    urgent: bool,
+    /// A short word for what is waiting, shown in place of "blocked" where
+    /// the state is spelled out. Only valid on an urgent rule.
+    #[serde(default)]
+    label: Option<String>,
     #[serde(default)]
     all: Vec<ManifestGate>,
     #[serde(default)]
@@ -351,6 +361,8 @@ const MAX_TOTAL_GATES: usize = 512;
 const MAX_MATCHERS_PER_GATE: usize = 32;
 const MAX_TOTAL_MATCHERS: usize = 1024;
 const MAX_MATCHER_CHARS: usize = 512;
+/// Room for a word in a sidebar row, not a sentence.
+const MAX_RULE_LABEL_CHARS: usize = 24;
 
 pub(crate) fn reload_manifests() -> Vec<AgentManifestSummary> {
     let _reload_guard = MANIFEST_RELOAD_LOCK
@@ -454,6 +466,7 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
             visible_blocker: false,
             visible_working: false,
             background_shells: None,
+            attention: None,
             skip_state_update: false,
             skipped_update_reason: None,
             fallback_reason: Some("unknown_agent".to_string()),
@@ -497,6 +510,7 @@ impl DetectionExplain {
             visible_blocker: self.visible_blocker,
             visible_working: self.visible_working,
             background_shells: self.background_shells,
+            attention: self.attention,
         }
     }
 }
@@ -593,6 +607,9 @@ fn evaluate_loaded_manifest(
         visible_blocker: rule.visible_blocker && state == AgentState::Blocked,
         visible_working: rule.visible_working && state == AgentState::Working,
         background_shells,
+        attention: (rule.urgent && state == AgentState::Blocked).then(|| super::AgentAttention {
+            label: rule.label.clone(),
+        }),
         skip_state_update: rule.skip_state_update,
         skipped_update_reason,
         fallback_reason: None,
@@ -659,6 +676,7 @@ fn fallback_explain(
         visible_blocker: false,
         visible_working: false,
         background_shells: None,
+        attention: None,
         skip_state_update: false,
         skipped_update_reason: None,
         fallback_reason: known_agent.then(|| DEFAULT_KNOWN_AGENT_IDLE_FALLBACK.to_string()),
@@ -1054,6 +1072,7 @@ pub fn explain_to_json_value(explain: &DetectionExplain) -> serde_json::Value {
             "source": rule.source.label(),
         })
     });
+    let attention = explain.attention.as_ref();
     let evaluated_rules: Vec<_> = explain
         .evaluated_rules
         .iter()
@@ -1094,6 +1113,8 @@ pub fn explain_to_json_value(explain: &DetectionExplain) -> serde_json::Value {
         "visible_idle": explain.visible_idle,
         "visible_blocker": explain.visible_blocker,
         "visible_working": explain.visible_working,
+        "attention": attention.map(|_| "urgent"),
+        "attention_label": attention.and_then(|attention| attention.label.as_deref()),
         "screen_detection_skipped": explain.screen_detection_skipped,
         "skip_state_update": explain.skip_state_update,
         "skipped_update_reason": explain.skipped_update_reason,
@@ -1168,6 +1189,24 @@ fn validate_manifest(manifest: &AgentManifest) -> Result<(), String> {
             if rule.visible_idle || rule.visible_blocker || rule.visible_working {
                 return Err(format!(
                     "rule {} uses skip_state_update with visible state evidence",
+                    rule.id
+                ));
+            }
+        }
+        if rule.urgent && rule.state != Some(ManifestState::Blocked) {
+            return Err(format!(
+                "rule {} uses urgent without state = \"blocked\"",
+                rule.id
+            ));
+        }
+        if let Some(label) = &rule.label {
+            if !rule.urgent {
+                return Err(format!("rule {} uses label without urgent = true", rule.id));
+            }
+            let length = label.trim().chars().count();
+            if length == 0 || length > MAX_RULE_LABEL_CHARS || label.chars().any(char::is_control) {
+                return Err(format!(
+                    "rule {} label must be 1 to {MAX_RULE_LABEL_CHARS} printable characters",
                     rule.id
                 ));
             }

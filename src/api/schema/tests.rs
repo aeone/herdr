@@ -746,6 +746,8 @@ fn worktree_request_and_response_round_trip() {
                 display_agent: None,
                 agent_status: AgentStatus::Unknown,
                 state_labels: HashMap::new(),
+                attention: None,
+                attention_label: None,
                 tokens: HashMap::new(),
                 agent_session: None,
                 scroll: None,
@@ -1179,6 +1181,8 @@ fn create_response_round_trips_with_root_pane() {
                 display_agent: None,
                 agent_status: AgentStatus::Unknown,
                 state_labels: HashMap::new(),
+                attention: None,
+                attention_label: None,
                 tokens: HashMap::new(),
                 agent_session: None,
                 scroll: None,
@@ -1327,4 +1331,33 @@ fn popup_close_request_round_trips() {
 
     assert_eq!(json["method"], "popup.close");
     assert_eq!(json["params"], serde_json::json!({}));
+}
+
+#[test]
+fn pane_info_carries_urgent_attention_and_reads_hosts_that_do_not() {
+    let old_host = serde_json::json!({
+        "pane_id": "w1:p1",
+        "terminal_id": "term_1",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "agent": "claude",
+        "agent_status": "blocked",
+        "revision": 0,
+    });
+    let mut pane: PaneInfo = serde_json::from_value(old_host).unwrap();
+    assert_eq!(pane.attention, None);
+    assert_eq!(pane.attention_label, None);
+    let plain = serde_json::to_value(&pane).unwrap();
+    assert!(plain.get("attention").is_none());
+    assert!(plain.get("attention_label").is_none());
+
+    pane.attention = Some(AgentAttentionKind::Urgent);
+    pane.attention_label = Some("message".into());
+    let urgent = serde_json::to_value(&pane).unwrap();
+    assert_eq!(urgent["attention"], "urgent");
+    assert_eq!(urgent["attention_label"], "message");
+    assert_eq!(urgent["agent_status"], "blocked");
+    let back: PaneInfo = serde_json::from_value(urgent).unwrap();
+    assert_eq!(back, pane);
 }

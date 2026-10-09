@@ -27,6 +27,8 @@ pub struct PaneDetail {
     pub last_agent_state_change_seq: Option<u64>,
     pub agent_state_changed_at_ms: Option<u64>,
     pub state_labels: HashMap<String, String>,
+    /// Time-sensitive attention, present only while the agent is blocked.
+    pub attention: Option<crate::detect::AgentAttention>,
     pub tokens: HashMap<String, String>,
 }
 
@@ -76,6 +78,7 @@ impl Tab {
                     last_agent_state_change_seq: terminal.last_agent_state_change_seq,
                     agent_state_changed_at_ms: terminal.agent_state_changed_at_ms,
                     state_labels: presentation.state_labels,
+                    attention: presentation.attention,
                     tokens: terminal.metadata_tokens.values(),
                 })
             })

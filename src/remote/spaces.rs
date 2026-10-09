@@ -96,6 +96,13 @@ pub(crate) struct RemoteAgentPane {
     /// now, and since mirrors are rebuilt on every reconnect and handoff, every
     /// mirrored agent would read as having just gone idle.
     pub(crate) state_changed_at_ms: Option<u64>,
+    /// Time-sensitive attention the remote reports for a blocked agent.
+    ///
+    /// Carried for the same reason as `status`: the mirror's own detection
+    /// never sees the remote's state, so without this a held message on the
+    /// host would read here as an ordinary block. A host too old to report it
+    /// sends nothing, which reads as no urgency.
+    pub(crate) attention: Option<crate::detect::AgentAttention>,
 }
 
 impl RemoteAgentPane {
@@ -742,6 +749,10 @@ fn parse_mirror_panes(
                 color: origin.color,
             }),
             state_changed_at_ms: pane.agent_state_changed_at_ms,
+            attention: crate::api::schema::AgentAttentionKind::to_attention(
+                pane.attention,
+                pane.attention_label,
+            ),
         }
     };
 
@@ -1012,6 +1023,10 @@ fn parse_created_workspace(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             display_agent: None,
             origin: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
+            attention: crate::api::schema::AgentAttentionKind::to_attention(
+                root_pane.attention,
+                root_pane.attention_label,
+            ),
         },
     })
 }
@@ -1082,6 +1097,10 @@ fn parse_created_tab(stdout: &str) -> io::Result<CreatedRemoteSpace> {
             display_agent: None,
             origin: None,
             state_changed_at_ms: root_pane.agent_state_changed_at_ms,
+            attention: crate::api::schema::AgentAttentionKind::to_attention(
+                root_pane.attention,
+                root_pane.attention_label,
+            ),
         },
     })
 }
@@ -1220,6 +1239,7 @@ mod tests {
                 status: crate::api::schema::AgentStatus::Working,
                 origin: None,
                 state_changed_at_ms: None,
+                attention: None,
             }]
         );
     }
@@ -1256,6 +1276,7 @@ mod tests {
                     status: crate::api::schema::AgentStatus::Idle,
                     origin: None,
                     state_changed_at_ms: None,
+                    attention: None,
                 },
                 RemoteAgentPane {
                     pane_id: "w3:p1".to_string(),
@@ -1270,6 +1291,7 @@ mod tests {
                     status: crate::api::schema::AgentStatus::Done,
                     origin: None,
                     state_changed_at_ms: None,
+                    attention: None,
                 },
             ]
         );
@@ -1296,6 +1318,33 @@ mod tests {
             parsed.panes[0].display_agent.as_deref(),
             Some("esp32 watch work")
         );
+    }
+
+    /// A held message on the host is urgent there, and the mirror has no way
+    /// to see that for itself, so it arrives with the status. A host too old to
+    /// say anything about attention reads as no urgency.
+    #[test]
+    fn a_hosts_urgent_attention_arrives_with_its_label() {
+        let workspaces = r#"{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"active_tab_id":"w1:t1","agent_status":"blocked","focused":false,"label":"api","number":1,"pane_count":2,"tab_count":1,"workspace_id":"w1"}]}}"#;
+        let panes = r#"{"id":"cli:pane:list","result":{"panes":[{"agent":"claude","agent_status":"blocked","attention":"urgent","attention_label":"message","focused":false,"pane_id":"w1:p1","revision":0,"tab_id":"w1:t1","terminal_id":"term-a","workspace_id":"w1"},{"agent":"claude","agent_status":"blocked","focused":false,"pane_id":"w1:p2","revision":0,"tab_id":"w1:t1","terminal_id":"term-b","workspace_id":"w1"}],"type":"pane_list"}}"#;
+        let stdout = format!("herdr\n{workspaces}\n{panes}\n");
+
+        let parsed = parse_discovery_output(&stdout, false).expect("parses");
+
+        let by_terminal = |terminal: &str| {
+            parsed
+                .panes
+                .iter()
+                .find(|pane| pane.terminal_id == terminal)
+                .unwrap()
+        };
+        assert_eq!(
+            by_terminal("term-a").attention,
+            Some(crate::detect::AgentAttention {
+                label: Some("message".into())
+            })
+        );
+        assert_eq!(by_terminal("term-b").attention, None);
     }
 
     #[test]
@@ -1377,6 +1426,7 @@ mod tests {
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
+            attention: None,
         }
     }
 
@@ -1429,6 +1479,7 @@ mod tests {
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
+            attention: None,
         };
 
         assert_eq!(pane.mirror_key("workbox"), pane.mirror_key("workbox"));
@@ -1451,6 +1502,7 @@ mod tests {
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
+            attention: None,
         };
 
         let argv = attach_argv(&space("workbox"), &pane, "/home/you/.local/bin/herdr");
@@ -1528,6 +1580,7 @@ mod tests {
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
+            attention: None,
         };
 
         let argv = attach_argv(&space, &pane, "herdr");

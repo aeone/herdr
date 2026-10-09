@@ -1406,3 +1406,113 @@ fn explain_json_marks_overlay_rules() {
         assert!(sources.contains(&("live_prompt_box", "manifest")));
     });
 }
+
+// --- Urgent attention ---
+
+#[test]
+fn rules_parse_urgent_and_label_and_reject_misuse() {
+    let manifest = parse_manifest(&rules_manifest(
+        r#"
+[[rules]]
+id = "held"
+state = "blocked"
+urgent = true
+label = "message"
+contains = ["held"]
+"#,
+    ))
+    .unwrap();
+    assert!(manifest.rules[0].urgent);
+    assert_eq!(manifest.rules[0].label.as_deref(), Some("message"));
+
+    let not_blocked = parse_manifest(&rules_manifest(
+        r#"
+[[rules]]
+id = "loud_idle"
+state = "idle"
+urgent = true
+contains = ["x"]
+"#,
+    ))
+    .unwrap_err();
+    assert!(
+        not_blocked.contains("urgent without state"),
+        "{not_blocked}"
+    );
+
+    let label_alone = parse_manifest(&rules_manifest(
+        r#"
+[[rules]]
+id = "labelled"
+state = "blocked"
+label = "message"
+contains = ["x"]
+"#,
+    ))
+    .unwrap_err();
+    assert!(
+        label_alone.contains("label without urgent"),
+        "{label_alone}"
+    );
+
+    let long_label = parse_manifest(&rules_manifest(
+        r#"
+[[rules]]
+id = "chatty"
+state = "blocked"
+urgent = true
+label = "a label far too long for a sidebar row"
+contains = ["x"]
+"#,
+    ))
+    .unwrap_err();
+    assert!(long_label.contains("label must be"), "{long_label}");
+}
+
+#[test]
+fn held_message_screen_is_blocked_urgent_with_its_label_until_it_goes() {
+    with_manifest_dirs("urgent-held-message", || {
+        let held = detect(Agent::Claude, HELD_MESSAGE_SCREEN);
+        assert_eq!(held.state, AgentState::Blocked);
+        assert!(held.visible_blocker);
+        assert_eq!(
+            held.attention,
+            Some(crate::detect::AgentAttention {
+                label: Some("message".into())
+            })
+        );
+
+        let value = explain_to_json_value(&explain(Agent::Claude, HELD_MESSAGE_SCREEN));
+        assert_eq!(value["attention"], "urgent");
+        assert_eq!(value["attention_label"], "message");
+
+        // Answered: the dialog is gone and the prompt is back.
+        let answered = concat!(
+            "● Delivered.\n",
+            "───────────────────────────────────────\n",
+            "❯\n",
+            "───────────────────────────────────────\n",
+        );
+        let after = detect(Agent::Claude, answered);
+        assert_ne!(after.state, AgentState::Blocked);
+        assert_eq!(after.attention, None);
+    });
+}
+
+#[test]
+fn an_ordinary_block_is_not_urgent() {
+    with_manifest_dirs("urgent-ordinary-block", || {
+        let permission = concat!(
+            "───────────────────────────────────────\n",
+            " Bash command\n",
+            "   rm -rf build\n",
+            " Do you want to proceed?\n",
+            " ❯ 1. Yes\n",
+            "   2. No\n",
+            " Esc to cancel · Tab to amend\n",
+        );
+        let result = detect(Agent::Claude, permission);
+        assert_eq!(result.state, AgentState::Blocked);
+        assert_eq!(result.attention, None);
+    });
+}

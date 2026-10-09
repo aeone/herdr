@@ -593,6 +593,8 @@ impl App {
                     color: mirror.host_color.clone(),
                 })
             });
+        let (attention, attention_label) =
+            crate::api::schema::AgentAttentionKind::from_attention(presentation.attention.as_ref());
         Some(crate::api::schema::PaneInfo {
             pane_id: self.public_pane_id(ws_idx, pane_id)?,
             terminal_id: terminal.id.to_string(),
@@ -617,6 +619,8 @@ impl App {
                 pane.seen,
                 terminal.background_shells,
             ),
+            attention,
+            attention_label,
             state_labels: presentation.state_labels,
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),

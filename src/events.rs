@@ -83,6 +83,17 @@ pub enum AppEvent {
         pane_id: PaneId,
         shells: Option<u32>,
     },
+    /// A pane's screen, or the host a mirror stands for, reported whether its
+    /// agent needs time-sensitive attention.
+    ///
+    /// Separate from `StateChanged` for the reason the shells are: it does not
+    /// change the state, which stays blocked, only how urgently it is
+    /// presented. Sent only when the answer moves, and ahead of the state it
+    /// goes with, so the state change already knows it is urgent.
+    AttentionReported {
+        pane_id: PaneId,
+        attention: Option<crate::detect::AgentAttention>,
+    },
     /// Hook-authoritative agent state was reported for a pane.
     HookStateReported {
         pane_id: PaneId,

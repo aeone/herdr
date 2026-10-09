@@ -10,7 +10,9 @@ use ratatui::{
 
 use self::tokens::{ResolvedToken, ResolvedTokenKind, SpaceTokenContext};
 use super::scrollbar::{render_scrollbar, should_show_scrollbar};
-use super::status::{state_icon, state_label, state_label_color};
+use super::status::{
+    agent_state_icon, state_icon, state_label, state_label_color, urgent_state_text, urgent_style,
+};
 use super::text::{display_width, display_width_u16, truncate_end};
 use crate::app::state::{AgentPanelSort, Palette};
 use crate::app::{AppState, MarkLevel, Mode};
@@ -132,7 +134,16 @@ pub(crate) struct AgentPanelEntry {
     /// Unix ms of the last agent state change, for idle-age grouping.
     pub agent_state_changed_at_ms: Option<u64>,
     pub state_labels: std::collections::HashMap<String, String>,
+    /// Time-sensitive attention, present only while the agent is blocked.
+    pub attention: Option<crate::detect::AgentAttention>,
     pub tokens: std::collections::HashMap<String, String>,
+}
+
+impl AgentPanelEntry {
+    /// Blocked on something that gives up if nobody answers it.
+    pub(crate) fn urgent(&self) -> bool {
+        self.state == AgentState::Blocked && self.attention.is_some()
+    }
 }
 
 fn sidebar_section_heights(total_h: u16, split_ratio: f32) -> (u16, u16) {
@@ -404,6 +415,7 @@ fn collect_agent_panel_entries_with_runtimes(
                         last_agent_state_change_seq: detail.last_agent_state_change_seq,
                         agent_state_changed_at_ms: detail.agent_state_changed_at_ms,
                         state_labels: detail.state_labels,
+                        attention: detail.attention,
                         tokens: detail.tokens,
                     }
                 })
@@ -928,6 +940,21 @@ fn resolved_agent_rows_numbered(
     switch_label: Option<&str>,
     force_label: bool,
 ) -> Vec<Vec<ResolvedToken>> {
+    if let Some(attention) = entry.attention.as_ref().filter(|_| entry.urgent()) {
+        // Waiting since the agent turned blocked, which is when the dialog
+        // that will expire went up.
+        let waiting_ms = entry
+            .agent_state_changed_at_ms
+            .map(|changed_at| crate::app::state::unix_millis_now().saturating_sub(changed_at));
+        let label = urgent_state_text(attention.label.as_deref(), waiting_ms);
+        return tokens::agent_rows(
+            &app.sidebar_agents,
+            entry,
+            &label,
+            switch_label,
+            force_label,
+        );
+    }
     let label = entry
         .state_labels
         .get(agent_panel_status_key(entry.state, entry.seen))
@@ -1339,8 +1366,13 @@ pub(super) fn render_sidebar_collapsed(app: &AppState, frame: &mut Frame, area: 
             } else {
                 Style::default().fg(p.overlay0)
             };
-            let (icon, icon_style) =
-                state_icon(detail.state, detail.seen, app.status_indicators, p);
+            let (icon, icon_style) = agent_state_icon(
+                detail.state,
+                detail.seen,
+                detail.urgent(),
+                app.status_indicators,
+                p,
+            );
 
             if is_active {
                 let buf = frame.buffer_mut();
@@ -2104,7 +2136,9 @@ fn render_agent_detail(
         } else {
             Style::default().fg(p.subtext0).add_modifier(Modifier::BOLD)
         };
-        let status_style = if is_active {
+        let status_style = if detail.urgent() {
+            urgent_style(p)
+        } else if is_active {
             Style::default().fg(label_color)
         } else {
             Style::default().fg(label_color).add_modifier(Modifier::DIM)
@@ -2126,7 +2160,13 @@ fn render_agent_detail(
         } else {
             Style::default().fg(p.subtext0)
         };
-        let state_icon = state_icon(detail.state, detail.seen, app.status_indicators, p);
+        let state_icon = agent_state_icon(
+            detail.state,
+            detail.seen,
+            detail.urgent(),
+            app.status_indicators,
+            p,
+        );
 
         for (row_index, resolved) in rows.iter().take(height as usize).enumerate() {
             let mut spans = vec![Span::raw(if row_index == 0 { " " } else { "   " })];

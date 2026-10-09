@@ -222,7 +222,7 @@ pub(super) enum DetectionPublishDecision {
     },
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct ScreenDetectionPublishInput {
     pub(super) current_state: AgentState,
     pub(super) last_visible_idle: bool,
@@ -239,7 +239,7 @@ pub(super) fn decide_screen_detection_publish(
     input: ScreenDetectionPublishInput,
     pending_idle: &mut PendingIdleConfirmation,
 ) -> DetectionPublishDecision {
-    let detection = input.screen_detection;
+    let detection = &input.screen_detection;
     let new_state = crate::terminal::state::stabilize_agent_detection(detection);
     let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
     let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
@@ -311,6 +311,7 @@ pub(super) fn detection_update_for_publish_with_osc(
             visible_working: false,
             // The process is gone, so whatever it started went with it.
             background_shells: None,
+            attention: None,
         });
     }
 
@@ -349,6 +350,7 @@ mod tests {
             visible_blocker: false,
             visible_working: state == AgentState::Working,
             background_shells: None,
+            attention: None,
         }
     }
 

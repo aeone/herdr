@@ -718,6 +718,10 @@ impl App {
             || update.previous_presentation != update.presentation
         {
             let presentation = update.presentation.clone();
+            let (attention, attention_label) =
+                crate::api::schema::AgentAttentionKind::from_attention(
+                    presentation.attention.as_ref(),
+                );
             self.emit_event(crate::api::schema::EventEnvelope {
                 event: crate::api::schema::EventKind::PaneAgentStatusChanged,
                 data: crate::api::schema::EventData::PaneAgentStatusChanged {
@@ -728,6 +732,8 @@ impl App {
                     title: presentation.title,
                     display_agent: presentation.display_agent,
                     state_labels: presentation.state_labels,
+                    attention,
+                    attention_label,
                 },
             });
         }

@@ -1275,6 +1275,12 @@ impl App {
             };
             let (state, seen) = crate::app::pane_state_and_seen(pane.status);
             let remote_changed_at = pane.state_changed_at_ms;
+            // Ahead of the state, as the screen reports it, so a mirror turning
+            // blocked already knows it is urgent and notifies as such.
+            self.handle_internal_event(crate::events::AppEvent::AttentionReported {
+                pane_id,
+                attention: pane.attention.clone(),
+            });
             self.handle_internal_event(crate::events::AppEvent::HookStateReported {
                 pane_id,
                 source: crate::detect::REMOTE_MIRROR_HOOK_SOURCE.to_string(),
@@ -3467,6 +3473,7 @@ mod tests {
             status: crate::api::schema::AgentStatus::Idle,
             origin: None,
             state_changed_at_ms: None,
+            attention: None,
         }
     }
 
@@ -4142,6 +4149,40 @@ mod tests {
                 .all(|pane| pane.seen),
             "the first tab's pane should be untouched by the second pane's news"
         );
+    }
+
+    /// A mirrored agent blocked on a held message is urgent here too, and
+    /// stops being so when the host stops saying it.
+    #[test]
+    fn a_hosts_urgent_attention_reaches_the_mirror() {
+        let space = space("workbox");
+        let pane = agent_pane("w1", "api", "term-1");
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces.clear();
+        app.state
+            .workspaces
+            .push(mirror("workbox", &pane.mirror_key(&space.target), "api"));
+        app.state.ensure_test_terminals();
+        let attention = |app: &crate::app::App| {
+            let tab = &app.state.workspaces[0].tabs[0];
+            let terminal_id = tab.terminal_id(tab.root_pane).unwrap();
+            app.state.terminals[terminal_id]
+                .effective_presentation()
+                .attention
+        };
+
+        let mut held = pane.clone();
+        held.status = crate::api::schema::AgentStatus::Blocked;
+        held.attention = Some(crate::detect::AgentAttention {
+            label: Some("message".into()),
+        });
+        app.report_remote_agent_states(&space, &snapshot(vec![held.clone()]));
+        assert_eq!(attention(&app), held.attention);
+
+        let mut answered = held;
+        answered.attention = None;
+        app.report_remote_agent_states(&space, &snapshot(vec![answered]));
+        assert_eq!(attention(&app), None);
     }
 
     #[test]

@@ -224,6 +224,61 @@ pub(super) fn state_icon(
     )
 }
 
+/// The icon for an agent blocked on something that gives up if nobody answers.
+///
+/// The same in both indicator styles, because the point is that it does not
+/// look like any of the other states: a dot of the blocked colour would read as
+/// blocked, which is exactly the confusion urgency is there to remove.
+const URGENT_ICON: &str = "!";
+
+/// The icon for an agent row, which can be urgent where a workspace's
+/// aggregate cannot.
+pub(super) fn agent_state_icon(
+    state: AgentState,
+    seen: bool,
+    urgent: bool,
+    indicator_style: StatusIndicatorStyle,
+    p: &Palette,
+) -> (&'static str, Style) {
+    if urgent {
+        (URGENT_ICON, urgent_style(p))
+    } else {
+        state_icon(state, seen, indicator_style, p)
+    }
+}
+
+/// Blocked's colour, the palette's strongest, made bold: urgent is a louder
+/// blocked, not a different kind of thing, and it stays bold where ordinary
+/// state text is dimmed.
+pub(super) fn urgent_style(p: &Palette) -> Style {
+    Style::default().fg(p.red).add_modifier(Modifier::BOLD)
+}
+
+/// State text for an urgent agent: what it is waiting on and for how long, as
+/// in "message · 2m". How long matters here and nowhere else, because this is
+/// the one state with a deadline the user cannot see.
+pub(super) fn urgent_state_text(label: Option<&str>, waiting_ms: Option<u64>) -> String {
+    let label = label.unwrap_or("urgent");
+    match waiting_ms {
+        Some(waiting_ms) => format!("{label} · {}", compact_age(waiting_ms)),
+        None => label.to_string(),
+    }
+}
+
+/// An age in its largest whole unit: 45s, 2m, 3h, 5d.
+fn compact_age(age_ms: u64) -> String {
+    const SECOND: u64 = 1000;
+    const MINUTE: u64 = 60 * SECOND;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    match age_ms {
+        age if age < MINUTE => format!("{}s", age / SECOND),
+        age if age < HOUR => format!("{}m", age / MINUTE),
+        age if age < DAY => format!("{}h", age / HOUR),
+        age => format!("{}d", age / DAY),
+    }
+}
+
 pub(super) fn state_label(state: AgentState, seen: bool) -> &'static str {
     match (state, seen) {
         (AgentState::Blocked, _) => "blocked",
@@ -288,6 +343,44 @@ mod tests {
                 assert_eq!(style.fg, Some(color));
             }
         }
+    }
+
+    #[test]
+    fn urgent_agents_get_their_own_icon_in_both_styles() {
+        let palette = Palette::catppuccin();
+        for indicator_style in [StatusIndicatorStyle::Dots, StatusIndicatorStyle::Symbols] {
+            let (blocked, _) =
+                agent_state_icon(AgentState::Blocked, true, false, indicator_style, &palette);
+            let (urgent, style) =
+                agent_state_icon(AgentState::Blocked, true, true, indicator_style, &palette);
+            assert_ne!(urgent, blocked);
+            assert_eq!(display_width_u16(urgent), 1);
+            assert_eq!(style.fg, Some(palette.red));
+            assert!(style.add_modifier.contains(Modifier::BOLD));
+        }
+    }
+
+    #[test]
+    fn urgent_state_text_says_what_waits_and_for_how_long() {
+        assert_eq!(
+            urgent_state_text(Some("message"), Some(45_000)),
+            "message · 45s"
+        );
+        assert_eq!(
+            urgent_state_text(Some("message"), Some(150_000)),
+            "message · 2m"
+        );
+        assert_eq!(
+            urgent_state_text(Some("message"), Some(3 * 3_600_000)),
+            "message · 3h"
+        );
+        assert_eq!(
+            urgent_state_text(Some("message"), Some(49 * 3_600_000)),
+            "message · 2d"
+        );
+        assert_eq!(urgent_state_text(None, Some(0)), "urgent · 0s");
+        // A pane restored without a recorded change still says what waits.
+        assert_eq!(urgent_state_text(Some("message"), None), "message");
     }
 
     #[test]

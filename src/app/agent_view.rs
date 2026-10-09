@@ -54,9 +54,12 @@ pub(crate) fn validate_agent_view_source(source: &str) -> Result<String, String>
 ///
 /// Idle is subdivided by age because "idle" spans an agent that paused a minute
 /// ago and one abandoned two months back, and those want very different
-/// attention. The other states are not subdivided: a blocked agent is blocked.
+/// attention. Blocked is split once, into what will wait and what will not:
+/// an urgent agent is blocked on something that gives up if nobody answers,
+/// so it heads the list above blocks that will sit there until someone does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum AgentGroup {
+    Urgent,
     Blocked,
     Working,
     Idle(crate::app::state::IdleAge),
@@ -70,6 +73,7 @@ pub(crate) enum AgentGroup {
 impl AgentGroup {
     pub(crate) fn label(self) -> String {
         match self {
+            Self::Urgent => "urgent".to_string(),
             Self::Blocked => "blocked".to_string(),
             Self::Working => "working".to_string(),
             Self::Idle(age) => format!("idle · {}", age.label()),
@@ -84,6 +88,7 @@ impl AgentGroup {
             return Self::Offline;
         }
         match entry.state {
+            AgentState::Blocked if entry.urgent() => Self::Urgent,
             AgentState::Blocked => Self::Blocked,
             AgentState::Working => Self::Working,
             AgentState::Idle => Self::Idle(crate::app::state::IdleAge::from_changed_at(
@@ -196,6 +201,8 @@ pub(crate) fn apply_agent_view(app: &AppState, entries: &mut Vec<AgentPanelEntry
                     entry.state,
                     entry.seen,
                 )),
+                // Among the blocked, the ones that will not wait come first.
+                !entry.urgent(),
                 std::cmp::Reverse(entry.last_agent_state_change_seq),
             )
         });
@@ -743,6 +750,7 @@ mod tests {
             last_agent_state_change_seq: None,
             agent_state_changed_at_ms: changed_at_ms,
             state_labels: std::collections::HashMap::new(),
+            attention: None,
             tokens: std::collections::HashMap::new(),
         }
     }
@@ -1007,5 +1015,30 @@ mod tests {
         for (entry, group) in entries.iter().zip(&groups) {
             assert_eq!(AgentGroup::of_with_offline(entry, now, false), *group);
         }
+    }
+
+    /// An urgent agent is blocked on something that expires, so it heads the
+    /// list above blocks that will wait -- even an older urgent one above a
+    /// newer ordinary block, which recency alone would put first.
+    #[test]
+    fn status_grouping_puts_urgent_above_blocked() {
+        let now = 100 * DAY_MS;
+        let mut urgent = entry_at("urgent", AgentState::Blocked, true, Some(now - HOUR_MS));
+        urgent.attention = Some(crate::detect::AgentAttention {
+            label: Some("message".into()),
+        });
+        let mut entries = vec![
+            entry_at("working", AgentState::Working, true, Some(now)),
+            entry_at("blocked", AgentState::Blocked, true, Some(now)),
+            urgent,
+        ];
+
+        let groups = group_by_status(&mut entries, now, &|_| false, &|_| None);
+
+        let order: Vec<&str> = entries.iter().map(|e| e.primary_label.as_str()).collect();
+        assert_eq!(order, ["urgent", "blocked", "working"]);
+        assert_eq!(groups[0], AgentGroup::Urgent);
+        assert_eq!(groups[1], AgentGroup::Blocked);
+        assert_eq!(AgentGroup::Urgent.label(), "urgent");
     }
 }

@@ -169,6 +169,12 @@ fn overlay_marker(source: Option<&serde_json::Value>) -> &'static str {
 fn print_agent_explain_text(explain: &serde_json::Value, verbose: bool) {
     println!("agent: {}", explain["agent"].as_str().unwrap_or("unknown"));
     println!("state: {}", explain["state"].as_str().unwrap_or("unknown"));
+    if let Some(attention) = explain["attention"].as_str() {
+        match explain["attention_label"].as_str() {
+            Some(label) => println!("attention: {attention} ({label})"),
+            None => println!("attention: {attention}"),
+        }
+    }
     println!(
         "manifest: {} {}",
         explain["manifest_source"].as_str().unwrap_or("none"),

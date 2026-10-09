@@ -1006,6 +1006,8 @@ mod tests {
             display_agent: None,
             agent_status,
             state_labels: HashMap::new(),
+            attention: None,
+            attention_label: None,
             tokens: HashMap::new(),
             agent_session: None,
             scroll: None,
