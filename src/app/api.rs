@@ -73,6 +73,18 @@ impl App {
                 self.handle_internal_event(ev);
                 false
             }
+            // A mirror frame lands in the pane's streamed ingest, which raises
+            // the same per-pane PTY render signal a local pane's output does, so
+            // the retained render path picks it up -- or skips it when the pane
+            // is hidden. Claiming a full render here as well redrew the whole UI,
+            // sidebar included, for every frame any mirrored host sent: with a
+            // few busy agents among dozens of mirrors that was a full render at
+            // the frame cap, each one identical to the last.
+            #[cfg(unix)]
+            ev @ AppEvent::MirrorFrame { .. } => {
+                self.handle_internal_event(ev);
+                false
+            }
             ev => {
                 self.handle_internal_event(ev);
                 true
