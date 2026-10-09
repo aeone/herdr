@@ -129,16 +129,26 @@ impl Picker {
             .split_whitespace()
             .map(str::to_lowercase)
             .collect();
-        self.matches = self
+        // Ranked, not just filtered: with loose matching, a long name can
+        // contain a short query's letters in order, and in list order that put
+        // an unrelated agent above the pane whose name *is* the query -- where
+        // enter picks it. Whole-word hits come first, then substrings, then
+        // letters in order, each kept in list order.
+        let mut ranked: Vec<(u8, usize)> = self
             .lines
             .iter()
             .enumerate()
-            .filter(|(_, line)| {
+            .filter_map(|(index, line)| {
                 let line = line.to_lowercase();
-                terms.iter().all(|term| is_subsequence(term, &line))
+                terms
+                    .iter()
+                    .map(|term| match_rank(term, &line))
+                    .try_fold(0, |worst, rank| rank.map(|rank| worst.max(rank)))
+                    .map(|rank| (rank, index))
             })
-            .map(|(index, _)| index)
             .collect();
+        ranked.sort();
+        self.matches = ranked.into_iter().map(|(_, index)| index).collect();
         self.cursor = 0;
     }
 
@@ -231,6 +241,24 @@ impl Picker {
 }
 
 /// Whether every character of `needle` appears in `haystack` in order, the
+
+/// How well `term` matches `line`: 0 for a whole word, 1 for a substring, 2
+/// for its letters in order, `None` for no match.
+fn match_rank(term: &str, line: &str) -> Option<u8> {
+    if line
+        .split(|ch: char| !ch.is_alphanumeric() && ch != ':' && ch != '-' && ch != '_')
+        .any(|word| word == term)
+    {
+        Some(0)
+    } else if line.contains(term) {
+        Some(1)
+    } else if is_subsequence(term, line) {
+        Some(2)
+    } else {
+        None
+    }
+}
+
 /// loose match fzf makes by default.
 fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut haystack = haystack.chars();
@@ -329,6 +357,26 @@ mod tests {
 
         assert_eq!(picker.query(), "htp");
         assert_eq!(picker.matches(), &[2]);
+        assert_eq!(
+            picker.handle_key(&key(KeyCode::Enter)),
+            PickerOutcome::Picked(2)
+        );
+    }
+
+    /// The case that picked a real agent instead of the pane being asked for:
+    /// a long name holding the query's letters in order must not outrank the
+    /// line whose name is the query.
+    #[test]
+    fn a_name_matching_the_query_outranks_one_that_merely_contains_its_letters() {
+        let mut picker = Picker::new(vec![
+            "agent  w13Z:p1  claude  idle  6928C1-balmy_bluetooth-high-brightness-rgbw-floodlight"
+                .into(),
+            "space  w16K     walltest_old  unknown".into(),
+            "pane   w16K:p1  walltest  ryi@pandora:/tmp".into(),
+        ]);
+        picker.push_text("walltest");
+
+        assert_eq!(picker.matches(), &[2, 1, 0]);
         assert_eq!(
             picker.handle_key(&key(KeyCode::Enter)),
             PickerOutcome::Picked(2)

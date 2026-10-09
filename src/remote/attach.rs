@@ -490,6 +490,17 @@ fn wall_reattach_command(program: &str, remote_target: &str) -> String {
     format!("{program} wall --remote {remote_target}")
 }
 
+/// The command that lists wall targets on the far side, in `session_name`.
+fn wall_targets_command(remote_herdr: &str, session_name: &str) -> String {
+    let mut command = format!("exec {remote_herdr}");
+    if session_name != crate::session::DEFAULT_SESSION_NAME {
+        command.push_str(" --session ");
+        command.push_str(&shell_quote(session_name));
+    }
+    command.push_str(" wall --targets-json\n");
+    command
+}
+
 /// Lists what a wall on `remote_target` can show, by running
 /// `herdr wall --targets-json` there over the ssh connection `prepare_remote_herdr`
 /// left open. `remote_herdr` is the far side's herdr, already quoted for its
@@ -503,7 +514,11 @@ pub(crate) fn list_wall_targets_over_ssh(
         .remote
         .manage_ssh_config;
     let ssh = RemoteSsh::new(remote_target.to_owned(), manage_ssh_config);
-    let output = ssh.sh_output(&format!("exec {remote_herdr} wall --targets-json\n"))?;
+    // The same session the bridge forwards to, or the list would offer the
+    // default session's terminals to a wall streaming from another one.
+    let session_name = crate::session::active_name()
+        .unwrap_or_else(|| crate::session::DEFAULT_SESSION_NAME.to_string());
+    let output = ssh.sh_output(&wall_targets_command(remote_herdr, &session_name))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
@@ -2059,16 +2074,28 @@ impl SshStdioBridge {
                                 continue;
                             }
                         };
-                        if let Err(err) = bridge_connection(
-                            stream,
-                            &target,
-                            &remote_herdr,
-                            &session_name,
-                            thread_ssh_options.as_ref(),
-                            &thread_stop,
-                        ) {
-                            eprintln!("herdr: remote bridge failed: {err}");
-                        }
+                        // Each connection gets its own thread and ssh channel. A
+                        // client used to hold the bridge for as long as it was
+                        // connected, which was fine while every client opened
+                        // exactly one; a wall opens a watch and an attach, and
+                        // the second would wait behind the first for ever.
+                        let target = target.clone();
+                        let remote_herdr = remote_herdr.clone();
+                        let session_name = session_name.clone();
+                        let ssh_options = thread_ssh_options.clone();
+                        let stop = Arc::clone(&thread_stop);
+                        thread::spawn(move || {
+                            if let Err(err) = bridge_connection(
+                                stream,
+                                &target,
+                                &remote_herdr,
+                                &session_name,
+                                ssh_options.as_ref(),
+                                &stop,
+                            ) {
+                                eprintln!("herdr: remote bridge failed: {err}");
+                            }
+                        });
                     }
                     Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                         thread::sleep(BRIDGE_ACCEPT_POLL);
@@ -3113,6 +3140,18 @@ mod tests {
                 "& '{}' --remote 'host''name' --session 'work''name'",
                 executable.display().to_string().replace('\'', "''")
             )
+        );
+    }
+
+    #[test]
+    fn wall_targets_are_listed_in_the_bridged_session() {
+        assert_eq!(
+            wall_targets_command("\"$HOME/.local/bin/herdr\"", "default"),
+            "exec \"$HOME/.local/bin/herdr\" wall --targets-json\n"
+        );
+        assert_eq!(
+            wall_targets_command("\"$HOME/.local/bin/herdr\"", "dev"),
+            "exec \"$HOME/.local/bin/herdr\" --session dev wall --targets-json\n"
         );
     }
 
