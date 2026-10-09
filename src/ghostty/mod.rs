@@ -2807,7 +2807,8 @@ impl<'a> RowIter<'a> {
         Ok(dirty)
     }
 
-    #[cfg(windows)]
+    /// Whether this row was soft-wrapped onto the next, and whether it is
+    /// itself the continuation of a soft-wrapped row.
     pub fn wrap_state(&self) -> Result<(bool, bool), Error> {
         let mut row = 0;
         // SAFETY: row output matches requested row data type.

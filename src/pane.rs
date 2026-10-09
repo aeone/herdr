@@ -3127,6 +3127,10 @@ impl PaneRuntime {
         self.terminal.render(frame, area, show_cursor);
     }
 
+    pub fn render_rewrapped(&self, frame: &mut Frame, area: Rect) {
+        self.terminal.render_rewrapped(frame, area);
+    }
+
     pub(crate) fn collect_dirty_patch(
         &self,
         area_width: u16,

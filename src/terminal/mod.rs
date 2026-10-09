@@ -1,5 +1,6 @@
 mod history_read;
 mod id;
+pub(crate) mod rewrap;
 mod runtime;
 mod runtime_registry;
 pub mod state;

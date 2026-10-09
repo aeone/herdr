@@ -522,6 +522,10 @@ impl PaneTerminal {
         self.ghostty.render(frame, area, show_cursor);
     }
 
+    pub fn render_rewrapped(&self, frame: &mut Frame, area: Rect) {
+        self.ghostty.render_rewrapped(frame, area);
+    }
+
     pub fn collect_dirty_patch(
         &self,
         area_width: u16,
@@ -2306,6 +2310,179 @@ impl GhosttyPaneTerminal {
                 }
             }
         }
+    }
+
+    /// Draws the screen into `area` without the terminal being that size:
+    /// the terminal's soft wraps are undone, each line is broken again at the
+    /// width of `area`, and the result is anchored to its bottom row.
+    ///
+    /// This is how a view of a terminal is drawn when something else owns the
+    /// terminal's size. No cursor is placed, because the cursor's cell no
+    /// longer means anything once the lines around it have moved.
+    ///
+    /// Every glyph on screen is collected before any is drawn, since where a
+    /// line starts depends on how many rows the lines below it take. That is
+    /// one allocation per view per frame, which `render` does not need; views
+    /// are few, and the screen is bounded by the terminal's own size.
+    pub fn render_rewrapped(&self, frame: &mut Frame, area: Rect) {
+        let Ok(mut core) = self.core.lock() else {
+            return;
+        };
+        let host_theme = core.host_terminal_theme;
+        let initial_default_foreground = core.initial_default_foreground;
+        let initial_default_background = core.initial_default_background;
+        let GhosttyPaneCore {
+            terminal,
+            render_state,
+            decscusr_tracker,
+            ..
+        } = &mut *core;
+        if render_state.update(terminal).is_err() {
+            return;
+        }
+        let colors = render_state.colors().ok();
+        let default_bg = colors
+            .and_then(|c| ghostty_default_bg(c.background, host_theme, initial_default_background));
+        let default_fg = colors
+            .and_then(|c| ghostty_default_fg(c.foreground, host_theme, initial_default_foreground));
+        let resolved_fg = colors.map(|c| ghostty_color(c.foreground));
+        let resolved_bg = colors.map(|c| ghostty_color(c.background));
+        let palette_overrides = colors
+            .zip(terminal.default_palette().ok())
+            .and_then(|(colors, default)| PaletteOverrides::new(&colors.palette, &default));
+        let hide_kitty_placeholders = crate::kitty_graphics::is_enabled();
+        let cursor_row = cursor_state_from_render_state(render_state, decscusr_tracker)
+            .map(|cursor| usize::from(cursor.y));
+
+        let mut row_iterator = match crate::ghostty::RowIterator::new() {
+            Ok(iterator) => iterator,
+            Err(_) => return,
+        };
+        let mut row_cells = match crate::ghostty::RowCells::new() {
+            Ok(cells) => cells,
+            Err(_) => return,
+        };
+
+        let mut glyphs: Vec<ratatui::buffer::Cell> = Vec::new();
+        let mut widths: Vec<u8> = Vec::new();
+        let mut shapes: Vec<crate::terminal::rewrap::RowShape> = Vec::new();
+        {
+            let mut rows = match render_state.populate_row_iterator(&mut row_iterator) {
+                Ok(rows) => rows,
+                Err(_) => return,
+            };
+            let mut grapheme_bytes = Vec::new();
+            let mut symbol_scratch = String::new();
+            while rows.next() {
+                let soft_wrapped = rows
+                    .wrap_state()
+                    .map(|(soft_wrapped, _)| soft_wrapped)
+                    .unwrap_or(false);
+                let start = glyphs.len();
+                let mut kept = 0usize;
+                let mut cells = match rows.populate_cells(&mut row_cells) {
+                    Ok(cells) => cells,
+                    Err(_) => break,
+                };
+                while cells.next() {
+                    let basic = cells.basic_data().unwrap_or_default();
+                    // The cell after a wide glyph and the padding before one
+                    // that did not fit are layout, not content: re-wrapping
+                    // places wide glyphs afresh.
+                    let width = match basic.wide {
+                        crate::ghostty::CellWide::SpacerTail
+                        | crate::ghostty::CellWide::SpacerHead => continue,
+                        crate::ghostty::CellWide::Wide => 2u8,
+                        crate::ghostty::CellWide::Narrow => 1u8,
+                    };
+                    let style = ghostty_cell_style(
+                        &cells,
+                        &basic,
+                        default_fg,
+                        default_bg,
+                        resolved_fg,
+                        resolved_bg,
+                        palette_overrides.as_ref(),
+                    );
+                    let symbol = match ghostty_buffer_symbol_into(
+                        &cells,
+                        basic.wide,
+                        hide_kitty_placeholders,
+                        &mut grapheme_bytes,
+                        &mut symbol_scratch,
+                    ) {
+                        Ok(symbol) => symbol,
+                        Err(_) => {
+                            symbol_scratch.clear();
+                            symbol_scratch.push_str(ghostty_blank_symbol_for_width(basic.wide));
+                            symbol_scratch.as_str()
+                        }
+                    };
+                    if symbol != " " || basic.has_styling {
+                        kept = glyphs.len() - start + 1;
+                    }
+                    let mut cell = ratatui::buffer::Cell::default();
+                    cell.set_symbol(symbol);
+                    cell.set_style(style);
+                    glyphs.push(cell);
+                    widths.push(width);
+                }
+                // A soft-wrapped row keeps every glyph, trailing blanks
+                // included: they are the middle of a line, not its end.
+                let len = if soft_wrapped {
+                    glyphs.len() - start
+                } else {
+                    kept
+                };
+                shapes.push(crate::terminal::rewrap::RowShape {
+                    start,
+                    len,
+                    soft_wrapped,
+                });
+            }
+        }
+
+        let plan = crate::terminal::rewrap::plan_rewrap(
+            &shapes,
+            &widths,
+            cursor_row,
+            area.width,
+            area.height,
+        );
+        let top = area.height.saturating_sub(plan.len() as u16);
+        let buf = frame.buffer_mut();
+        for y in 0..top {
+            for x in 0..area.width {
+                ghostty_reset_cell(&mut buf[(area.x + x, area.y + y)], default_fg, default_bg);
+            }
+        }
+        for (offset, glyph_range) in plan.into_iter().enumerate() {
+            let y = top + offset as u16;
+            let mut x = 0u16;
+            for index in glyph_range {
+                let width = u16::from(widths[index]);
+                if x + width > area.width {
+                    break;
+                }
+                let glyph = &glyphs[index];
+                buf[(area.x + x, area.y + y)] = glyph.clone();
+                if width == 2 {
+                    // The second column of a wide glyph is drawn empty, the
+                    // way `render` draws a spacer tail.
+                    let tail = &mut buf[(area.x + x + 1, area.y + y)];
+                    tail.reset();
+                    tail.set_symbol("");
+                    tail.set_style(glyph.style());
+                }
+                x += width;
+            }
+            while x < area.width {
+                ghostty_reset_cell(&mut buf[(area.x + x, area.y + y)], default_fg, default_bg);
+                x += 1;
+            }
+        }
+
+        ghostty_clear_render_dirty(render_state, u16::MAX);
     }
 
     pub fn collect_dirty_patch(

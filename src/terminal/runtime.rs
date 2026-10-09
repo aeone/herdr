@@ -462,6 +462,18 @@ impl TerminalRuntime {
         self.0.render(frame, area, show_cursor);
     }
 
+    /// Draws this terminal into `area` at whatever size the terminal is,
+    /// re-wrapped to fit. See `GhosttyPaneTerminal::render_rewrapped`.
+    pub fn render_rewrapped(&self, frame: &mut Frame, area: Rect) {
+        self.0.render_rewrapped(frame, area);
+    }
+
+    /// Whether this terminal is exactly the size of `area`, so it can be
+    /// drawn there as it is.
+    pub(crate) fn fits(&self, area: Rect) -> bool {
+        self.0.current_size() == (area.height, area.width)
+    }
+
     pub(crate) fn collect_dirty_patch(
         &self,
         area_width: u16,
