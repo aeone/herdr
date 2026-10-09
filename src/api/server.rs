@@ -438,6 +438,7 @@ fn api_method_name(method: &Method) -> &'static str {
         Method::ClientWindowTitleClear(_) => "client.window_title.clear",
         Method::SessionSnapshot(_) => "session.snapshot",
         Method::WorkspaceCreate(_) => "workspace.create",
+        Method::WorkspaceCreateWall(_) => "workspace.create_wall",
         Method::WorkspaceList(_) => "workspace.list",
         Method::WorkspaceGet(_) => "workspace.get",
         Method::WorkspaceFocus(_) => "workspace.focus",

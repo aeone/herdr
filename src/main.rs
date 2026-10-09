@@ -683,6 +683,7 @@ fn main() -> io::Result<()> {
         println!("       herdr agent <subcommand> ...");
         println!("       herdr pane <subcommand> ...");
         println!("       herdr focus <agent|space|pane> [--observe]");
+        println!("       herdr wall <agent|space|pane>... [--label NAME]");
         println!("       herdr session <subcommand> ...");
         println!("       herdr integration <subcommand> ...");
         println!();
@@ -692,6 +693,10 @@ fn main() -> io::Result<()> {
             (
                 "herdr focus <agent|space|pane>",
                 "Open a client showing just that one thing, independent of other clients",
+            ),
+            (
+                "herdr wall <target>...",
+                "Open a workspace tiled with live views of several agents or panes",
             ),
             (
                 "herdr status [server|client]",

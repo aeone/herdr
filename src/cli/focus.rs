@@ -15,14 +15,14 @@ use serde_json::Value;
 use crate::api::schema::{Method, Request};
 
 /// What a target string resolved to, kept for the message printed on attach.
-enum Resolved {
+pub(super) enum Resolved {
     Agent { terminal_id: String, label: String },
     Pane { terminal_id: String, label: String },
     Space { terminal_id: String, label: String },
 }
 
 impl Resolved {
-    fn terminal_id(&self) -> &str {
+    pub(super) fn terminal_id(&self) -> &str {
         match self {
             Self::Agent { terminal_id, .. }
             | Self::Pane { terminal_id, .. }
@@ -30,7 +30,7 @@ impl Resolved {
         }
     }
 
-    fn describe(&self) -> String {
+    pub(super) fn describe(&self) -> String {
         match self {
             Self::Agent { label, .. } => format!("agent {label}"),
             Self::Pane { label, .. } => format!("pane {label}"),
@@ -343,7 +343,7 @@ fn truncate(value: &str, max: usize) -> String {
 /// An agent name is tried before a space name because agents are what people
 /// name deliberately; space labels are often derived from a directory and
 /// collide more.
-fn resolve(target: &str) -> std::io::Result<Result<Resolved, i32>> {
+pub(super) fn resolve(target: &str) -> std::io::Result<Result<Resolved, i32>> {
     if let Some(resolved) = resolve_agent(target)? {
         return Ok(Ok(resolved));
     }

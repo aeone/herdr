@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::api::schema::{
     EventData, EventEnvelope, EventKind, ResponseResult, WorkspaceCreateParams,
     WorkspaceMoveBlockParams, WorkspaceMoveParams, WorkspaceRenameParams,
-    WorkspaceReportMetadataParams, WorkspaceTarget,
+    WorkspaceReportMetadataParams, WorkspaceTarget, WorkspaceWallParams,
 };
 use crate::app::App;
 
@@ -68,6 +68,27 @@ impl App {
                 )
             }
             Err(err) => encode_error(id, "workspace_create_failed", err.to_string()),
+        }
+    }
+
+    pub(super) fn handle_workspace_create_wall(
+        &mut self,
+        id: String,
+        params: WorkspaceWallParams,
+    ) -> String {
+        match self.create_wall(&params.terminal_ids, params.label, params.focus) {
+            Ok(index) => {
+                self.emit_workspace_open_events(index);
+                match self.workspace_created_result(index) {
+                    Some(result) => encode_success(id, result),
+                    None => encode_error(
+                        id,
+                        "workspace_create_failed",
+                        "the new wall has no pane to report",
+                    ),
+                }
+            }
+            Err((code, message)) => encode_error(id, &code, message),
         }
     }
 
@@ -716,5 +737,97 @@ mod tests {
         };
         assert_eq!(workspaces[0].workspace_id, moved_id);
         assert!(event_hub.events_after(0).is_empty());
+    }
+
+    fn create_wall_request(terminal_ids: Vec<String>) -> crate::api::schema::Request {
+        crate::api::schema::Request {
+            id: "req".into(),
+            method: crate::api::schema::Method::WorkspaceCreateWall(WorkspaceWallParams {
+                terminal_ids,
+                focus: true,
+                label: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn creating_a_wall_opens_a_workspace_of_views_in_order() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = vec![Workspace::test_new("one"), Workspace::test_new("two")];
+        app.state.active = Some(0);
+        let first = app.state.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .map(|pane| pane.attached_terminal_id.clone())
+            .expect("terminal");
+        let second = app.state.workspaces[1].tabs[0]
+            .panes
+            .values()
+            .next()
+            .map(|pane| pane.attached_terminal_id.clone())
+            .expect("terminal");
+
+        let response = app.handle_api_request(create_wall_request(vec![
+            second.to_string(),
+            first.to_string(),
+        ]));
+
+        let success: SuccessResponse = serde_json::from_str(&response).expect("success");
+        assert!(matches!(
+            success.result,
+            ResponseResult::WorkspaceCreated { .. }
+        ));
+        assert_eq!(app.state.workspaces.len(), 3);
+        assert_eq!(app.state.active, Some(2));
+        let wall = &app.state.workspaces[2];
+        assert!(wall.wall.is_some());
+        assert_eq!(wall.custom_name.as_deref(), Some("wall"));
+        assert_eq!(wall.public_pane_numbers.len(), 2);
+        let shown: Vec<_> = wall.tabs[0]
+            .layout
+            .pane_ids()
+            .iter()
+            .filter_map(|pane_id| wall.tabs[0].panes[pane_id].view_of.clone())
+            .collect();
+        assert_eq!(shown, vec![second, first]);
+        // Every placeholder is a real terminal of its own, so the rest of the
+        // app can treat the wall's panes like any others.
+        for pane in wall.tabs[0].panes.values() {
+            assert!(app
+                .terminal_runtimes
+                .get(&pane.attached_terminal_id)
+                .is_some());
+            assert!(app.state.terminals.contains_key(&pane.attached_terminal_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wall_naming_a_terminal_nobody_holds_is_refused() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+        let known = app.state.workspaces[0].tabs[0]
+            .panes
+            .values()
+            .next()
+            .map(|pane| pane.attached_terminal_id.to_string())
+            .expect("terminal");
+
+        let response =
+            app.handle_api_request(create_wall_request(vec![known, "term_missing".into()]));
+
+        assert!(response.contains("terminal_not_found"), "{response}");
+        assert_eq!(app.state.workspaces.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_wall_of_nothing_is_refused() {
+        let mut app = crate::app::tests::test_app();
+        app.state.workspaces = vec![Workspace::test_new("one")];
+
+        let response = app.handle_api_request(create_wall_request(Vec::new()));
+
+        assert!(response.contains("invalid_params"), "{response}");
+        assert_eq!(app.state.workspaces.len(), 1);
     }
 }

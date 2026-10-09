@@ -4447,6 +4447,31 @@
           ],
           "type": "object"
         },
+        "WorkspaceWallParams": {
+          "description": "A workspace tiled with a view of each terminal, in reading order. A view\ndraws its terminal without resizing it, and takes over its size only while\nit is the pane being typed into.",
+          "properties": {
+            "focus": {
+              "default": false,
+              "type": "boolean"
+            },
+            "label": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "terminal_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "terminal_ids"
+          ],
+          "type": "object"
+        },
         "WorkspaceWorktreeInfo": {
           "properties": {
             "checkout_path": {
@@ -4761,6 +4786,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceCreateParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "workspace.create_wall",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/WorkspaceWallParams"
             }
           },
           "required": [
