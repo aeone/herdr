@@ -386,9 +386,9 @@ pub struct KeysConfig {
     pub workspace_picker: BindingConfig,
     /// Open the session navigator. Default: "prefix+g"
     pub goto: BindingConfig,
-    /// Open the session navigator to put what is chosen on a wall: a new
-    /// tile of the active wall, or a new wall when the active workspace is
-    /// not one. Unset by default.
+    /// In `herdr wall`, open the picker to add a tile. Read by the wall
+    /// client from its own machine's config; the TUI does nothing with it.
+    /// Unset by default, when goto opens the picker instead.
     pub wall_add: BindingConfig,
     /// Move workspace selection up in navigate mode. Default: "up".
     pub navigate_workspace_up: BindingConfig,

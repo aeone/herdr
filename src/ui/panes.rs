@@ -215,7 +215,7 @@ pub(super) fn resize_tab_panes(
             };
             let pane_inner = pane_inner_rect(area, borders);
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
-            if app.layout_owns_terminal_size(terminal_id) {
+            if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -237,7 +237,7 @@ pub(super) fn resize_tab_panes(
 
         if let Some((terminal_id, rt)) = runtime_for_tab_pane(terminal_runtimes, tab, info.id) {
             let inner_rect = terminal_inner_rect(rt, pane_inner, app.pane_scrollbars);
-            if app.layout_owns_terminal_size(terminal_id) {
+            if !app.direct_attach_resize_locks.contains(terminal_id) {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -279,7 +279,11 @@ pub(super) fn compute_pane_infos(
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, focused_id) {
             (inner_rect, scrollbar_rect) =
                 stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
-            if resize_panes && app.pane_may_resize_terminal(ws_idx, focused_id) {
+            if resize_panes
+                && ws.terminal_id(focused_id).is_some_and(|terminal_id| {
+                    !app.direct_attach_resize_locks.contains(terminal_id)
+                })
+            {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -313,7 +317,11 @@ pub(super) fn compute_pane_infos(
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
             (inner_rect, scrollbar_rect) =
                 stable_scrollbar_gutter(rt, pane_inner, app.pane_scrollbars);
-            if resize_panes && app.pane_may_resize_terminal(ws_idx, info.id) {
+            if resize_panes
+                && ws.terminal_id(info.id).is_some_and(|terminal_id| {
+                    !app.direct_attach_resize_locks.contains(terminal_id)
+                })
+            {
                 rt.resize(
                     inner_rect.height,
                     inner_rect.width,
@@ -349,18 +357,11 @@ pub(super) fn render_panes(
 
     for info in pane_infos {
         if let Some(rt) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id) {
-            // A view whose terminal is sized for somewhere else is drawn
-            // re-wrapped to fit, and without a cursor, since its cell no
-            // longer lines up with anything.
-            if app.pane_view_target(ws_idx, info.id).is_some() && !rt.fits(info.inner_rect) {
-                rt.render_rewrapped(frame, info.inner_rect);
-            } else {
-                let show_cursor = info.is_focused
-                    && terminal_active
-                    && !pane_is_scrolled_back(rt)
-                    && app.pane_exposes_host_cursor(ws_idx, info.id);
-                rt.render(frame, info.inner_rect, show_cursor);
-            }
+            let show_cursor = info.is_focused
+                && terminal_active
+                && !pane_is_scrolled_back(rt)
+                && app.pane_exposes_host_cursor(ws_idx, info.id);
+            rt.render(frame, info.inner_rect, show_cursor);
             render_pane_scrollbar(app, frame, info, rt);
 
             let should_dim = !info.is_focused && multi_pane && !terminal_active;
@@ -429,7 +430,7 @@ pub(super) fn resize_popup_pane(
     let Some((_outer, inner)) = popup_pane_rects(app, area) else {
         return;
     };
-    if !app.layout_owns_terminal_size(&popup.terminal_id) {
+    if app.direct_attach_resize_locks.contains(&popup.terminal_id) {
         return;
     }
     if let Some(rt) = terminal_runtimes.get(&popup.terminal_id) {
@@ -663,9 +664,7 @@ fn render_pane_border_titles(
         }
         let Some(title) = ws
             .pane_state(info.id)
-            // A view is titled after what it shows; its own terminal is a
-            // placeholder with nothing to say.
-            .and_then(|pane| app.terminals.get(pane.effective_terminal_id()))
+            .and_then(|pane| app.terminals.get(&pane.attached_terminal_id))
             .and_then(|terminal| terminal.border_label(app.show_agent_labels_on_pane_borders))
             .and_then(|label| pane_border_title(&label, info.rect.width, info.is_focused))
         else {

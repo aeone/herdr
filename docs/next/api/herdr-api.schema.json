@@ -4479,53 +4479,6 @@
           ],
           "type": "object"
         },
-        "WorkspaceWallAddParams": {
-          "description": "More views for a wall, each added as a tile after the ones it has. The\nwall is re-tiled into the grid for its new count, and focus stays put.",
-          "properties": {
-            "terminal_ids": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            "workspace_id": {
-              "description": "The wall to add to. Omitted, the active workspace, which must be one.",
-              "type": [
-                "string",
-                "null"
-              ]
-            }
-          },
-          "required": [
-            "terminal_ids"
-          ],
-          "type": "object"
-        },
-        "WorkspaceWallParams": {
-          "description": "A workspace tiled with a view of each terminal, in reading order. A view\ndraws its terminal without resizing it, and takes over its size only while\nit is the pane being typed into.",
-          "properties": {
-            "focus": {
-              "default": false,
-              "type": "boolean"
-            },
-            "label": {
-              "type": [
-                "string",
-                "null"
-              ]
-            },
-            "terminal_ids": {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            }
-          },
-          "required": [
-            "terminal_ids"
-          ],
-          "type": "object"
-        },
         "WorkspaceWorktreeInfo": {
           "properties": {
             "checkout_path": {
@@ -4840,38 +4793,6 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/WorkspaceCreateParams"
-            }
-          },
-          "required": [
-            "method",
-            "params"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "method": {
-              "const": "workspace.create_wall",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/schemas/request/$defs/WorkspaceWallParams"
-            }
-          },
-          "required": [
-            "method",
-            "params"
-          ],
-          "type": "object"
-        },
-        {
-          "properties": {
-            "method": {
-              "const": "workspace.wall_add",
-              "type": "string"
-            },
-            "params": {
-              "$ref": "#/schemas/request/$defs/WorkspaceWallAddParams"
             }
           },
           "required": [

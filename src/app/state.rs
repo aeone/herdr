@@ -1056,33 +1056,8 @@ pub(crate) enum NavigatorStateFilter {
     Done,
 }
 
-/// What choosing an entry in the navigator does.
-///
-/// The navigator is one list with one set of keys whatever it is for; only
-/// what happens on enter or click differs, so the purpose rides along with
-/// the rest of its state rather than being a mode of its own.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) enum NavigatorPurpose {
-    /// Go to the entry, as `goto` does.
-    #[default]
-    Goto,
-    /// Show the entry's terminal on a wall: as a new tile of the wall that
-    /// was active when the navigator opened, or, with none, on a new wall.
-    AddToWall { wall_workspace_id: Option<String> },
-}
-
-/// A terminal to put on a wall, asked for from the navigator and carried out
-/// by the app, which owns the runtimes a new tile needs.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct WallAddRequest {
-    /// The wall to add to, or `None` for a new wall.
-    pub wall_workspace_id: Option<String>,
-    pub terminal_id: crate::terminal::TerminalId,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct NavigatorState {
-    pub purpose: NavigatorPurpose,
     pub query: String,
     pub selected: usize,
     pub scroll: usize,
@@ -1621,30 +1596,11 @@ pub enum TabBarStatusSegment {
     Text(Option<String>),
 }
 
-/// A view pane holding the size of the terminal it shows.
-///
-/// Named by workspace id rather than index so a workspace moving in the list
-/// does not hand the claim to whichever pane slides into its place.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ViewSizeClaim {
-    pub workspace_id: String,
-    pub pane_id: PaneId,
-    pub target: crate::terminal::TerminalId,
-}
-
 pub struct AppState {
     pub terminals:
         std::collections::HashMap<crate::terminal::TerminalId, crate::terminal::TerminalState>,
     /// Terminal ids whose size is currently owned by a direct attach client.
     pub direct_attach_resize_locks: std::collections::HashSet<crate::terminal::TerminalId>,
-    /// The view pane currently allowed to size the terminal it shows, if any.
-    ///
-    /// A terminal has one size, normally whatever its own pane is laid out at.
-    /// While a view of it is being typed into, the view takes that over so the
-    /// program draws for the tile it is being used in. Recomputed by the layout
-    /// pass, so the size goes back to the home pane on the next frame once the
-    /// view stops being worked in.
-    pub view_size_claim: Option<ViewSizeClaim>,
     /// Wheel events herdr has routed to each terminal, and when the last one
     /// arrived. Answers the question `wheel_routing` cannot: whether an event
     /// reached herdr at all, and which pane it resolved to. Scrolling that does
@@ -1680,8 +1636,6 @@ pub struct AppState {
     pub request_submit_worktree_open: bool,
     pub request_submit_worktree_remove: bool,
     pub request_reload_config: bool,
-    /// Set when the navigator chose a terminal to put on a wall.
-    pub request_wall_add: Option<WallAddRequest>,
     /// Set when the headless server should ask attached clients to reload
     /// their client-local sound config from disk.
     pub request_client_config_reload: bool,
@@ -2139,88 +2093,6 @@ impl AppState {
         (24, 80)
     }
 
-    /// The terminal a view pane shows, or None for an ordinary pane.
-    pub(crate) fn pane_view_target(
-        &self,
-        ws_idx: usize,
-        pane_id: PaneId,
-    ) -> Option<&crate::terminal::TerminalId> {
-        self.workspaces
-            .get(ws_idx)?
-            .pane_state(pane_id)?
-            .view_of
-            .as_ref()
-    }
-
-    /// Whether the layout pass may size `terminal_id` from its own pane.
-    ///
-    /// Not while a direct attach client owns it, and not while a view of it is
-    /// being worked in somewhere else: either would otherwise be resized back
-    /// on every frame by a pane nobody is looking at.
-    pub(crate) fn layout_owns_terminal_size(
-        &self,
-        terminal_id: &crate::terminal::TerminalId,
-    ) -> bool {
-        !self.direct_attach_resize_locks.contains(terminal_id)
-            && self
-                .view_size_claim
-                .as_ref()
-                .is_none_or(|claim| &claim.target != terminal_id)
-    }
-
-    /// Whether laying out this pane may resize the terminal it draws.
-    ///
-    /// An ordinary pane sizes its own terminal unless something else holds
-    /// that size. A view sizes the terminal it shows only while it holds the
-    /// claim -- a view that is merely watching draws re-wrapped instead, so
-    /// the terminal is never pulled between every tile that shows it.
-    pub(crate) fn pane_may_resize_terminal(&self, ws_idx: usize, pane_id: PaneId) -> bool {
-        let Some(workspace) = self.workspaces.get(ws_idx) else {
-            return false;
-        };
-        let Some(pane) = workspace.pane_state(pane_id) else {
-            return false;
-        };
-        match pane.view_of.as_ref() {
-            Some(target) => {
-                !self.direct_attach_resize_locks.contains(target)
-                    && self.view_size_claim.as_ref().is_some_and(|claim| {
-                        claim.pane_id == pane_id
-                            && claim.workspace_id == workspace.id
-                            && &claim.target == target
-                    })
-            }
-            None => self.layout_owns_terminal_size(&pane.attached_terminal_id),
-        }
-    }
-
-    /// Decides which view pane, if any, holds the size of the terminal it
-    /// shows. Called by the layout pass, before anything is resized.
-    ///
-    /// The view being typed into holds it. Leaving terminal mode for a moment
-    /// -- the prefix key, a menu -- keeps the claim as long as the same view
-    /// stays focused, or every prefix press would resize the program twice.
-    pub(crate) fn refresh_view_size_claim(&mut self) {
-        let focused_view = self.active.and_then(|ws_idx| {
-            let workspace = self.workspaces.get(ws_idx)?;
-            let pane_id = workspace.focused_pane_id()?;
-            let target = workspace.pane_state(pane_id)?.view_of.clone()?;
-            Some(ViewSizeClaim {
-                workspace_id: workspace.id.clone(),
-                pane_id,
-                target,
-            })
-        });
-        let claim = match focused_view {
-            Some(claim) if self.mode == Mode::Terminal => Some(claim),
-            Some(claim) if self.view_size_claim.as_ref() == Some(&claim) => Some(claim),
-            _ => None,
-        };
-        if self.view_size_claim != claim {
-            self.view_size_claim = claim;
-        }
-    }
-
     /// Returns true when the given (workspace, tab, pane) refers to the
     /// currently focused pane in the active workspace's active tab.
     pub(crate) fn runtime_for_pane_in_workspace<'a>(
@@ -2229,12 +2101,6 @@ impl AppState {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<&'a crate::terminal::TerminalRuntime> {
-        // A view draws, sizes and types into the terminal it shows. Every
-        // lookup that does one of those comes through here, which is what lets
-        // the pane keep a placeholder terminal of its own for everything else.
-        if let Some(target) = self.pane_view_target(ws_idx, pane_id) {
-            return self.runtime_for_terminal(terminal_runtimes, target);
-        }
         #[cfg(test)]
         if let Some(runtime) = self.workspaces.get(ws_idx)?.test_runtimes.get(&pane_id) {
             return Some(runtime);
@@ -2250,34 +2116,6 @@ impl AppState {
             return Some(runtime);
         }
         let terminal_id = self.workspaces.get(ws_idx)?.terminal_id(pane_id)?;
-        terminal_runtimes.get(terminal_id)
-    }
-
-    /// The runtime of a terminal by its id alone.
-    pub(crate) fn runtime_for_terminal<'a>(
-        &'a self,
-        terminal_runtimes: &'a crate::terminal::TerminalRuntimeRegistry,
-        terminal_id: &crate::terminal::TerminalId,
-    ) -> Option<&'a crate::terminal::TerminalRuntime> {
-        // Test runtimes are held by the pane they were inserted for rather
-        // than in the registry, so find that pane.
-        #[cfg(test)]
-        for workspace in &self.workspaces {
-            for tab in &workspace.tabs {
-                for (pane_id, pane) in &tab.panes {
-                    if &pane.attached_terminal_id != terminal_id {
-                        continue;
-                    }
-                    if let Some(runtime) = workspace
-                        .test_runtimes
-                        .get(pane_id)
-                        .or_else(|| tab.runtimes.get(pane_id))
-                    {
-                        return Some(runtime);
-                    }
-                }
-            }
-        }
         terminal_runtimes.get(terminal_id)
     }
 
@@ -2356,7 +2194,6 @@ impl AppState {
         Self {
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
-            view_size_claim: None,
             wheel_events: std::collections::HashMap::new(),
             renaming_agent: false,
             pane_id_aliases: std::collections::HashMap::new(),
@@ -2379,7 +2216,6 @@ impl AppState {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
-            request_wall_add: None,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,

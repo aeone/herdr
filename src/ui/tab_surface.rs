@@ -94,11 +94,6 @@ pub(crate) fn tab_surface_hyperlinks(
     for info in surface.pane_infos {
         if let Some(runtime) = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
         {
-            // Link positions are terminal cells, which a re-wrapped view no
-            // longer draws where they were.
-            if app.pane_view_target(ws_idx, info.id).is_some() && !runtime.fits(info.inner_rect) {
-                continue;
-            }
             links.extend(runtime.visible_hyperlinks(info.inner_rect));
         }
     }
@@ -121,11 +116,6 @@ pub(crate) fn tab_surface_cursor(
     }
     let runtime = app.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)?;
     if runtime.synchronized_output_active() {
-        return None;
-    }
-    // A view drawn re-wrapped has moved its lines, so the terminal's cursor
-    // cell would land somewhere meaningless.
-    if app.pane_view_target(ws_idx, info.id).is_some() && !runtime.fits(info.inner_rect) {
         return None;
     }
     let scrolled_back = super::panes::pane_is_scrolled_back(runtime);

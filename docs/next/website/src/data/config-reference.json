@@ -323,7 +323,7 @@
           "key": "keys.wall_add",
           "type": "keybinding",
           "default": "unset",
-          "description": "Open the session navigator to put the chosen pane, tab or workspace on a wall: as a new tile of the active wall, or on a new wall when the active workspace is not one. Unset by default."
+          "description": "In `herdr wall`, open the picker to add a tile. Read from the config of the machine running the wall. Unset by default, when `goto` (prefix+g) opens the picker instead."
         },
         {
           "key": "keys.navigate_workspace_up",

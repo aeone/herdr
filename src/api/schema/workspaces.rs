@@ -16,28 +16,6 @@ pub struct WorkspaceCreateParams {
     pub env: HashMap<String, String>,
 }
 
-/// A workspace tiled with a view of each terminal, in reading order. A view
-/// draws its terminal without resizing it, and takes over its size only while
-/// it is the pane being typed into.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct WorkspaceWallParams {
-    pub terminal_ids: Vec<String>,
-    #[serde(default)]
-    pub focus: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-/// More views for a wall, each added as a tile after the ones it has. The
-/// wall is re-tiled into the grid for its new count, and focus stays put.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct WorkspaceWallAddParams {
-    /// The wall to add to. Omitted, the active workspace, which must be one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_id: Option<String>,
-    pub terminal_ids: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceRenameParams {
     pub workspace_id: String,

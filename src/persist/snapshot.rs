@@ -378,15 +378,14 @@ pub fn capture(
     marks: SessionMarks,
 ) -> SessionSnapshot {
     // Remote mirrors are derived from a live host and are rebuilt by polling,
-    // and walls are views onto terminals that need not exist after a restart,
-    // so both are dropped here. `active` and `selected` are positions in this
+    // so they are dropped here. `active` and `selected` are positions in this
     // list, so both have to be rebased onto the surviving workspaces.
     let persisted_position = persisted_positions(workspaces);
     SessionSnapshot {
         version: SNAPSHOT_VERSION,
         workspaces: workspaces
             .iter()
-            .filter(|workspace| !workspace.is_runtime_only())
+            .filter(|workspace| workspace.remote_mirror.is_none())
             .map(|workspace| capture_workspace(workspace, terminals, terminal_runtimes))
             .collect(),
         active: active.and_then(|idx| persisted_position.get(idx).copied().flatten()),
@@ -416,7 +415,7 @@ fn persisted_positions(workspaces: &[Workspace]) -> Vec<Option<usize>> {
     workspaces
         .iter()
         .map(|workspace| {
-            (!workspace.is_runtime_only()).then(|| {
+            workspace.remote_mirror.is_none().then(|| {
                 let position = next;
                 next += 1;
                 position
@@ -554,7 +553,7 @@ pub fn capture_history(
         // exactly what `capture` drops or history lands on the wrong workspace.
         workspaces: workspaces
             .iter()
-            .filter(|workspace| !workspace.is_runtime_only())
+            .filter(|workspace| workspace.remote_mirror.is_none())
             .map(|workspace| WorkspaceHistorySnapshot {
                 tabs: workspace
                     .tabs

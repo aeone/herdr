@@ -108,10 +108,6 @@ pub(super) fn keybind_help_groups(app: &AppState) -> Vec<HelpGroup> {
                 keybind_label(&kb.toggle_offline_mirrors),
                 "offline mirrors: keep or hide",
             ),
-            help_entry(
-                keybind_label(&kb.wall_add),
-                "add to wall: pick a pane for this wall, or a new one",
-            ),
         ],
     ));
 

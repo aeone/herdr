@@ -208,19 +208,8 @@ pub struct Workspace {
     /// and deliberately absent from `WorkspaceSnapshot`: mirrors are derived
     /// from a live remote, so they are rebuilt by polling rather than restored.
     pub remote_mirror: Option<RemoteMirror>,
-    /// Set when this workspace is a wall of views onto terminals elsewhere.
-    /// Runtime-only, like `remote_mirror`: a view's placeholder terminal has
-    /// nothing to restore, and the terminals it shows may not survive a
-    /// restart under the same ids, so walls are not persisted at all.
-    pub wall: Option<WallSpec>,
     #[cfg(test)]
     pub(crate) test_runtimes: HashMap<PaneId, TerminalRuntime>,
-}
-
-/// What a wall was opened onto, in tile order.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WallSpec {
-    pub targets: Vec<TerminalId>,
 }
 
 /// What one tab of a mirrored space stands for on the host.
@@ -339,7 +328,6 @@ impl Workspace {
             tabs: vec![tab],
             active_tab: 0,
             remote_mirror: None,
-            wall: None,
             #[cfg(test)]
             test_runtimes: HashMap::new(),
         }
@@ -519,117 +507,12 @@ impl Workspace {
                 tabs: vec![tab],
                 active_tab: 0,
                 remote_mirror: None,
-                wall: None,
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
             terminal,
             runtime,
         ))
-    }
-
-    /// A workspace tiled with one view per target, in reading order.
-    ///
-    /// Each view gets a placeholder terminal of its own, fed by nothing, so
-    /// the workspace is as ordinary as any other to everything that does not
-    /// draw, size or type. Returns the placeholders for the caller to register
-    /// alongside the workspace.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_wall(
-        targets: Vec<TerminalId>,
-        initial_cwd: PathBuf,
-        rows: u16,
-        cols: u16,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-        events: mpsc::Sender<AppEvent>,
-        render_notify: Arc<Notify>,
-        render_dirty: Arc<RenderSignal>,
-    ) -> std::io::Result<(Self, Vec<(TerminalState, TerminalRuntime)>)> {
-        let (tab, tiles) = Tab::new_wall(
-            1,
-            &targets,
-            initial_cwd.clone(),
-            rows,
-            cols,
-            host_terminal_theme,
-            events,
-            render_notify,
-            render_dirty,
-        )?;
-        let mut pane_ids = Vec::with_capacity(tiles.len());
-        let mut placeholders = Vec::with_capacity(tiles.len());
-        for tile in tiles {
-            pane_ids.push(tile.pane_id);
-            placeholders.push((tile.terminal, tile.runtime));
-        }
-        let mut workspace = Self {
-            id: generate_workspace_id(),
-            custom_name: None,
-            identity_cwd: initial_cwd.clone(),
-            // A wall shows terminals from anywhere, so the repository of the
-            // directory it was opened in says nothing about it.
-            cached_identity_cwd: initial_cwd.clone(),
-            cached_auto_label: fallback_label_from_cwd(&initial_cwd),
-            cached_git_status_key: initial_cwd.clone(),
-            cached_git_branch: None,
-            cached_git_ahead_behind: None,
-            cached_git_space: None,
-            worktree_space: None,
-            metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
-            metadata_token_sequences: HashMap::new(),
-            public_pane_numbers: HashMap::new(),
-            next_public_pane_number: 1,
-            next_public_tab_number: 2,
-            tabs: vec![tab],
-            active_tab: 0,
-            remote_mirror: None,
-            wall: Some(WallSpec { targets }),
-            #[cfg(test)]
-            test_runtimes: HashMap::new(),
-        };
-        for pane_id in pane_ids {
-            workspace.register_new_pane(pane_id);
-        }
-        Ok((workspace, placeholders))
-    }
-
-    /// Adds a view of `target` to this wall's active tab, re-tiling it, and
-    /// returns the new tile's placeholder for the caller to register.
-    ///
-    /// Refuses a workspace that is not a wall: a view among ordinary panes
-    /// would be re-tiled along with them, throwing away a layout someone made.
-    pub fn add_wall_view(
-        &mut self,
-        target: &TerminalId,
-        initial_cwd: PathBuf,
-        rows: u16,
-        cols: u16,
-        host_terminal_theme: crate::terminal_theme::TerminalTheme,
-    ) -> std::io::Result<NewPane> {
-        if self.wall.is_none() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "workspace is not a wall",
-            ));
-        }
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "wall has no tab",
-            ));
-        };
-        let tile = tab.add_view(target, initial_cwd, rows, cols, host_terminal_theme)?;
-        self.register_new_pane(tile.pane_id);
-        if let Some(wall) = &mut self.wall {
-            wall.targets.push(target.clone());
-        }
-        Ok(tile)
-    }
-
-    /// Whether this workspace exists only while the server runs: a mirror
-    /// rebuilt from its host, or a wall of views. Neither is persisted.
-    pub fn is_runtime_only(&self) -> bool {
-        self.remote_mirror.is_some() || self.wall.is_some()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -708,7 +591,6 @@ impl Workspace {
                 tabs: vec![tab],
                 active_tab: 0,
                 remote_mirror: None,
-                wall: None,
                 #[cfg(test)]
                 test_runtimes: HashMap::new(),
             },
@@ -1490,6 +1372,7 @@ impl Workspace {
         false
     }
 
+    #[cfg(test)]
     fn register_new_pane(&mut self, pane_id: PaneId) {
         self.register_new_pane_with_number(pane_id, self.next_public_pane_number);
     }
@@ -1564,34 +1447,8 @@ impl Workspace {
             tabs: vec![tab],
             active_tab: 0,
             remote_mirror: None,
-            wall: None,
             test_runtimes: HashMap::new(),
         }
-    }
-
-    /// A wall of views onto `targets`, laid out as `new_wall` lays them out,
-    /// with placeholder terminals that have no runtime.
-    pub(crate) fn test_wall(name: &str, targets: &[TerminalId]) -> Self {
-        let mut workspace = Self::test_new(name);
-        let tab = &mut workspace.tabs[0];
-        let root = tab.root_pane;
-        tab.panes.clear();
-        let pane_ids = tab::tile_grid(&mut tab.layout, root, targets.len());
-        for (pane_id, target) in pane_ids.iter().zip(targets) {
-            tab.panes.insert(
-                *pane_id,
-                PaneState::view(TerminalId::alloc(), target.clone()),
-            );
-        }
-        workspace.public_pane_numbers.clear();
-        workspace.next_public_pane_number = 1;
-        for pane_id in pane_ids {
-            workspace.register_new_pane(pane_id);
-        }
-        workspace.wall = Some(WallSpec {
-            targets: targets.to_vec(),
-        });
-        workspace
     }
 
     pub(crate) fn insert_test_runtime(&mut self, pane_id: PaneId, runtime: TerminalRuntime) {

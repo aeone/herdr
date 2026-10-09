@@ -468,12 +468,6 @@ impl TerminalRuntime {
         self.0.render_rewrapped(frame, area);
     }
 
-    /// Whether this terminal is exactly the size of `area`, so it can be
-    /// drawn there as it is.
-    pub(crate) fn fits(&self, area: Rect) -> bool {
-        self.0.current_size() == (area.height, area.width)
-    }
-
     pub(crate) fn collect_dirty_patch(
         &self,
         area_width: u16,

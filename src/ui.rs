@@ -231,13 +231,6 @@ fn compute_view_internal(
     // of each redoing it. See ViewComputeEpochGuard's doc comment.
     let _view_compute_epoch = self::sidebar::ViewComputeEpochGuard::enter();
 
-    // Settled before any pane is resized, since it decides which pane may
-    // size a terminal that a view is showing. Only the pass that resizes may
-    // move it: a client that merely draws must not take a size from another.
-    if resize_panes {
-        app.refresh_view_size_claim();
-    }
-
     if is_mobile_width(area, app.mobile_width_threshold) {
         compute_mobile_view(app, terminal_runtimes, area, resize_panes, cell_size);
         return;
@@ -1671,7 +1664,6 @@ mod tests {
                 "rename agent: on its own host, if it is a mirror",
                 "spaces listed under agents: hide or show",
                 "offline mirrors: keep or hide",
-                "add to wall: pick a pane for this wall, or a new one",
             ]
         );
         assert!(groups[0].1.iter().all(|(key, _)| key == "unset"));

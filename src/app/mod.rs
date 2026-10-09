@@ -33,7 +33,6 @@ mod tab_bar_status;
 mod terminal_targets;
 mod terminal_titles;
 mod theme_sync;
-mod wall;
 mod window_title;
 mod worktrees;
 
@@ -689,7 +688,6 @@ impl App {
             jump_input: String::new(),
             terminals: std::collections::HashMap::new(),
             direct_attach_resize_locks: std::collections::HashSet::new(),
-            view_size_claim: None,
             wheel_events: std::collections::HashMap::new(),
             renaming_agent: false,
             pane_id_aliases: std::collections::HashMap::new(),
@@ -712,7 +710,6 @@ impl App {
             request_submit_worktree_open: false,
             request_submit_worktree_remove: false,
             request_reload_config: false,
-            request_wall_add: None,
             request_client_config_reload: false,
             request_clipboard_write: None,
             creating_new_tab: false,
@@ -1258,10 +1255,6 @@ impl App {
 
             if let Some(ws_idx) = self.state.request_remove_linked_worktree.take() {
                 self.open_remove_linked_worktree_confirmation(ws_idx);
-                needs_render = true;
-            }
-
-            if self.apply_requested_wall_add() {
                 needs_render = true;
             }
 

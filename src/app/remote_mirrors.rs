@@ -1463,25 +1463,17 @@ impl App {
     }
 
     /// The host and terminal behind the pane being worked in, when that pane is
-    /// a mirror of another machine's -- or a view of one, which types into the
-    /// mirror it shows and so has to paste where that mirror would.
+    /// a mirror of another machine's.
     pub(crate) fn focused_mirror_terminal(&self) -> Option<(String, String)> {
         let ws_idx = self.state.active?;
         let workspace = self.state.workspaces.get(ws_idx)?;
+        let target = workspace.remote_mirror.as_ref()?.target.clone();
         let focused = workspace.focused_pane_id()?;
-        let terminal_id = workspace.pane_state(focused)?.effective_terminal_id();
-        self.state.workspaces.iter().find_map(|workspace| {
-            let target = &workspace.remote_mirror.as_ref()?.target;
-            let tab = workspace.tabs.iter().find(|tab| {
-                tab.panes
-                    .values()
-                    .any(|pane| &pane.attached_terminal_id == terminal_id)
-            })?;
-            Some((
-                target.clone(),
-                tab.remote_mirror.as_ref()?.remote_terminal.clone(),
-            ))
-        })
+        let tab = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.panes.contains_key(&focused))?;
+        Some((target, tab.remote_mirror.as_ref()?.remote_terminal.clone()))
     }
 
     /// Hands an image to the host that runs a mirrored pane, so it stages the
