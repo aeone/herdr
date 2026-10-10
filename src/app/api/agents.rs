@@ -3,8 +3,8 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ResponseResult,
+    AgentMarkParams, AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams,
+    AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -48,6 +48,36 @@ impl App {
         };
 
         encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    /// Marks any pane, not only one running an agent: the mark key does, and a
+    /// pane between agents keeps its mark for the next one. So the target is
+    /// resolved as a terminal (pane id, terminal id, agent name or kind), and
+    /// the answer is the pane rather than an `AgentInfo` that a plain shell
+    /// would not have.
+    pub(super) fn handle_agent_mark(&mut self, id: String, params: AgentMarkParams) -> String {
+        let level = match params.level {
+            None => None,
+            Some(level @ 0..=3) => Some(crate::app::MarkLevel::from(level)),
+            Some(level) => {
+                return encode_error(
+                    id,
+                    "invalid_mark_level",
+                    format!("mark level must be 0, 1, 2, 3 or null, got {level}"),
+                )
+            }
+        };
+        let resolved = match self.resolve_terminal_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        if !self.set_agent_mark(resolved.ws_idx, resolved.pane_id, level) {
+            return agent_not_found(id, &params.target);
+        }
+        let Some(pane) = self.pane_info(resolved.ws_idx, resolved.pane_id) else {
+            return agent_not_found(id, &params.target);
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
     }
 
     pub(super) fn handle_agent_start(&mut self, id: String, params: AgentStartParams) -> String {
@@ -627,5 +657,144 @@ mod tests {
                 Some("shell-pane")
             );
         }
+    }
+
+    fn pane_updated_marks(app: &App) -> Vec<Option<u8>> {
+        app.event_hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::PaneUpdated { pane } => Some(pane.agent_mark),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn mark_response(app: &mut App, target: &str, level: Option<u8>) -> String {
+        app.handle_agent_mark(
+            "req".into(),
+            AgentMarkParams {
+                target: target.to_string(),
+                level,
+            },
+        )
+    }
+
+    fn pane_from(response: &str) -> crate::api::schema::PaneInfo {
+        let success: SuccessResponse = serde_json::from_str(response).unwrap();
+        let ResponseResult::PaneInfo { pane } = success.result else {
+            panic!("expected pane info response, got {response}");
+        };
+        pane
+    }
+
+    #[test]
+    fn agent_mark_sets_and_clears_the_mark_and_announces_each_change() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let target = app.public_pane_id(0, pane_id).unwrap();
+        app.state.session_dirty = false;
+
+        let pane = pane_from(&mark_response(&mut app, &target, Some(2)));
+        assert_eq!(pane.agent_mark, Some(2));
+        assert_eq!(
+            app.state.agent_mark(0, pane_id),
+            Some(crate::app::MarkLevel::Medium)
+        );
+        assert!(app.state.session_dirty, "a mark is saved with the session");
+        assert_eq!(app.pane_info(0, pane_id).unwrap().agent_mark, Some(2));
+
+        let pane = pane_from(&mark_response(&mut app, &target, Some(0)));
+        assert_eq!(pane.agent_mark, Some(0), "parked is a mark, not no mark");
+
+        // Setting the level it already has changes nothing, so says nothing.
+        pane_from(&mark_response(&mut app, &target, Some(0)));
+
+        let pane = pane_from(&mark_response(&mut app, &target, None));
+        assert_eq!(pane.agent_mark, None);
+        assert!(
+            app.state.agent_marks.is_empty(),
+            "clearing leaves no dead key"
+        );
+
+        assert_eq!(pane_updated_marks(&app), vec![Some(2), Some(0), None]);
+    }
+
+    #[test]
+    fn agent_mark_rejects_levels_past_high() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let target = app.public_pane_id(0, pane_id).unwrap();
+
+        let response = mark_response(&mut app, &target, Some(4));
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_mark_level");
+        assert!(app.state.agent_marks.is_empty());
+        assert!(pane_updated_marks(&app).is_empty());
+    }
+
+    #[test]
+    fn agent_mark_reports_an_unknown_target() {
+        let mut app = app_with_agent();
+        let response = mark_response(&mut app, "nobody", Some(3));
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "agent_not_found");
+    }
+
+    #[test]
+    fn agent_mark_on_a_mirror_is_kept_under_the_remote_pane() {
+        let mut app = app_with_agent();
+        let mut workspace = Workspace::test_new("mirrored");
+        workspace.remote_mirror = Some(crate::workspace::RemoteMirror {
+            disconnected: false,
+            target: "workbox".to_string(),
+            origin_target: None,
+            host_label: "wb".to_string(),
+            host_color: None,
+            key: "workbox\u{1f}w1".to_string(),
+            remote_terminal: "term-1".to_string(),
+        });
+        workspace.tabs[0].remote_mirror = Some(crate::workspace::RemoteMirrorTab {
+            key: "workbox\u{1f}w1\u{1f}term-1".to_string(),
+            remote_terminal: "term-1".to_string(),
+            remote_pane: "w1:p1".to_string(),
+            disconnected: false,
+        });
+        app.state.workspaces.push(workspace);
+        app.state.ensure_test_terminals();
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let target = app.public_pane_id(1, pane_id).unwrap();
+
+        let pane = pane_from(&mark_response(&mut app, &target, Some(3)));
+        assert_eq!(pane.agent_mark, Some(3));
+        assert_eq!(
+            app.state
+                .agent_marks
+                .get("workbox\u{1f}w1\u{1f}term-1")
+                .copied(),
+            Some(crate::app::MarkLevel::High)
+        );
+    }
+
+    #[test]
+    fn the_mark_keys_announce_the_marks_they_set() {
+        let mut app = app_with_agent();
+        app.cycle_focused_agent_mark();
+        assert_eq!(pane_updated_marks(&app), vec![Some(3)]);
+
+        app.cycle_space_mark(0);
+        let workspace_marks: Vec<_> = app
+            .event_hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::WorkspaceUpdated { workspace } => {
+                    Some(workspace.mark)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(workspace_marks, vec![Some(3)]);
+        assert_eq!(app.workspace_info(0).mark, Some(3));
     }
 }

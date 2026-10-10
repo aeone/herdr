@@ -505,6 +505,12 @@ pub struct PaneInfo {
     /// not by when the mirror happened to be built.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_state_changed_at_ms: Option<u64>,
+    /// The mark set on this pane's agent, as `agent.mark` or the mark key sets
+    /// it: 0 parked, 1 low, 2 medium, 3 high. Absent when unmarked. This is the
+    /// agent's own mark, not the louder of it and its workspace's `mark`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 3))]
+    pub agent_mark: Option<u8>,
     /// Set when this pane is itself a mirror of a pane on another host, naming
     /// the pane it stands for. A host mirroring this one uses it to tell a real
     /// pane from a reflection, so mirroring both ends of a chain shows each

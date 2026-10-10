@@ -629,6 +629,7 @@ impl App {
             size,
             mirror_origin,
             agent_state_changed_at_ms: terminal.agent_state_changed_at_ms,
+            agent_mark: self.state.agent_mark(ws_idx, pane_id).map(u8::from),
             revision: terminal.revision,
         })
     }
@@ -677,6 +678,7 @@ impl App {
                     checkout_path: space.checkout_path.display().to_string(),
                     is_linked_worktree: space.is_linked_worktree,
                 }),
+            mark: self.state.space_mark(index).map(u8::from),
         }
     }
 }

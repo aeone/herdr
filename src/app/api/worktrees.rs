@@ -652,15 +652,6 @@ impl App {
             },
         });
     }
-
-    fn emit_workspace_updated(&mut self, ws_idx: usize) {
-        self.emit_event(EventEnvelope {
-            event: EventKind::WorkspaceUpdated,
-            data: EventData::WorkspaceUpdated {
-                workspace: self.workspace_info(ws_idx),
-            },
-        });
-    }
 }
 
 fn worktree_source_from_space(

@@ -46,6 +46,16 @@ pub struct AgentRenameParams {
     pub name: Option<String>,
 }
 
+/// Sets or clears the mark on an agent. `level` is 0 (parked), 1 (low),
+/// 2 (medium) or 3 (high); null or absent clears the mark.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentMarkParams {
+    pub target: String,
+    #[serde(default)]
+    #[schemars(range(max = 3))]
+    pub level: Option<u8>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentViewSetParams {
     pub source: String,
@@ -226,6 +236,10 @@ pub struct AgentInfo {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
+    /// The mark set on this agent, as in `PaneInfo::agent_mark`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 3))]
+    pub agent_mark: Option<u8>,
     pub revision: u64,
 }
 

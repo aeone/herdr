@@ -178,6 +178,56 @@ fn generated_protocol_schema_artifact_is_current() {
 }
 
 #[test]
+fn agent_mark_request_takes_a_level_or_null() {
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "id": "req_mark",
+        "method": "agent.mark",
+        "params": { "target": "w1:p1", "level": 2 }
+    }))
+    .unwrap();
+    assert_eq!(
+        request.method,
+        Method::AgentMark(AgentMarkParams {
+            target: "w1:p1".into(),
+            level: Some(2),
+        })
+    );
+
+    for params in [
+        serde_json::json!({ "target": "w1:p1", "level": null }),
+        serde_json::json!({ "target": "w1:p1" }),
+    ] {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "req_clear",
+            "method": "agent.mark",
+            "params": params,
+        }))
+        .unwrap();
+        assert_eq!(
+            request.method,
+            Method::AgentMark(AgentMarkParams {
+                target: "w1:p1".into(),
+                level: None,
+            })
+        );
+    }
+
+    let json = serde_json::to_value(request_with_mark()).unwrap();
+    assert_eq!(json["method"], "agent.mark");
+    assert_eq!(json["params"]["level"], 3);
+}
+
+fn request_with_mark() -> Request {
+    Request {
+        id: "req".into(),
+        method: Method::AgentMark(AgentMarkParams {
+            target: "w1:p1".into(),
+            level: Some(3),
+        }),
+    }
+}
+
+#[test]
 fn request_round_trips_for_server_stop() {
     let request = Request {
         id: "req_stop".into(),
@@ -719,6 +769,7 @@ fn worktree_request_and_response_round_trip() {
                     checkout_path: "/worktrees/herdr/worktree-api".into(),
                     is_linked_worktree: true,
                 }),
+                mark: None,
             },
             tab: TabInfo {
                 tab_id: "w_1:1".into(),
@@ -753,6 +804,7 @@ fn worktree_request_and_response_round_trip() {
                 scroll: None,
                 input: None,
                 agent_state_changed_at_ms: None,
+                agent_mark: None,
                 size: None,
                 mirror_origin: None,
                 revision: 0,
@@ -812,6 +864,7 @@ fn worktree_lifecycle_events_round_trip() {
             checkout_path: "/worktrees/herdr/worktree-api".into(),
             is_linked_worktree: true,
         }),
+        mark: None,
     };
     let worktree = WorktreeInfo {
         path: "/worktrees/herdr/worktree-api".into(),
@@ -1188,6 +1241,7 @@ fn create_response_round_trips_with_root_pane() {
                 scroll: None,
                 input: None,
                 agent_state_changed_at_ms: None,
+                agent_mark: None,
                 size: None,
                 mirror_origin: None,
                 revision: 0,

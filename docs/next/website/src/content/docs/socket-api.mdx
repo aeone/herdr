@@ -106,7 +106,7 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.mark`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -814,6 +814,7 @@ that workspace.
 Pane event subscriptions include `pane.created`, `pane.updated`, `pane.closed`, `pane.focused`,
 `pane.moved`, `pane.exited`, `pane.agent_detected`,
 `pane.output_matched`, `pane.agent_status_changed`, and `pane.scroll_changed`.
+Setting or clearing an agent mark, through `agent.mark` or the mark key, emits `pane.updated` with the pane's new `agent_mark`; marking a workspace emits `workspace.updated` with its new `mark`.
 Terminal-title changes can emit `pane.updated`, but spinner-only raw-title changes do not emit it when `terminal_title_stripped` is unchanged.
 `pane.scroll_changed` is scoped to one `pane_id` and emits `pane_id`,
 `workspace_id`, and the current `scroll` metrics whenever Herdr observes a
@@ -873,6 +874,18 @@ Successful responses look like this:
   }
 }
 ```
+
+`agent.mark` sets the mark on the pane a target resolves to (a pane id, terminal id, or agent name or kind), the same mark the sidebar's mark key cycles. `level` is `0` (parked), `1` (low), `2` (medium) or `3` (high); `null` or omitting it clears the mark. Any other level fails with `invalid_mark_level`. The response is the updated `pane_info`:
+
+```json
+{ "id": "req_mark", "method": "agent.mark", "params": { "target": "w1:p1", "level": 3 } }
+```
+
+```json
+{ "id": "req_mark", "result": { "type": "pane_info", "pane": { "pane_id": "w1:p1", "agent_mark": 3, "...": "..." } } }
+```
+
+Pane and agent info report the mark as `agent_mark`, and workspace info reports the workspace's own mark as `mark`. Both are absent when unmarked. A mirrored pane's mark is kept under the remote pane it stands for, so it survives the mirror being rebuilt.
 
 `server.agent_manifests` returns the active agent detection manifest sources and remote update diagnostics without reloading rules:
 

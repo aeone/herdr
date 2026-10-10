@@ -718,6 +718,7 @@ mod tests {
             scroll,
             input: None,
             agent_state_changed_at_ms: None,
+            agent_mark: None,
             size: None,
             mirror_origin: None,
             revision: 0,

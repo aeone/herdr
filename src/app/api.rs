@@ -959,6 +959,18 @@ impl App {
         }
     }
 
+    pub(crate) fn emit_workspace_updated(&mut self, ws_idx: usize) {
+        if ws_idx >= self.state.workspaces.len() {
+            return;
+        }
+        self.emit_event(crate::api::schema::EventEnvelope {
+            event: crate::api::schema::EventKind::WorkspaceUpdated,
+            data: crate::api::schema::EventData::WorkspaceUpdated {
+                workspace: self.workspace_info(ws_idx),
+            },
+        });
+    }
+
     pub(crate) fn emit_workspace_token_updated(&mut self, ws_idx: usize) {
         // Token updates bypass plugin hooks so a hook cannot refresh its own
         // token and recursively trigger workspace.updated.
@@ -1195,6 +1207,7 @@ impl App {
             Method::AgentGet(target) => return self.handle_agent_get(request.id, target),
             Method::AgentFocus(target) => return self.handle_agent_focus(request.id, target),
             Method::AgentRename(params) => return self.handle_agent_rename(request.id, params),
+            Method::AgentMark(params) => return self.handle_agent_mark(request.id, params),
             Method::AgentViewSet(params) => return self.handle_agent_view_set(request.id, params),
             Method::AgentViewClear(params) => {
                 return self.handle_agent_view_clear(request.id, params)

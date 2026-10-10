@@ -836,6 +836,16 @@
                 "null"
               ]
             },
+            "agent_mark": {
+              "description": "The mark set on this pane's agent, as `agent.mark` or the mark key sets\nit: 0 parked, 1 low, 2 medium, 3 high. Absent when unmarked. This is the\nagent's own mark, not the louder of it and its workspace's `mark`.",
+              "format": "uint8",
+              "maximum": 3,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "agent_name": {
               "description": "The name this agent was given, as `agents.rename` sets it. Separate from\n`agent`, which says what kind of agent is running: a renamed claude is\nstill a claude, and a mirror needs both -- the name to show, the kind to\ncolour it by.",
               "type": [
@@ -1308,6 +1318,16 @@
             "label": {
               "type": "string"
             },
+            "mark": {
+              "description": "The mark set on this workspace: 0 parked, 1 low, 2 medium, 3 high.\nAbsent when unmarked.",
+              "format": "uint8",
+              "maximum": 3,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "number": {
               "format": "uint",
               "minimum": 0,
@@ -1448,6 +1468,28 @@
     },
     "request": {
       "$defs": {
+        "AgentMarkParams": {
+          "description": "Sets or clears the mark on an agent. `level` is 0 (parked), 1 (low),\n2 (medium) or 3 (high); null or absent clears the mark.",
+          "properties": {
+            "level": {
+              "default": null,
+              "format": "uint8",
+              "maximum": 3,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -5248,6 +5290,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.mark",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentMarkParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.view.set",
               "type": "string"
             },
@@ -6400,6 +6458,16 @@
             "agent": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "agent_mark": {
+              "description": "The mark set on this agent, as in `PaneInfo::agent_mark`.",
+              "format": "uint8",
+              "maximum": 3,
+              "minimum": 0,
+              "type": [
+                "integer",
                 "null"
               ]
             },
@@ -7777,6 +7845,16 @@
             "agent": {
               "type": [
                 "string",
+                "null"
+              ]
+            },
+            "agent_mark": {
+              "description": "The mark set on this pane's agent, as `agent.mark` or the mark key sets\nit: 0 parked, 1 low, 2 medium, 3 high. Absent when unmarked. This is the\nagent's own mark, not the louder of it and its workspace's `mark`.",
+              "format": "uint8",
+              "maximum": 3,
+              "minimum": 0,
+              "type": [
+                "integer",
                 "null"
               ]
             },
@@ -10476,6 +10554,16 @@
             },
             "label": {
               "type": "string"
+            },
+            "mark": {
+              "description": "The mark set on this workspace: 0 parked, 1 low, 2 medium, 3 high.\nAbsent when unmarked.",
+              "format": "uint8",
+              "maximum": 3,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             },
             "number": {
               "format": "uint",

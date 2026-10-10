@@ -489,6 +489,7 @@ impl App {
         };
         cycle_mark_entry(&mut self.state.space_marks, id);
         self.state.mark_session_dirty();
+        self.emit_workspace_updated(ws_idx);
     }
 
     /// Opens the rename prompt for the agent in the focused pane.
@@ -529,6 +530,33 @@ impl App {
         };
         cycle_mark_entry(&mut self.state.agent_marks, key);
         self.state.mark_session_dirty();
+        self.emit_pane_updated(ws_idx, pane_id);
+    }
+
+    /// Sets the mark on the agent in this pane, or clears it with `None`.
+    ///
+    /// The same change the mark key makes, by level instead of by cycling, so
+    /// a client can put a mark exactly where it wants it. Returns whether the
+    /// pane had a mark key at all. Announced as `pane.updated`, the event that
+    /// already carries everything else a pane says about itself.
+    pub(crate) fn set_agent_mark(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        level: Option<MarkLevel>,
+    ) -> bool {
+        let Some(key) = self.state.agent_mark_key(ws_idx, pane_id) else {
+            return false;
+        };
+        let changed = match level {
+            Some(level) => self.state.agent_marks.insert(key, level) != Some(level),
+            None => self.state.agent_marks.remove(&key).is_some(),
+        };
+        if changed {
+            self.state.mark_session_dirty();
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
+        true
     }
 
     pub fn new(

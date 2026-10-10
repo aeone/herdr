@@ -63,6 +63,11 @@ pub struct WorkspaceInfo {
     pub tokens: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorkspaceWorktreeInfo>,
+    /// The mark set on this workspace: 0 parked, 1 low, 2 medium, 3 high.
+    /// Absent when unmarked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(max = 3))]
+    pub mark: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
