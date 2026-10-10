@@ -600,10 +600,21 @@ impl Wall {
             return Ok(true);
         }
         self.state.refresh_targets(&listed);
+        // Ordered here as well as where the list is made, so a list from a far
+        // side one build behind still puts its agents first.
+        let mut listed = listed;
+        targets::order_by_recency(&mut listed);
+        let now_ms = targets::unix_now_ms();
 
         if let Some(fzf) = picker::find_fzf() {
-            let chosen = self
-                .with_screen_handed_over(|| picker::run_fzf(&fzf, &targets::fzf_input(&listed)));
+            // fzf takes the whole screen width less its pointer, marker and
+            // scrollbar columns.
+            let width = crossterm::terminal::size()
+                .map(|(cols, _)| usize::from(cols))
+                .unwrap_or(100)
+                .saturating_sub(4);
+            let input = targets::fzf_input(&listed, now_ms, width);
+            let chosen = self.with_screen_handed_over(|| picker::run_fzf(&fzf, &input));
             let chosen = match chosen {
                 Ok(Some(output)) => targets::parse_fzf_output(&output, listed.len()),
                 Ok(None) => Vec::new(),
@@ -624,9 +635,7 @@ impl Wall {
             return Ok(true);
         }
 
-        self.picker = Some(Picker::new(
-            listed.iter().map(WallTarget::picker_line).collect(),
-        ));
+        self.picker = Some(Picker::new(targets::picker_rows(&listed, now_ms)));
         self.picker_targets = listed;
         self.dirty = true;
         Ok(true)

@@ -8,6 +8,7 @@
 use serde_json::Value;
 
 use crate::api::schema::{Method, Request};
+use crate::client::wall::targets::order_by_recency;
 use crate::client::wall::{TargetSource, WallTarget, WallTargetKind};
 
 /// Environment telling a wall started by `herdr wall --remote` where to list
@@ -153,8 +154,9 @@ fn list(method: Method, field: &str) -> std::io::Result<Vec<Value>> {
 
 /// Builds the list from the API's answers: agents first, since they are what
 /// people usually want to watch, then spaces, then any pane that is not
-/// already listed as an agent. A space stands for the pane `herdr focus`
-/// would show for it.
+/// already listed as an agent, each kind most recently used first (see
+/// `order_by_recency`). A space stands for the pane `herdr focus` would show
+/// for it.
 fn build_targets(agents: &[Value], panes: &[Value], workspaces: &[Value]) -> Vec<WallTarget> {
     let size_of = |terminal_id: &str| -> (Option<u16>, Option<u16>) {
         panes
@@ -179,6 +181,30 @@ fn build_targets(agents: &[Value], panes: &[Value], workspaces: &[Value]) -> Vec
             .unwrap_or(workspace_id)
             .to_owned()
     };
+    let pane_of = |terminal_id: &str| {
+        panes
+            .iter()
+            .find(|pane| pane["terminal_id"].as_str() == Some(terminal_id))
+    };
+    // The agent list does not carry the state-change time or the mirror
+    // origin; the pane holding the same terminal does.
+    let last_used =
+        |pane: Option<&Value>| pane.and_then(|pane| pane["agent_state_changed_at_ms"].as_u64());
+    let host_of = |pane: Option<&Value>| -> Option<String> {
+        let origin = &pane?["mirror_origin"];
+        origin["label"]
+            .as_str()
+            .or_else(|| origin["target"].as_str())
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_owned)
+    };
+    fn text(value: &Value) -> Option<&str> {
+        value
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    }
 
     let mut targets = Vec::new();
     for agent in agents {
@@ -197,15 +223,28 @@ fn build_targets(agents: &[Value], panes: &[Value], workspaces: &[Value]) -> Vec
             .as_str()
             .map(space_label)
             .unwrap_or_default();
+        // What the agent list in the sidebar calls it: the name it reported
+        // for itself, else the one it was given, else its title, else what
+        // kind of agent it is. Blank values fall through, as they do there.
+        let display = text(&agent["display_agent"])
+            .or_else(|| text(&agent["name"]))
+            .or_else(|| text(&agent["title"]))
+            .unwrap_or(kind);
+        let pane = pane_of(terminal_id);
         let (cols, rows) = size_of(terminal_id);
         targets.push(WallTarget {
             kind: WallTargetKind::Agent,
             target: target.to_owned(),
             terminal_id: terminal_id.to_owned(),
-            label: format!("{kind} {target} · {space}"),
+            label: format!("{display} · {space}"),
             detail: format!("{kind:<8} {status:<8} {space:<16} {title}"),
             cols,
             rows,
+            title: display.to_owned(),
+            space,
+            host: host_of(pane),
+            status: status.to_owned(),
+            last_used_ms: last_used(pane),
         });
     }
 
@@ -214,13 +253,27 @@ fn build_targets(agents: &[Value], panes: &[Value], workspaces: &[Value]) -> Vec
             continue;
         };
         let label = workspace["label"].as_str().unwrap_or(workspace_id);
-        let Some(terminal_id) =
+        let Some(shown) =
             super::focus::pick_space_pane(panes, workspace_id, workspace["active_tab_id"].as_str())
-                .and_then(|pane| pane["terminal_id"].as_str())
         else {
             continue;
         };
+        let Some(terminal_id) = shown["terminal_id"].as_str() else {
+            continue;
+        };
         let status = workspace["agent_status"].as_str().unwrap_or("unknown");
+        let members: Vec<&Value> = panes
+            .iter()
+            .filter(|pane| pane["workspace_id"].as_str() == Some(workspace_id))
+            .collect();
+        // A space was last used when any agent in it last was.
+        let last_used_ms = members
+            .iter()
+            .filter_map(|pane| last_used(Some(pane)))
+            .max();
+        // A mirrored space holds the far host's panes; any of them names it.
+        let host =
+            host_of(Some(shown)).or_else(|| members.iter().find_map(|pane| host_of(Some(pane))));
         let (cols, rows) = size_of(terminal_id);
         targets.push(WallTarget {
             kind: WallTargetKind::Space,
@@ -230,6 +283,11 @@ fn build_targets(agents: &[Value], panes: &[Value], workspaces: &[Value]) -> Vec
             detail: format!("{label:<28} {status}"),
             cols,
             rows,
+            title: label.to_owned(),
+            space: String::new(),
+            host,
+            status: status.to_owned(),
+            last_used_ms,
         });
     }
 
@@ -264,8 +322,19 @@ fn build_targets(agents: &[Value], panes: &[Value], workspaces: &[Value]) -> Vec
             detail: format!("{space:<16} {title}"),
             cols,
             rows,
+            title: if title.trim().is_empty() {
+                format!("pane {pane_id}")
+            } else {
+                title.trim().to_owned()
+            },
+            space,
+            host: host_of(Some(pane)),
+            // A plain pane's status says nothing a person picks it by.
+            status: String::new(),
+            last_used_ms: last_used(Some(pane)),
         });
     }
+    order_by_recency(&mut targets);
     targets
 }
 
@@ -379,8 +448,124 @@ mod tests {
                 (WallTargetKind::Pane, "w2:p1", "t3"),
             ]
         );
-        assert_eq!(targets[0].label, "claude claude1 · parser");
+        assert_eq!(targets[0].label, "claude1 · parser");
         assert_eq!(targets[0].size(), Some((100, 30)));
+    }
+
+    /// Agents are aged by their pane's state-change time, which the agent list
+    /// does not carry; spaces by the newest of their panes; and each kind is
+    /// listed newest first, agents before the rest.
+    #[test]
+    fn targets_are_ordered_by_last_use_from_their_panes() {
+        let agent = |terminal_id: &str, pane_id: &str, workspace_id: &str| {
+            serde_json::json!({
+                "terminal_id": terminal_id,
+                "agent": "claude",
+                "agent_status": "idle",
+                "pane_id": pane_id,
+                "workspace_id": workspace_id,
+            })
+        };
+        let used = |mut pane: Value, at: u64| {
+            pane["agent_state_changed_at_ms"] = serde_json::json!(at);
+            pane
+        };
+        let agents = vec![
+            agent("t1", "w1:p1", "w1"),
+            agent("t2", "w2:p1", "w2"),
+            agent("t3", "w2:p2", "w2"),
+        ];
+        let panes = vec![
+            used(pane("w1:p1", "w1", "t1", true), 1_000),
+            used(pane("w2:p1", "w2", "t2", true), 3_000),
+            used(pane("w2:p2", "w2", "t3", false), 2_000),
+            pane("w3:p1", "w3", "t4", true),
+        ];
+        let workspaces = vec![
+            serde_json::json!({"workspace_id": "w1", "label": "one", "active_tab_id": "w1:t1"}),
+            serde_json::json!({"workspace_id": "w2", "label": "two", "active_tab_id": "w2:t1"}),
+            serde_json::json!({"workspace_id": "w3", "label": "three", "active_tab_id": "w3:t1"}),
+        ];
+
+        let targets = build_targets(&agents, &panes, &workspaces);
+        let order: Vec<(&str, Option<u64>)> = targets
+            .iter()
+            .map(|target| (target.target.as_str(), target.last_used_ms))
+            .collect();
+
+        assert_eq!(
+            order,
+            vec![
+                ("w2:p1", Some(3_000)),
+                ("w2:p2", Some(2_000)),
+                ("w1:p1", Some(1_000)),
+                ("w2", Some(3_000)),
+                ("w1", Some(1_000)),
+                ("w3", None),
+                ("w3:p1", None),
+            ]
+        );
+    }
+
+    /// The name shown is the sidebar's: a reported display name over the given
+    /// name over the kind; and a mirror is placed on the host it really runs on.
+    #[test]
+    fn an_agent_is_shown_by_its_display_name_on_its_real_host() {
+        let agents = vec![
+            serde_json::json!({
+                "terminal_id": "t1", "name": "fixer", "display_agent": "SlidePad frames",
+                "agent": "claude", "agent_status": "working",
+                "pane_id": "w1:p1", "workspace_id": "w1",
+            }),
+            serde_json::json!({
+                "terminal_id": "t2", "name": "fixer2", "display_agent": "  ",
+                "agent": "claude", "agent_status": "idle",
+                "pane_id": "w1:p2", "workspace_id": "w1",
+            }),
+            serde_json::json!({
+                "terminal_id": "t3", "agent": "codex", "agent_status": "idle",
+                "pane_id": "w1:p3", "workspace_id": "w1",
+            }),
+        ];
+        let mut mirrored = pane("w1:p1", "w1", "t1", true);
+        mirrored["mirror_origin"] = serde_json::json!({
+            "target": "ryi@valkyrie", "workspace_id": "w9", "terminal_id": "r1", "label": "val",
+        });
+        let panes = vec![
+            mirrored,
+            pane("w1:p2", "w1", "t2", false),
+            pane("w1:p3", "w1", "t3", false),
+        ];
+        let workspaces = vec![
+            serde_json::json!({"workspace_id": "w1", "label": "rycelia", "active_tab_id": "w1:t1"}),
+        ];
+
+        let targets = build_targets(&agents, &panes, &workspaces);
+        let shown: Vec<(&str, &str, Option<&str>)> = targets
+            .iter()
+            .filter(|target| target.kind == WallTargetKind::Agent)
+            .map(|target| {
+                (
+                    target.title.as_str(),
+                    target.space.as_str(),
+                    target.host.as_deref(),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            shown,
+            vec![
+                ("SlidePad frames", "rycelia", Some("val")),
+                ("fixer2", "rycelia", None),
+                ("codex", "rycelia", None),
+            ]
+        );
+        let space = targets
+            .iter()
+            .find(|target| target.kind == WallTargetKind::Space)
+            .expect("space listed");
+        assert_eq!(space.host.as_deref(), Some("val"));
     }
 
     /// A server from before panes reported their size still lists, and the

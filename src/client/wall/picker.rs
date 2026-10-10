@@ -14,6 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
+use super::targets::{self, PickerRow};
 use crate::app::state::Palette;
 use crate::input::TerminalKey;
 
@@ -28,22 +29,24 @@ pub(crate) enum PickerOutcome {
     Cancelled,
 }
 
-/// The built-in picker: a list of lines, a query, and a cursor.
+/// The built-in picker: a list of rows, a query, and a cursor.
 #[derive(Debug, Clone)]
 pub(crate) struct Picker {
-    lines: Vec<String>,
+    /// In the order the list was given, which is most recently used first;
+    /// matches of equal rank keep it.
+    rows: Vec<PickerRow>,
     query: String,
-    /// Indexes of the lines the query matches, in list order.
+    /// Indexes of the rows the query matches, best match first.
     matches: Vec<usize>,
     /// Position in `matches`.
     cursor: usize,
 }
 
 impl Picker {
-    pub(crate) fn new(lines: Vec<String>) -> Self {
-        let matches = (0..lines.len()).collect();
+    pub(crate) fn new(rows: Vec<PickerRow>) -> Self {
+        let matches = (0..rows.len()).collect();
         Self {
-            lines,
+            rows,
             query: String::new(),
             matches,
             cursor: 0,
@@ -133,16 +136,16 @@ impl Picker {
         // contain a short query's letters in order, and in list order that put
         // an unrelated agent above the pane whose name *is* the query -- where
         // enter picks it. Whole-word hits come first, then substrings, then
-        // letters in order, each kept in list order.
+        // letters in order, each kept in list order -- most recently used
+        // first, so of two equally good matches the one in use wins.
         let mut ranked: Vec<(u8, usize)> = self
-            .lines
+            .rows
             .iter()
             .enumerate()
-            .filter_map(|(index, line)| {
-                let line = line.to_lowercase();
+            .filter_map(|(index, row)| {
                 terms
                     .iter()
-                    .map(|term| match_rank(term, &line))
+                    .map(|term| match_rank(term, &row.search))
                     .try_fold(0, |worst, rank| rank.map(|rank| worst.max(rank)))
                     .map(|rank| (rank, index))
             })
@@ -154,8 +157,18 @@ impl Picker {
 
     /// Draws the picker as a panel over `area`.
     pub(crate) fn render(&self, frame: &mut Frame, area: Rect, palette: &Palette, hint: &str) {
-        let width = area.width.saturating_sub(8).clamp(20, 100);
-        let height = (self.lines.len() as u16)
+        // As wide as the lines need, laid out with room to spare, plus the
+        // selection marker and the border -- but never narrower than the hint
+        // or wider than the screen allows.
+        let natural = targets::format_rows(&self.rows, 1_000)
+            .iter()
+            .map(|line| crate::ui::display_width_u16(line))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(4)
+            .max(crate::ui::display_width_u16(hint).saturating_add(2));
+        let width = natural.min(area.width.saturating_sub(8).clamp(20, 120));
+        let height = (self.rows.len() as u16)
             .saturating_add(5)
             .clamp(8, area.height.saturating_sub(4).max(8));
         let Some(popup) = crate::ui::centered_popup_rect(area, width, height) else {
@@ -201,6 +214,11 @@ impl Picker {
         );
         let visible = usize::from(body.height);
         let first = self.cursor.saturating_sub(visible.saturating_sub(1));
+        // Laid out per draw, for the width there is now: the picker is open
+        // only while choosing, over a list of a few hundred at most, and the
+        // columns are sized across the whole list so they hold still while
+        // the query narrows it.
+        let laid_out = targets::format_rows(&self.rows, usize::from(body.width).saturating_sub(2));
         let mut rows: Vec<Line> = Vec::with_capacity(visible);
         for (offset, index) in self.matches.iter().skip(first).take(visible).enumerate() {
             let selected = first + offset == self.cursor;
@@ -209,14 +227,14 @@ impl Picker {
                     .fg(palette.text)
                     .bg(palette.selection_bg)
                     .add_modifier(Modifier::BOLD)
+            } else if self.rows[*index].dim {
+                Style::default().fg(palette.overlay0).bg(palette.panel_bg)
             } else {
                 Style::default().fg(palette.subtext0).bg(palette.panel_bg)
             };
             let marker = if selected { "▸ " } else { "  " };
-            let line = crate::ui::truncate_end(
-                &format!("{marker}{}", self.lines[*index]),
-                usize::from(body.width),
-            );
+            let text = laid_out.get(*index).map(String::as_str).unwrap_or_default();
+            let line = crate::ui::truncate_end(&format!("{marker}{text}"), usize::from(body.width));
             rows.push(Line::from(Span::styled(
                 format!("{line:<width$}", width = usize::from(body.width)),
                 style,
@@ -300,6 +318,16 @@ pub(crate) fn run_fzf(fzf: &std::path::Path, input: &str) -> std::io::Result<Opt
             "--multi",
             "--delimiter=\t",
             "--with-nth=2..",
+            // The lines dim their ids and the marks of spaces and panes.
+            "--ansi",
+            // The list arrives most recently used first, and fzf shows it in
+            // that order until something is typed. After that it ranks by how
+            // well each line matches, as the built-in list does, and breaking
+            // ties by input order keeps recency the tiebreak there too, where
+            // fzf's default would prefer the shorter line. --no-sort would keep
+            // recency outright, but then a pane named exactly what was typed
+            // could sit below an agent that merely contains its letters.
+            "--tiebreak=index",
             "--prompt=herdr wall> ",
             "--header=enter: add tile   tab: mark several   esc: cancel",
         ])
@@ -329,11 +357,15 @@ mod tests {
         TerminalKey::new(code, KeyModifiers::empty())
     }
 
+    fn plain(lines: &[&str]) -> Picker {
+        Picker::new(lines.iter().map(|line| PickerRow::plain(line)).collect())
+    }
+
     fn picker() -> Picker {
-        Picker::new(vec![
-            "agent  claude1        working  fix the parser".into(),
-            "space  w2             docs".into(),
-            "pane   w3:p1          htop".into(),
+        plain(&[
+            "agent  claude1        working  fix the parser",
+            "space  w2             docs",
+            "pane   w3:p1          htop",
         ])
     }
 
@@ -367,11 +399,10 @@ mod tests {
     /// line whose name is the query.
     #[test]
     fn a_name_matching_the_query_outranks_one_that_merely_contains_its_letters() {
-        let mut picker = Picker::new(vec![
-            "agent  w13Z:p1  claude  idle  6928C1-balmy_bluetooth-high-brightness-rgbw-floodlight"
-                .into(),
-            "space  w16K     walltest_old  unknown".into(),
-            "pane   w16K:p1  walltest  ryi@pandora:/tmp".into(),
+        let mut picker = plain(&[
+            "agent  w13Z:p1  claude  idle  6928C1-balmy_bluetooth-high-brightness-rgbw-floodlight",
+            "space  w16K     walltest_old  unknown",
+            "pane   w16K:p1  walltest  ryi@pandora:/tmp",
         ]);
         picker.push_text("walltest");
 
@@ -437,5 +468,60 @@ mod tests {
         let mut picker = picker();
         picker.push_text("CLAUDE");
         assert_eq!(picker.matches(), &[0]);
+    }
+
+    /// Typing reranks by how well each line matches, but among lines that
+    /// match equally well the one used most recently stays on top -- the list
+    /// arrives in that order and the ranking keeps it.
+    #[test]
+    fn equal_matches_keep_the_most_recently_used_first() {
+        use super::super::targets::{
+            order_by_recency, picker_rows, test_target, WallTarget, WallTargetKind,
+        };
+        let now = 1_750_000_000_000;
+        let agent = |target: &str, title: &str, used: u64| -> WallTarget {
+            let mut agent = test_target(WallTargetKind::Agent, target, target);
+            agent.title = title.into();
+            agent.status = "idle".into();
+            agent.last_used_ms = Some(used);
+            agent
+        };
+        let mut targets = vec![
+            agent("w1:p1", "fix parser", now - 3_600_000),
+            agent("w2:p1", "parser docs", now - 60_000),
+            agent("w3:p1", "parsers", now),
+            agent("w4:p1", "unrelated", now),
+        ];
+        order_by_recency(&mut targets);
+        let mut picker = Picker::new(picker_rows(&targets, now));
+        // In recency order before anything is typed.
+        assert_eq!(picker.selected(), Some(0));
+        assert_eq!(targets[0].target, "w3:p1");
+
+        picker.push_text("parser");
+
+        // "parser" is a whole word in w2 and w1 -- w2 newer -- and only a
+        // substring of "parsers", which is newest of all but ranks after them.
+        let picked: Vec<&str> = picker
+            .matches()
+            .iter()
+            .map(|index| targets[*index].target.as_str())
+            .collect();
+        assert_eq!(picked, vec!["w2:p1", "w1:p1", "w3:p1"]);
+    }
+
+    #[test]
+    fn a_pane_id_finds_its_line_though_the_line_does_not_show_it() {
+        use super::super::targets::{picker_rows, test_target, WallTargetKind};
+        let mut pane = test_target(WallTargetKind::Pane, "w16K:p1", "t1");
+        pane.title = "walltest".into();
+        let mut picker = Picker::new(picker_rows(
+            &[test_target(WallTargetKind::Pane, "w2:p1", "t2"), pane],
+            0,
+        ));
+
+        picker.push_text("w16k:p1");
+
+        assert_eq!(picker.matches(), &[1]);
     }
 }
