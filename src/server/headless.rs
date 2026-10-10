@@ -5017,7 +5017,7 @@ impl HeadlessServer {
             let Some(observed) = client.observed.get_mut(index) else {
                 break;
             };
-            let (seq, frame, modes_told, bracketed_paste) = match frame {
+            let (seq, frame, modes_told, bracketed_paste, modes) = match frame {
                 ObservedRender::Gone => {
                     ended.push(ServerMessage::ObservedTerminalEnded {
                         terminal_id: observed.terminal_id.clone(),
@@ -5043,7 +5043,7 @@ impl HeadlessServer {
                         now.saturating_duration_since(at) >= OBSERVED_MODES_REPEAT
                     });
                     let told = send_observed_modes(&writer, observed, modes, due);
-                    (seq, frame, told, bracketed_paste)
+                    (seq, frame, told, bracketed_paste, modes)
                 }
             };
             index += 1;
@@ -5074,6 +5074,14 @@ impl HeadlessServer {
                 };
                 terminal_frame.bytes.splice(0..0, set.iter().copied());
             }
+            // The key modes go at the front of every frame too, not only in the
+            // modes message. A watcher's copy encodes the keys typed at it from
+            // these, and a copy that missed or lost an update -- seen on a busy
+            // mirrored Claude whose copy sat at kitty flags 7 while the app was
+            // at 5, so every arrow went out in a form it ignores -- puts itself
+            // right with the next frame instead of never. A dozen bytes a frame.
+            let set = crate::remote::mirror_stream::input_mode_bytes(modes.0, modes.1);
+            terminal_frame.bytes.splice(0..0, set);
             // A full redraw is what a watcher's freshly built copy of the pane
             // starts from, and that copy starts in default modes too.
             if terminal_frame.full && !modes_told {
@@ -7865,10 +7873,72 @@ next_tab = ""
                 .collect();
             assert_eq!(frames.len(), 1);
             assert!(
-                frames[0].starts_with(b"\x1b[?2004h"),
+                frames[0].windows(8).any(|window| window == b"\x1b[?2004h"),
                 "frame starts {:?}",
                 String::from_utf8_lossy(&frames[0][..frames[0].len().min(20)])
             );
+
+            shutdown_test_runtimes(server);
+        });
+    }
+
+    /// Every frame starts by putting the watcher's copy in the terminal's key
+    /// modes, so a copy that drifted is put right by the next frame.
+    #[test]
+    fn every_observed_frame_carries_the_key_modes() {
+        with_terminal_session_test_server(|server, terminal_id, terminal_id_string, _| {
+            let (writer, _control_rx, render_rx) = test_client_writer_with_render_capacity(8);
+            assert!(server.handle_server_event(ServerEvent::ClientConnected {
+                client_id: 7,
+                cols: 100,
+                rows: 30,
+                cell_width_px: 0,
+                cell_height_px: 0,
+                render_encoding: RenderEncoding::TerminalAnsi,
+                keybindings: None,
+                direct_attach_requested: true,
+                direct_graphics: false,
+                writer,
+            }));
+            if let Some(runtime) = server.app.terminal_runtimes.get(&terminal_id) {
+                runtime.test_process_pty_bytes(b"\x1b[>5uready");
+            }
+            assert!(
+                server.handle_server_event(ServerEvent::ClientObserveTerminals {
+                    client_id: 7,
+                    targets: vec![crate::protocol::ObservedTarget {
+                        target: terminal_id_string.clone(),
+                        cols: 40,
+                        rows: 10,
+                        resize: false,
+                    }],
+                })
+            );
+            let frame_bytes = |render_rx: &std::sync::mpsc::Receiver<Vec<u8>>| {
+                std::iter::from_fn(|| render_rx.try_recv().ok())
+                    .filter_map(|bytes| match read_server_message(bytes) {
+                        ServerMessage::ObservedTerminal(observed) => Some(observed.frame.bytes),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            server.render_and_stream();
+            let first = frame_bytes(&render_rx);
+            if let Some(runtime) = server.app.terminal_runtimes.get(&terminal_id) {
+                runtime.test_process_pty_bytes(b" more");
+            }
+            server.render_and_stream();
+            let second = frame_bytes(&render_rx);
+
+            for frame in first.iter().chain(&second) {
+                assert!(
+                    frame.starts_with(b"\x1b[?1l\x1b[=5;1u"),
+                    "frame starts {:?}",
+                    String::from_utf8_lossy(&frame[..frame.len().min(24)])
+                );
+            }
+            assert_eq!((first.len(), second.len()), (1, 1));
 
             shutdown_test_runtimes(server);
         });
