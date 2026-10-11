@@ -211,6 +211,12 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    /// Whether this terminal is fed by another host rather than a process here.
+    #[cfg(test)]
+    pub fn is_streamed(&self) -> bool {
+        self.0.is_streamed()
+    }
+
     /// Where this terminal's screen has got to, for anyone rendering it.
     pub fn output_seq(&self) -> u64 {
         self.0.output_seq()

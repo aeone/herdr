@@ -977,7 +977,19 @@ impl App {
             }
             None => {
                 let mirror = remote_mirror_record(&space, &space_key, &created.pane.terminal_id);
-                match self.create_remote_mirror(mirror, &label, &tab) {
+                // The same kind of mirror reconcile would have built. This path
+                // always made the old attach-per-pane kind, which reconcile then
+                // found "already matching" and kept: a space made from here ran
+                // `herdr terminal attach` in a local pty for as long as it lived,
+                // and that client's own setup -- alternate screen, kitty flags
+                // 1+2+4 -- became the mode its keys were encoded in, so ctrl
+                // keys and arrows reached the agent in a form it ignores.
+                let created_mirror = if self.mirrors_are_multiplexed(&target) {
+                    self.create_streamed_mirror(mirror, &label, &tab)
+                } else {
+                    self.create_remote_mirror(mirror, &label, &tab)
+                };
+                match created_mirror {
                     Ok(ws_idx) => Some(ws_idx),
                     Err(err) => {
                         tracing::warn!(target = %target, %err, "mirroring a new remote space failed");
@@ -3031,6 +3043,19 @@ mod tests {
             app.state.workspaces.len(),
             2,
             "a different remote space is a different space here"
+        );
+        let created = app.state.workspaces.last().expect("the created space");
+        let terminal = created.tabs[0]
+            .terminal_id(created.tabs[0].root_pane)
+            .cloned()
+            .expect("the created space has its pane");
+        assert!(
+            app.terminal_runtimes
+                .get(&terminal)
+                .is_some_and(|runtime| runtime.is_streamed()),
+            "a space made from here is mirrored the way reconcile would have \
+             mirrored it: streamed, not by a `terminal attach` client in a \
+             local pty whose own kitty flags its keys would then be encoded in"
         );
     }
 
