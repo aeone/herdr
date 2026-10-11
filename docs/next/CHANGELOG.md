@@ -10,6 +10,7 @@
 - Pane info from the API now reports the terminal's current size as `size`, which can differ from its pane's layout while a client or mirror holds it.
 - Claude Code panes now report their session title as the agent's display name: the `/rename` name when one is set, otherwise the generated title. Herdr reads it from the session transcript, so it also reaches mirrored panes.
 - New `agent_title` and `agent_title_with_workspace` agent sidebar tokens show the agent's title, else its given name, else its tab, the second followed by its workspace in parentheses.
+- A `pane.agent_status_changed` subscription can now leave out `pane_id` to follow every pane's status changes from one subscription, without the 100ms polling a per-pane subscription does. `herdr agent feed` uses it, falling back to per-pane subscriptions against an older server. The server log warns when per-pane status subscriptions climb past each multiple of 32, since each one polls its pane's process tree.
 - New `agent.mark` API method sets or clears an agent's mark (level 0-3). Pane and agent info report it as `agent_mark` and workspace info reports a workspace's mark as `mark`; changing a mark, by API or by the mark key, emits `pane.updated` or `workspace.updated`.
 - New `agent.seen` API method and `herdr agent seen <target> [--unseen]` mark an agent seen, or an idle one unseen, without focusing it, so a client showing the agent elsewhere can clear or restore its `done`. A change emits `pane.agent_status_changed`, and on a mirror it is passed on to the host that runs the agent.
 

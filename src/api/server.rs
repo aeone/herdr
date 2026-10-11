@@ -66,6 +66,72 @@ impl Drop for ConnectionCensus {
     }
 }
 
+/// Live `pane.agent_status_changed` subscriptions that name a pane, between
+/// reports. Each one has its connection ask the app for `pane.get` every
+/// `CONNECTION_POLL_INTERVAL`, and `pane.get` walks the pane's process tree in
+/// /proc. A client following ~140 agents that way, one subscription per pane,
+/// cost a server a quarter of its main thread -- twice, from two different
+/// clients -- with nothing in the log to say who. The subscription without a
+/// pane follows every pane from the event hub and polls nothing.
+const POLLED_STATUS_CENSUS_STEP: usize = 32;
+
+static POLLED_STATUS_SUBSCRIPTIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts one connection's per-pane status subscriptions while it streams, and
+/// warns whenever the server-wide total climbs past another
+/// `POLLED_STATUS_CENSUS_STEP`. Counted across connections because a client
+/// may open one connection per pane.
+struct PolledStatusCensus(usize);
+
+impl PolledStatusCensus {
+    fn open(subscriptions: &[crate::api::schema::Subscription]) -> Self {
+        let added = polled_status_subscription_count(subscriptions);
+        if added > 0 {
+            let before = POLLED_STATUS_SUBSCRIPTIONS.fetch_add(added, Ordering::Relaxed);
+            let total = before + added;
+            if crosses_census_step(before, total, POLLED_STATUS_CENSUS_STEP) {
+                warn!(
+                    total,
+                    on_this_connection = added,
+                    "per-pane agent status subscriptions are polling pane.get every 100ms; \
+                     a client following many panes should subscribe to \
+                     pane.agent_status_changed without a pane_id"
+                );
+            }
+        }
+        Self(added)
+    }
+}
+
+impl Drop for PolledStatusCensus {
+    fn drop(&mut self) {
+        if self.0 > 0 {
+            POLLED_STATUS_SUBSCRIPTIONS.fetch_sub(self.0, Ordering::Relaxed);
+        }
+    }
+}
+
+fn polled_status_subscription_count(subscriptions: &[crate::api::schema::Subscription]) -> usize {
+    subscriptions
+        .iter()
+        .filter(|subscription| {
+            matches!(
+                subscription,
+                crate::api::schema::Subscription::PaneAgentStatusChanged {
+                    pane_id: Some(_),
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+/// Whether a count rising from `before` to `after` passed a multiple of `step`.
+fn crosses_census_step(before: usize, after: usize, step: usize) -> bool {
+    after / step > before / step
+}
+
 pub struct ServerHandle {
     _thread: std::thread::JoinHandle<()>,
     path: PathBuf,
@@ -747,6 +813,7 @@ fn stream_subscriptions(
     event_hub: &EventHub,
     running: &Arc<AtomicBool>,
 ) -> std::io::Result<()> {
+    let _polled_status_census = PolledStatusCensus::open(&params.subscriptions);
     let mut subscriptions = Vec::with_capacity(params.subscriptions.len());
     for (index, subscription) in params.subscriptions.into_iter().enumerate() {
         let active =
@@ -966,6 +1033,36 @@ mod tests {
     use std::os::unix::net::UnixListener;
     use std::sync::{Mutex, OnceLock};
     use tokio::sync::mpsc;
+
+    #[test]
+    fn only_status_subscriptions_naming_a_pane_count_as_polled() {
+        use crate::api::schema::Subscription;
+        let subscriptions = vec![
+            Subscription::PaneAgentStatusChanged {
+                pane_id: Some("w1:p1".into()),
+                agent_status: None,
+            },
+            Subscription::PaneAgentStatusChanged {
+                pane_id: Some("w1:p2".into()),
+                agent_status: None,
+            },
+            Subscription::PaneAgentStatusChanged {
+                pane_id: None,
+                agent_status: None,
+            },
+            Subscription::WorkspaceCreated {},
+        ];
+        assert_eq!(polled_status_subscription_count(&subscriptions), 2);
+    }
+
+    #[test]
+    fn census_reports_each_step_once_on_the_way_up() {
+        assert!(!crosses_census_step(0, 31, 32));
+        assert!(crosses_census_step(31, 32, 32));
+        assert!(crosses_census_step(0, 140, 32));
+        assert!(!crosses_census_step(32, 63, 32));
+        assert!(crosses_census_step(60, 70, 32));
+    }
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
