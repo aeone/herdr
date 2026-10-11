@@ -1,0 +1,10 @@
+#!/bin/bash
+# A working "claude": spinner in the OSC title and on screen, ~12 updates/s,
+# about what Claude's own spinner costs a server.
+s=("✳" "✢" "✶" "✻" "✽" "·"); i=0
+printf "\e[?1049h\e[2J"
+while :; do
+  c=${s[$((i % 6))]}
+  printf "\e]0;%s Working on things\a\e[H%s Thinking… (%ds · esc to interrupt)\e[K" "$c" "$c" $((i / 12))
+  i=$((i + 1)); sleep 0.08
+done

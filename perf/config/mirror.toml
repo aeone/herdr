@@ -1,0 +1,13 @@
+
+# Appended for the mirror scenarios: mirror every agent of the local "host"
+# session, the way lute mirrors a Mac.
+[remote]
+multiplexed_mirrors = true
+keep_offline_mirrors = true
+
+[[remote.spaces]]
+target = "local"
+session = "SESSION_HOST"
+label = "hst"
+poll_seconds = 30
+mirror_all = true

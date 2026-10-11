@@ -1,0 +1,20 @@
+# The bench server's config: lute's sidebar layout (agents sorted by status,
+# two rows per agent), since the sidebar is the most expensive part of a full
+# render. Keys an older or upstream build does not know are ignored.
+onboarding = false
+[ui]
+agent_panel_sort = "status"
+sidebar_section_split_auto = true
+[ui.sidebar.spaces]
+hide_when_in_agents = true
+row_gap = 0
+rows = [
+  ["state_icon", "number", "remote_host", "workspace"],
+  ["branch", "git_status"],
+]
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  ["state_icon", "number", "remote_host", "agent_title"],
+  ["state_text", "workspace"],
+]

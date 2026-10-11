@@ -1,0 +1,5 @@
+#!/bin/bash
+# An idle "claude": alternate screen, a prompt, then nothing. Named claude so
+# herdr detects it as an agent; a real Claude idles the same way.
+printf "\e[?1049h\e[2J> "
+while :; do read -r -t 3600 _ || true; done

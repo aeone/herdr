@@ -1,0 +1,19 @@
+# The bench config when an upstream build is in the run: the closest layout to
+# bench.toml that upstream also accepts (upstream has no "status" sort or the
+# fork's agent_title/remote_host tokens, and rejects the whole file over one
+# unknown value). Every build in such a run uses it, so they draw the same.
+onboarding = false
+[ui]
+agent_panel_sort = "priority"
+[ui.sidebar.spaces]
+row_gap = 0
+rows = [
+  ["state_icon", "workspace"],
+  ["branch", "git_status"],
+]
+[ui.sidebar.agents]
+row_gap = 0
+rows = [
+  ["state_icon", "agent", "terminal_title_stripped"],
+  ["state_text", "workspace"],
+]
