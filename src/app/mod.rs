@@ -1454,7 +1454,7 @@ impl App {
 
         // Save session on exit (skip in --no-session mode)
         if !self.no_session {
-            self.save_session_now();
+            self.save_session_for_shutdown();
         }
 
         Ok(())
@@ -5368,6 +5368,76 @@ pub(crate) mod tests {
         release_tx.send(()).unwrap();
         app.no_session = true;
         app.save_session_now();
+    }
+
+    #[test]
+    fn shutdown_save_keeps_sessions_of_agents_killed_just_before() {
+        let mut app = test_app();
+        app.no_session = false;
+        app.state.workspaces = vec![Workspace::test_new("killed")];
+        app.state.ensure_test_terminals();
+        let root = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let exited_at = Instant::now();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("claude-session").unwrap(),
+        });
+        terminal.set_detected_state(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+        );
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(crate::detect::Agent::Claude),
+            crate::detect::AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            exited_at,
+        );
+        let before_shutdown = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            app.state.sidebar_width,
+            app.state.sidebar_section_split,
+            app.state.collapsed_space_keys.clone(),
+            Default::default(),
+        );
+        assert!(before_shutdown.workspaces[0].tabs[0].panes[&root.raw()]
+            .agent_session
+            .is_none());
+
+        assert_eq!(
+            app.restore_agent_sessions_exited_before_shutdown(exited_at + Duration::from_secs(20)),
+            1
+        );
+
+        let at_shutdown = crate::persist::capture(
+            &app.state.workspaces,
+            &app.state.terminals,
+            &app.terminal_runtimes,
+            app.state.active,
+            app.state.selected,
+            app.state.sidebar_width,
+            app.state.sidebar_section_split,
+            app.state.collapsed_space_keys.clone(),
+            Default::default(),
+        );
+        assert_eq!(
+            at_shutdown.workspaces[0].tabs[0].panes[&root.raw()]
+                .agent_session
+                .as_ref()
+                .map(|session| session.value.as_str()),
+            Some("claude-session")
+        );
     }
 
     #[test]

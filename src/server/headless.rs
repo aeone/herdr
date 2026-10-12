@@ -1099,7 +1099,7 @@ impl HeadlessServer {
 
         // Save session on exit.
         if !self.app.no_session {
-            self.app.save_session_now();
+            self.app.save_session_for_shutdown();
         }
 
         info!("headless server exiting");

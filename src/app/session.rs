@@ -108,6 +108,35 @@ impl App {
         run_session_save_job(self.capture_session_save_job());
         self.session_save_deadline = None;
     }
+
+    /// The save the server makes on its way out.
+    ///
+    /// Unlike every other save it keeps the sessions of agents that exited
+    /// just before, because a host shutting down kills them before it gets to
+    /// the server; see `AGENT_EXIT_SHUTDOWN_GRACE`.
+    pub(crate) fn save_session_for_shutdown(&mut self) {
+        if !self.no_session {
+            self.restore_agent_sessions_exited_before_shutdown(Instant::now());
+        }
+        self.save_session_now();
+    }
+
+    pub(super) fn restore_agent_sessions_exited_before_shutdown(&mut self, now: Instant) -> usize {
+        let restored = self
+            .state
+            .terminals
+            .values_mut()
+            .map(|terminal| terminal.restore_agent_session_exited_before_shutdown(now))
+            .filter(|restored| *restored)
+            .count();
+        if restored > 0 {
+            tracing::info!(
+                restored,
+                "keeping agent sessions whose processes exited just before shutdown"
+            );
+        }
+        restored
+    }
 }
 
 fn run_session_save_job(job: SessionSaveJob) {

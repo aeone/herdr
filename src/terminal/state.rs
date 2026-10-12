@@ -112,6 +112,28 @@ struct RecentAgentProcessExit {
     observed_at: Instant,
 }
 
+/// How long before a server shutdown an agent's exit is treated as part of
+/// that shutdown rather than the user quitting the agent.
+///
+/// The pane only sees the agent's process leave the foreground: the agent is
+/// the shell's child, not ours, so there is no exit status or signal to tell
+/// `/exit` from being killed. What there is, is timing. A host shutting down
+/// signals every process at once and interactive shells ignore `SIGTERM`, so
+/// the agents die and their shells return to the prompt well before the
+/// server gets its own shutdown -- about 20s on macOS. A user quitting an
+/// agent and then stopping the server inside this window resumes that agent
+/// on the next start, which they can quit again; losing every session on a
+/// reboot is the worse failure.
+pub const AGENT_EXIT_SHUTDOWN_GRACE: Duration = Duration::from_secs(60);
+
+/// The resumable session an agent held when its process exited, kept so a
+/// shutdown shortly after can still save it. See [`AGENT_EXIT_SHUTDOWN_GRACE`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExitedAgentSession {
+    session: crate::agent_resume::PersistedAgentSession,
+    exited_at: Instant,
+}
+
 /// Pure state for a server-owned terminal.
 ///
 /// During the migration this is still one-to-one with a pane-backed PTY, but
@@ -164,6 +186,7 @@ pub struct TerminalState {
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
     recent_agent_process_exit: Option<RecentAgentProcessExit>,
+    exited_agent_session: Option<ExitedAgentSession>,
     agent_process_acquisition_pending: bool,
     pub pending_agent_resume_plan: Option<crate::agent_resume::AgentResumePlan>,
 }
@@ -202,6 +225,7 @@ impl TerminalState {
             launch_argv: None,
             respawn_shell_on_exit: false,
             recent_agent_process_exit: None,
+            exited_agent_session: None,
             agent_process_acquisition_pending: false,
             pending_agent_resume_plan: None,
         }
@@ -212,8 +236,10 @@ impl TerminalState {
         agent: Agent,
         now: Instant,
     ) -> TerminalStateMutation {
-        // A new process is not waiting on whatever the last one was.
+        // A new process is not waiting on whatever the last one was, and a
+        // shutdown now would be ending this one, not resuming the last.
         self.reported_attention = None;
+        self.exited_agent_session = None;
         let starts_acquisition = !self
             .should_ignore_detected_state_under_full_lifecycle_hook(Some(agent), false)
             && !self.detected_state_observed_before_release_suppression(Some(agent), now);
@@ -665,6 +691,9 @@ impl TerminalState {
             );
             self.hook_authority = None;
             self.persisted_agent_session = durable_session;
+        }
+        if process_exited {
+            self.remember_session_ended_by_process_exit(previous_session.as_ref(), now);
         }
         if agent_released {
             self.clear_agent_name();
@@ -1333,6 +1362,58 @@ impl TerminalState {
             })
     }
 
+    /// Keeps the session a process exit just cleared, for
+    /// [`Self::restore_agent_session_exited_before_shutdown`].
+    fn remember_session_ended_by_process_exit(
+        &mut self,
+        previous: Option<&(
+            String,
+            String,
+            crate::agent_resume::AgentSessionRefKind,
+            String,
+        )>,
+        now: Instant,
+    ) {
+        if self.current_session_identity_for_persistence().is_some() {
+            return;
+        }
+        let Some((source, agent, kind, value)) = previous else {
+            return;
+        };
+        self.exited_agent_session = Some(ExitedAgentSession {
+            session: crate::agent_resume::PersistedAgentSession {
+                source: source.clone(),
+                agent: agent.clone(),
+                session_ref: crate::agent_resume::AgentSessionRef {
+                    kind: *kind,
+                    value: value.clone(),
+                },
+            },
+            exited_at: now,
+        });
+    }
+
+    /// Puts back the session of an agent whose process exited within
+    /// [`AGENT_EXIT_SHUTDOWN_GRACE`] of `now`, for the save a shutdown makes.
+    /// Returns whether it did.
+    ///
+    /// Only for that save: everywhere else the exit stands, so the regular
+    /// saves record it and a restart long after the agent was quit does not
+    /// bring it back.
+    pub fn restore_agent_session_exited_before_shutdown(&mut self, now: Instant) -> bool {
+        if self.current_session_identity_for_persistence().is_some() {
+            return false;
+        }
+        let Some(exited) = self.exited_agent_session.take() else {
+            return false;
+        };
+        if now.saturating_duration_since(exited.exited_at) > AGENT_EXIT_SHUTDOWN_GRACE {
+            return false;
+        }
+        self.persisted_agent_session = Some(exited.session);
+        true
+    }
+
     fn current_session_identity_for_persistence(
         &self,
     ) -> Option<(
@@ -1879,6 +1960,7 @@ impl TerminalState {
         self.hook_authority = None;
         if !preserve_foreign_persisted_session {
             self.persisted_agent_session = None;
+            self.exited_agent_session = None;
         }
         let current_session = self.current_session_identity_for_persistence();
         Some(TerminalStateMutation {
@@ -2160,6 +2242,7 @@ impl TerminalState {
     }
 
     pub fn clear_agent_runtime_identity_after_respawn(&mut self) {
+        let previous_session = self.current_session_identity_for_persistence();
         self.detected_agent = None;
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
@@ -2178,6 +2261,9 @@ impl TerminalState {
         self.agent_process_acquisition_pending = false;
         self.pending_agent_resume_plan = None;
         self.clear_agent_name();
+        // The launch command was the agent, and it exiting is what brought the
+        // shell back; a shutdown right after should still resume it.
+        self.remember_session_ended_by_process_exit(previous_session.as_ref(), Instant::now());
     }
 
     pub fn is_agent_terminal(&self) -> bool {
@@ -5738,6 +5824,138 @@ mod tests {
             Some(21),
         );
         assert!(delayed.is_none());
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    fn claude_session_killed_at(terminal: &mut TerminalState, exited_at: Instant) {
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal
+            .set_agent_session_ref(
+                "herdr:claude".into(),
+                "claude".into(),
+                Some(crate::agent_resume::AgentSessionRef::id("claude-session").unwrap()),
+                Some(1),
+            )
+            .expect("claude reports its session");
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            exited_at,
+        );
+    }
+
+    #[test]
+    fn shutdown_shortly_after_agent_exit_keeps_its_session() {
+        // A host shutting down kills the agents first; the server's own
+        // shutdown arrives ~20s later and must still save their sessions.
+        let mut terminal = test_terminal();
+        let exited_at = Instant::now();
+        claude_session_killed_at(&mut terminal, exited_at);
+        assert!(terminal.persisted_agent_session.is_none());
+        assert!(terminal.hook_authority.is_none());
+
+        assert!(terminal
+            .restore_agent_session_exited_before_shutdown(exited_at + Duration::from_secs(20)));
+
+        assert_eq!(
+            terminal.persisted_agent_session.as_ref().map(|session| (
+                session.source.as_str(),
+                session.agent.as_str(),
+                session.session_ref.value.as_str()
+            )),
+            Some(("herdr:claude", "claude", "claude-session"))
+        );
+    }
+
+    #[test]
+    fn shutdown_long_after_agent_exit_does_not_revive_its_session() {
+        let mut terminal = test_terminal();
+        let exited_at = Instant::now();
+        claude_session_killed_at(&mut terminal, exited_at);
+
+        assert!(!terminal.restore_agent_session_exited_before_shutdown(
+            exited_at + AGENT_EXIT_SHUTDOWN_GRACE + Duration::from_secs(1)
+        ));
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn shutdown_after_new_agent_process_does_not_revive_exited_session() {
+        let mut terminal = test_terminal();
+        let exited_at = Instant::now();
+        claude_session_killed_at(&mut terminal, exited_at);
+        terminal.set_detected_agent_process_at(Agent::Codex, exited_at + Duration::from_secs(2));
+
+        assert!(!terminal
+            .restore_agent_session_exited_before_shutdown(exited_at + Duration::from_secs(5)));
+        assert!(terminal.persisted_agent_session.is_none());
+    }
+
+    #[test]
+    fn shutdown_after_restored_agent_exit_keeps_restored_session() {
+        // A pane restored from a snapshot holds its session as persisted state
+        // until the agent reports again; an exit then must be kept the same way.
+        let mut terminal = test_terminal();
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("restored").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let exited_at = Instant::now();
+        terminal.set_detected_state_with_screen_signals_at(
+            Some(Agent::Claude),
+            AgentState::Idle,
+            false,
+            false,
+            false,
+            true,
+            exited_at,
+        );
+        assert!(terminal.persisted_agent_session.is_none());
+
+        assert!(terminal.restore_agent_session_exited_before_shutdown(exited_at));
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("restored")
+        );
+    }
+
+    #[test]
+    fn shutdown_after_launch_command_agent_exit_keeps_its_session() {
+        let mut terminal = test_terminal();
+        terminal.respawn_shell_on_exit = true;
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("launched").unwrap(),
+        });
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        terminal.clear_agent_runtime_identity_after_respawn();
+        assert!(terminal.persisted_agent_session.is_none());
+
+        assert!(terminal.restore_agent_session_exited_before_shutdown(Instant::now()));
+        assert_eq!(
+            terminal
+                .persisted_agent_session
+                .as_ref()
+                .map(|session| session.session_ref.value.as_str()),
+            Some("launched")
+        );
+    }
+
+    #[test]
+    fn shutdown_without_agent_exit_leaves_session_alone() {
+        let mut terminal = test_terminal();
+        assert!(!terminal.restore_agent_session_exited_before_shutdown(Instant::now()));
         assert!(terminal.persisted_agent_session.is_none());
     }
 
