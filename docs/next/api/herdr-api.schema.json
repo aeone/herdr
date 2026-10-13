@@ -1582,6 +1582,22 @@
           ],
           "type": "object"
         },
+        "AgentSeenParams": {
+          "description": "Marks an agent seen (the default) or unseen, without focusing it. Seen is\nwhat turns `done` into `idle`; unseen turns an idle agent back to `done`.",
+          "properties": {
+            "seen": {
+              "default": true,
+              "type": "boolean"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -5295,6 +5311,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/AgentMarkParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.seen",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentSeenParams"
             }
           },
           "required": [

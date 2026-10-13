@@ -3,8 +3,8 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentMarkParams, AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams,
-    AgentTarget, PaneReadResult, ResponseResult,
+    AgentMarkParams, AgentPromptParams, AgentRenameParams, AgentSeenParams, AgentSendKeysParams,
+    AgentStartParams, AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -78,6 +78,36 @@ impl App {
             return agent_not_found(id, &params.target);
         };
         encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
+    /// Marks an agent seen or unseen where it is, without focusing it: a
+    /// client reading the agent somewhere else (a phone, say) can say so
+    /// without moving the focus in front of whoever sits at this herdr.
+    pub(super) fn handle_agent_seen(&mut self, id: String, params: AgentSeenParams) -> String {
+        let resolved = match self.resolve_agent_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        match self.set_agent_seen(resolved.ws_idx, resolved.pane_id, params.seen) {
+            Ok(()) => {}
+            Err(crate::app::agents::AgentSeenError::NotIdle) => {
+                return encode_error(
+                    id,
+                    "agent_not_idle",
+                    format!(
+                        "agent {} is not idle; only an idle agent can be marked unseen",
+                        params.target
+                    ),
+                )
+            }
+            Err(crate::app::agents::AgentSeenError::NotFound) => {
+                return agent_not_found(id, &params.target)
+            }
+        }
+        match self.agent_info(resolved.ws_idx, resolved.pane_id) {
+            Some(agent) => encode_success(id, ResponseResult::AgentInfo { agent }),
+            None => agent_not_found(id, &params.target),
+        }
     }
 
     pub(super) fn handle_agent_start(&mut self, id: String, params: AgentStartParams) -> String {
@@ -628,6 +658,119 @@ mod tests {
             panic!("expected agent info response");
         };
         assert_eq!(agent.agent_status, AgentStatus::Idle);
+    }
+
+    /// The agent sits in a workspace nobody is looking at, `done`.
+    fn app_with_done_agent_in_the_background() -> (App, crate::layout::PaneId, String) {
+        let mut app = app_with_agent();
+        app.state.workspaces.push(Workspace::test_new("front"));
+        app.state.ensure_test_terminals();
+        app.state.active = Some(1);
+        app.state.selected = 1;
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Idle);
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = false;
+        let target = app.public_pane_id(0, pane_id).unwrap();
+        (app, pane_id, target)
+    }
+
+    fn seen_response(app: &mut App, target: &str, seen: bool) -> String {
+        app.handle_agent_seen(
+            "req".into(),
+            AgentSeenParams {
+                target: target.to_string(),
+                seen,
+            },
+        )
+    }
+
+    fn agent_from(response: &str) -> crate::api::schema::AgentInfo {
+        let success: SuccessResponse = serde_json::from_str(response).unwrap();
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info response, got {response}");
+        };
+        agent
+    }
+
+    fn status_changes(app: &App) -> Vec<AgentStatus> {
+        app.event_hub
+            .events_after(0)
+            .into_iter()
+            .filter_map(|(_, event)| match event.data {
+                crate::api::schema::EventData::PaneAgentStatusChanged { agent_status, .. } => {
+                    Some(agent_status)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn agent_seen_marks_a_done_agent_idle_without_moving_focus() {
+        let (mut app, pane_id, target) = app_with_done_agent_in_the_background();
+
+        let agent = agent_from(&seen_response(&mut app, &target, true));
+
+        assert_eq!(agent.agent_status, AgentStatus::Idle);
+        assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        assert_eq!(app.state.active, Some(1), "focus stays where it was");
+        assert_eq!(app.state.selected, 1);
+        assert_eq!(status_changes(&app), vec![AgentStatus::Idle]);
+
+        // Already seen: nothing changes, so nothing is announced.
+        seen_response(&mut app, &target, true);
+        assert_eq!(status_changes(&app), vec![AgentStatus::Idle]);
+    }
+
+    #[test]
+    fn agent_seen_false_marks_an_idle_agent_done_again() {
+        let (mut app, _pane_id, target) = app_with_done_agent_in_the_background();
+        seen_response(&mut app, &target, true);
+
+        let agent = agent_from(&seen_response(&mut app, &target, false));
+
+        assert_eq!(agent.agent_status, AgentStatus::Done);
+        assert_eq!(app.state.active, Some(1));
+        assert_eq!(
+            status_changes(&app),
+            vec![AgentStatus::Idle, AgentStatus::Done]
+        );
+    }
+
+    #[test]
+    fn agent_seen_false_refuses_an_agent_that_is_not_idle() {
+        let (mut app, pane_id, target) = app_with_done_agent_in_the_background();
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Pi), AgentState::Working);
+        app.state.workspaces[0].tabs[0]
+            .panes
+            .get_mut(&pane_id)
+            .unwrap()
+            .seen = true;
+
+        let response = seen_response(&mut app, &target, false);
+
+        let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "agent_not_idle");
+        assert!(app.state.workspaces[0].tabs[0].panes[&pane_id].seen);
+        assert!(status_changes(&app).is_empty());
     }
 
     #[test]

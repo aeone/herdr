@@ -926,6 +926,40 @@ pub(crate) fn rename_remote_pane(
     Ok(())
 }
 
+/// Marks the agent in a remote pane seen or unseen on the host that runs it,
+/// without focusing it there.
+pub(crate) fn mark_remote_agent_seen(
+    space: &RemoteSpaceConfig,
+    manage_ssh_config: bool,
+    pane_id: &str,
+    seen: bool,
+) -> io::Result<()> {
+    let script = agent_seen_script(space.session.as_deref(), space.is_local(), pane_id, seen);
+    let output = if space.is_local() {
+        local_sh_output(&script)?
+    } else {
+        RemoteSsh::new(space.target.clone(), manage_ssh_config).sh_output(&script)?
+    };
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "marking an agent seen on {} failed: {}",
+            space.target,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn agent_seen_script(session: Option<&str>, local: bool, pane_id: &str, seen: bool) -> String {
+    let mut script = script_prologue(session, local);
+    let unseen = if seen { "" } else { " --unseen" };
+    script.push_str(&format!(
+        "\"$herdr_bin\" agent seen {}{unseen} >/dev/null\n",
+        shell_quote(pane_id)
+    ));
+    script
+}
+
 /// Names the agent in a remote pane, or the pane itself when no agent runs there.
 ///
 /// `agent rename` and `pane rename` write different fields, and only the first
@@ -1983,6 +2017,17 @@ mod tests {
             script.contains("agent rename 'w8:p1' '--clear'"),
             "{script}"
         );
+    }
+
+    /// Reading a mirror marks the agent seen on its host, and marking it
+    /// unread there asks for `--unseen`, both through the host's own CLI.
+    #[test]
+    fn marking_a_mirrored_agent_seen_asks_its_host() {
+        let seen = super::agent_seen_script(None, false, "w8:p1", true);
+        assert!(seen.contains("agent seen 'w8:p1' >/dev/null"), "{seen}");
+
+        let unseen = super::agent_seen_script(None, false, "w8:p1", false);
+        assert!(unseen.contains("agent seen 'w8:p1' --unseen"), "{unseen}");
     }
 
     #[test]

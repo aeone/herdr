@@ -217,6 +217,31 @@ fn agent_mark_request_takes_a_level_or_null() {
     assert_eq!(json["params"]["level"], 3);
 }
 
+#[test]
+fn agent_seen_request_is_seen_unless_it_says_otherwise() {
+    for (params, seen) in [
+        (serde_json::json!({ "target": "w1:p1" }), true),
+        (
+            serde_json::json!({ "target": "w1:p1", "seen": false }),
+            false,
+        ),
+    ] {
+        let request: Request = serde_json::from_value(serde_json::json!({
+            "id": "req_seen",
+            "method": "agent.seen",
+            "params": params,
+        }))
+        .unwrap();
+        assert_eq!(
+            request.method,
+            Method::AgentSeen(AgentSeenParams {
+                target: "w1:p1".into(),
+                seen,
+            })
+        );
+    }
+}
+
 fn request_with_mark() -> Request {
     Request {
         id: "req".into(),

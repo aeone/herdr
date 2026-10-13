@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
+    AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams, AgentSeenParams,
     AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, Method,
     PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
 };
@@ -23,6 +23,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "prompt" => agent_prompt(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
+        "seen" => agent_seen(&args[1..]),
         "wait" => agent_wait(&args[1..]),
         "attach" => agent_attach(&args[1..]),
         "start" => agent_start(&args[1..]),
@@ -494,6 +495,25 @@ fn agent_focus(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn agent_seen(args: &[String]) -> std::io::Result<i32> {
+    let (target, seen) = match args {
+        [target] => (target, true),
+        [target, flag] if flag == "--unseen" => (target, false),
+        _ => {
+            eprintln!("usage: herdr agent seen <target> [--unseen]");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:seen".into(),
+        method: Method::AgentSeen(AgentSeenParams {
+            target: target.clone(),
+            seen,
+        }),
+    })?)
+}
+
 fn agent_attach(args: &[String]) -> std::io::Result<i32> {
     let (target, takeover) =
         match super::parse_attach_target(args, "usage: herdr agent attach <target> [--takeover]") {
@@ -939,6 +959,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
+    eprintln!("  herdr agent seen <target> [--unseen]");
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent attach <target> [--takeover]");
     eprintln!(

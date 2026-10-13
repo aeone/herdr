@@ -117,6 +117,8 @@ pub enum Method {
     AgentRename(AgentRenameParams),
     #[serde(rename = "agent.mark")]
     AgentMark(AgentMarkParams),
+    #[serde(rename = "agent.seen")]
+    AgentSeen(AgentSeenParams),
     #[serde(rename = "agent.view.set")]
     AgentViewSet(AgentViewSetParams),
     #[serde(rename = "agent.view.clear")]

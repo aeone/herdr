@@ -56,6 +56,19 @@ pub struct AgentMarkParams {
     pub level: Option<u8>,
 }
 
+/// Marks an agent seen (the default) or unseen, without focusing it. Seen is
+/// what turns `done` into `idle`; unseen turns an idle agent back to `done`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentSeenParams {
+    pub target: String,
+    #[serde(default = "default_seen")]
+    pub seen: bool,
+}
+
+fn default_seen() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentViewSetParams {
     pub source: String,

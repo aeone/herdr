@@ -863,6 +863,36 @@ impl App {
         true
     }
 
+    /// Marks a mirrored agent seen or unseen on the host that runs it.
+    ///
+    /// The host is the one that says `done`: marked only here, a mirror read
+    /// here would be called `done` again by the host's next answer that has
+    /// moved on, and every other machine mirroring it would still say so. A
+    /// host whose herdr predates `agent seen` refuses, which leaves it as it
+    /// was and is only worth a debug line.
+    pub(crate) fn request_remote_agent_seen(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        seen: bool,
+    ) -> bool {
+        let Some((space, remote_pane)) = self.mirror_rename_target(ws_idx, pane_id) else {
+            return false;
+        };
+        let manage_ssh_config = self.manage_ssh_config;
+        std::thread::spawn(move || {
+            if let Err(err) = crate::remote::spaces::mark_remote_agent_seen(
+                &space,
+                manage_ssh_config,
+                &remote_pane,
+                seen,
+            ) {
+                tracing::debug!(target = %space.target, %err, "could not mark a mirrored agent seen");
+            }
+        });
+        true
+    }
+
     pub(crate) fn handle_remote_space_renamed(
         &mut self,
         target: String,

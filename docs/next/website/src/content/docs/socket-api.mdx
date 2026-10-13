@@ -106,7 +106,7 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.mark`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.mark`, `agent.seen`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -886,6 +886,13 @@ Successful responses look like this:
 ```
 
 Pane and agent info report the mark as `agent_mark`, and workspace info reports the workspace's own mark as `mark`. Both are absent when unmarked. A mirrored pane's mark is kept under the remote pane it stands for, so it survives the mirror being rebuilt.
+
+`agent.seen` marks an agent seen without focusing it, so a client reading the agent elsewhere can turn `done` into `idle` without moving the focus of anyone at the Herdr UI. `"seen": false` marks an idle agent unseen so it reads `done` again; an agent that is working or blocked fails with `agent_not_idle` and is left as it was. `seen` defaults to `true`. A change emits `pane.agent_status_changed`; on a mirrored agent the mark is also sent to the host that runs it, and a host too old to know `agent.seen` keeps its own. The response is the updated `agent_info`:
+
+```json
+{ "id": "req_seen", "method": "agent.seen", "params": { "target": "w1:p1" } }
+{ "id": "req_unseen", "method": "agent.seen", "params": { "target": "w1:p1", "seen": false } }
+```
 
 `server.agent_manifests` returns the active agent detection manifest sources and remote update diagnostics without reloading rules:
 

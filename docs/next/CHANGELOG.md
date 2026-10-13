@@ -11,6 +11,7 @@
 - Claude Code panes now report their session title as the agent's display name: the `/rename` name when one is set, otherwise the generated title. Herdr reads it from the session transcript, so it also reaches mirrored panes.
 - New `agent_title` and `agent_title_with_workspace` agent sidebar tokens show the agent's title, else its given name, else its tab, the second followed by its workspace in parentheses.
 - New `agent.mark` API method sets or clears an agent's mark (level 0-3). Pane and agent info report it as `agent_mark` and workspace info reports a workspace's mark as `mark`; changing a mark, by API or by the mark key, emits `pane.updated` or `workspace.updated`.
+- New `agent.seen` API method and `herdr agent seen <target> [--unseen]` mark an agent seen, or an idle one unseen, without focusing it, so a client showing the agent elsewhere can clear or restore its `done`. A change emits `pane.agent_status_changed`, and on a mirror it is passed on to the host that runs the agent.
 
 ### Fixed
 - Retained mouse selections now copy when Ctrl+C or Cmd+C arrives before a delayed mouse release instead of forwarding the copy shortcut to the pane. (#3100, thanks @moret)

@@ -100,6 +100,77 @@ impl App {
             })
     }
 
+    /// Marks the agent in one pane seen or unseen, and nothing else: unlike
+    /// focusing it, this leaves every client's focus where it was.
+    ///
+    /// Unseen only means something for an idle agent, where it is what tells
+    /// `done` from `idle`; a working or blocked one is refused rather than
+    /// quietly given a flag its next turn would overwrite anyway.
+    ///
+    /// A mirror is marked here and on the host that runs it, so the host stops
+    /// (or starts) reporting it `done` too: otherwise the next poll would put
+    /// the host's answer back.
+    pub(crate) fn set_agent_seen(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        seen: bool,
+    ) -> Result<(), AgentSeenError> {
+        let workspace = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .ok_or(AgentSeenError::NotFound)?;
+        let previous_seen = workspace
+            .pane_state(pane_id)
+            .ok_or(AgentSeenError::NotFound)?
+            .seen;
+        let terminal = workspace
+            .terminal_id(pane_id)
+            .and_then(|terminal_id| self.state.terminals.get(terminal_id))
+            .ok_or(AgentSeenError::NotFound)?;
+        if !seen && terminal.state != crate::detect::AgentState::Idle {
+            return Err(AgentSeenError::NotIdle);
+        }
+        let update = crate::app::actions::PaneStateUpdate {
+            pane_id,
+            ws_idx,
+            previous_agent_label: terminal.effective_agent_label().map(str::to_string),
+            previous_known_agent: terminal.effective_known_agent(),
+            previous_state: terminal.state,
+            previous_seen,
+            previous_presentation: terminal.effective_presentation(),
+            agent_label: terminal.effective_agent_label().map(str::to_string),
+            known_agent: terminal.effective_known_agent(),
+            state: terminal.state,
+            seen,
+            presentation: terminal.effective_presentation(),
+            agent_name_changed: false,
+            agent_released: false,
+            agent_release_status: None,
+            suppress_completion: true,
+        };
+
+        // Sent even when this side already agrees: a mirror read in this TUI
+        // is seen here but still `done` on its host.
+        #[cfg(unix)]
+        self.request_remote_agent_seen(ws_idx, pane_id, seen);
+
+        if previous_seen == seen {
+            return Ok(());
+        }
+        if let Some(pane) = self
+            .state
+            .workspaces
+            .get_mut(ws_idx)
+            .and_then(|workspace| workspace.pane_state_mut(pane_id))
+        {
+            pane.seen = seen;
+        }
+        self.emit_pane_state_update(&update);
+        Ok(())
+    }
+
     /// Applies a name typed at the rename-agent prompt, wherever it belongs.
     ///
     /// A mirrored agent is named on the machine that runs it, and the name
@@ -638,6 +709,12 @@ pub(super) enum AgentRenameError {
         name: String,
         candidates: Vec<crate::api::schema::AgentInfo>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentSeenError {
+    NotFound,
+    NotIdle,
 }
 
 #[cfg(test)]

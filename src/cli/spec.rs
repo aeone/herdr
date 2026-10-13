@@ -382,6 +382,13 @@ fn agent_command() -> Command {
         )
         .subcommand(id_command("focus", "target", "Focus an agent"))
         .subcommand(
+            Command::new("seen")
+                .about("Mark an agent seen, or unseen, without focusing it")
+                .override_usage("herdr agent seen <TARGET> [--unseen]")
+                .arg(required("target", "TARGET"))
+                .arg(flag("unseen").help("Mark an idle agent unseen, so it reads done again")),
+        )
+        .subcommand(
             Command::new("wait")
                 .about("Wait until an agent reaches one of the requested states")
                 .override_usage("herdr agent wait <TARGET> [OPTIONS]")
