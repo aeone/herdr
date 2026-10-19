@@ -817,6 +817,19 @@ const SERVER_CGROUP_NAME: &str = "server";
 const PANE_CGROUP_PREFIX: &str = "pane-";
 /// How long a new pane cgroup is kept while empty, waiting for its child.
 const PANE_CGROUP_JOIN_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+/// `HERDR_PANE_PIDS_MAX` sets each pane's task cap; `max` lifts it.
+const PANE_PIDS_MAX_ENV_VAR: &str = "HERDR_PANE_PIDS_MAX";
+/// Each pane's task cap. Without one, a pane's runaway shares the server's
+/// whole budget: on 2026-10-19 a merge-queue test that never drained took the
+/// server's unit to its 70779-task cap, and the server, unable to start a
+/// thread, lost its API listener. Busy agent panes stay in the hundreds.
+const PANE_PIDS_MAX_DEFAULT: &str = "8192";
+
+fn pane_pids_max(env: Option<String>) -> String {
+    env.map(|value| value.trim().to_string())
+        .filter(|value| value == "max" || value.parse::<u32>().is_ok_and(|n| n > 0))
+        .unwrap_or_else(|| PANE_PIDS_MAX_DEFAULT.to_string())
+}
 
 static PANE_CGROUPS: OnceLock<Option<PaneCgroups>> = OnceLock::new();
 
@@ -872,6 +885,11 @@ impl PaneCgroups {
             .root
             .join(format!("{PANE_CGROUP_PREFIX}{}-{n}", std::process::id()));
         std::fs::create_dir(&dir)?;
+        // Best effort: a pane without its cap still runs, as before.
+        let limit = pane_pids_max(std::env::var(PANE_PIDS_MAX_ENV_VAR).ok());
+        if let Err(err) = std::fs::write(dir.join("pids.max"), &limit) {
+            tracing::warn!(dir = %dir.display(), err = %err, "could not cap the pane's tasks");
+        }
         Ok(dir)
     }
 
@@ -1140,6 +1158,16 @@ impl ProcessHandle {
 mod adoption_tests {
     use super::*;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    #[test]
+    fn a_pane_task_cap_is_a_positive_count_or_max_and_otherwise_the_default() {
+        assert_eq!(pane_pids_max(None), PANE_PIDS_MAX_DEFAULT);
+        assert_eq!(pane_pids_max(Some(" 4096 ".into())), "4096");
+        assert_eq!(pane_pids_max(Some("max".into())), "max");
+        for bad in ["0", "-5", "lots", ""] {
+            assert_eq!(pane_pids_max(Some(bad.into())), PANE_PIDS_MAX_DEFAULT);
+        }
+    }
 
     #[test]
     fn pane_cgroups_go_beside_a_delegated_server_subgroup_only() {
