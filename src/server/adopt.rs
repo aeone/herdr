@@ -164,6 +164,10 @@ pub(crate) fn take_panes(pid: u32) -> io::Result<TakenPanes> {
             }
         })
         .collect();
+    let aliases = std::env::var(PANE_ALIASES_ENV_VAR)
+        .map(|value| parse_pane_aliases(&value))
+        .unwrap_or_default();
+    let terminals = apply_pane_aliases(terminals, &aliases);
 
     let plan = plan(&snapshot, terminals);
     if !plan.unaccounted.is_empty() {
@@ -183,7 +187,9 @@ pub(crate) fn take_panes(pid: u32) -> io::Result<TakenPanes> {
         return Err(io::Error::other(format!(
             "{} terminal(s) in server {pid} match no pane in the saved session: {listed}. \
              Nothing was taken and the server was resumed. A pane opened in the last few \
-             seconds is not saved yet; try again shortly.",
+             seconds is not saved yet; try again shortly. A pane moved to another workspace \
+             keeps the id it started with; name its saved id with \
+             {PANE_ALIASES_ENV_VAR}=<started id>=<saved id>[,...].",
             plan.unaccounted.len()
         )));
     }
@@ -214,6 +220,44 @@ pub(crate) fn take_panes(pid: u32) -> io::Result<TakenPanes> {
         imports,
         old_server,
     })
+}
+
+/// `<started id>=<saved id>` pairs, comma-separated, for panes whose shell was
+/// started under one public id and saved under another -- a pane moved to
+/// another workspace keeps the `HERDR_PANE_ID` it was started with.
+const PANE_ALIASES_ENV_VAR: &str = "HERDR_ADOPT_ALIASES";
+
+fn parse_pane_aliases(value: &str) -> HashMap<String, String> {
+    value
+        .split(',')
+        .filter_map(|pair| {
+            let (started, saved) = pair.split_once('=')?;
+            let (started, saved) = (started.trim(), saved.trim());
+            (!started.is_empty() && !saved.is_empty())
+                .then(|| (started.to_string(), saved.to_string()))
+        })
+        .collect()
+}
+
+fn apply_pane_aliases(
+    terminals: Vec<HeldTerminal>,
+    aliases: &HashMap<String, String>,
+) -> Vec<HeldTerminal> {
+    terminals
+        .into_iter()
+        .map(|mut terminal| {
+            if let Some(saved) = terminal.pane_id.as_ref().and_then(|id| aliases.get(id)) {
+                info!(
+                    started = terminal.pane_id.as_deref().unwrap_or_default(),
+                    saved = %saved,
+                    tty_index = terminal.tty_index,
+                    "matching moved pane by alias"
+                );
+                terminal.pane_id = Some(saved.clone());
+            }
+            terminal
+        })
+        .collect()
 }
 
 pub(crate) fn plan(snapshot: &SessionSnapshot, terminals: Vec<HeldTerminal>) -> AdoptionPlan {
@@ -435,6 +479,28 @@ mod tests {
             .iter()
             .map(|(public_id, raw)| (public_id.to_string(), *raw))
             .collect()
+    }
+
+    #[test]
+    fn a_moved_pane_is_matched_by_the_alias_for_the_id_it_started_with() {
+        let aliases = parse_pane_aliases(" wR7E:p1=wQ7G:p3 ,bad, =x,w1:p2=w9:p4");
+        assert_eq!(aliases.len(), 2);
+        let terminals = apply_pane_aliases(
+            vec![
+                held(40, 99, Some(2773869), Some("wR7E:p1")),
+                held(41, 80, Some(1034547), Some("wQ7G:p5")),
+            ],
+            &aliases,
+        );
+        let plan = plan_with_index(&index(&[("wQ7G:p3", 96), ("wQ7G:p5", 97)]), terminals);
+        assert!(plan.unaccounted.is_empty());
+        assert_eq!(
+            plan.adopted
+                .iter()
+                .map(|a| a.raw_pane_id)
+                .collect::<Vec<_>>(),
+            vec![96, 97]
+        );
     }
 
     #[test]
