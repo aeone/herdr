@@ -6174,6 +6174,15 @@ fn print_ready_message(api_socket: &Path, client_socket: &Path) {
 /// Initialize logging for the server process.
 fn init_logging() {
     crate::logging::init_file_logging("herdr-server.log");
+    // A detached server's stderr is /dev/null, so the default hook's message
+    // goes nowhere. A thread that panicked -- the API listener, once -- left
+    // the server running with that part of it gone and nothing in the log.
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let thread = std::thread::current();
+        tracing::error!(thread = thread.name().unwrap_or("unnamed"), "PANIC: {info}");
+        original_hook(info);
+    }));
 }
 
 // ---------------------------------------------------------------------------

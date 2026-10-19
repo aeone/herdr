@@ -139,7 +139,11 @@ fn start_server_inner(
                     let capabilities = capabilities.clone();
                     let server_stop = server_stop.clone();
                     let connection_running = Arc::clone(&listener_running);
-                    std::thread::spawn(move || {
+                    // `thread::spawn` panics when no thread can be had, which
+                    // took this listener down with it at the cgroup's task cap.
+                    // Refuse the one connection instead (dropping the closure
+                    // closes it) and keep listening.
+                    let spawned = std::thread::Builder::new().spawn(move || {
                         let _census = ConnectionCensus::open();
                         if let Err(err) = handle_connection_with_stop(
                             stream,
@@ -152,6 +156,10 @@ fn start_server_inner(
                             warn!(err = %err, "api connection failed");
                         }
                     });
+                    if let Err(err) = spawned {
+                        error!(err = %err, "api connection refused: cannot start a thread for it");
+                        std::thread::sleep(ACCEPT_RETRY_INTERVAL);
+                    }
                 }
                 Err(err) => {
                     // Running out of descriptors, or hitting the per-process
