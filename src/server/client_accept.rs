@@ -31,7 +31,10 @@ pub(crate) fn accept_pending_client_connections(
 
                 let should_quit = should_quit.clone();
                 let server_event_tx = server_event_tx.clone();
-                std::thread::spawn(move || {
+                // As in the api listener: `thread::spawn` panics when no
+                // thread can be had (the cgroup's task cap). Refuse this one
+                // client (dropping the closure closes it) and keep accepting.
+                let spawned = std::thread::Builder::new().spawn(move || {
                     if let Err(err) = client_transport::handle_client_handshake(
                         stream,
                         client_id,
@@ -41,6 +44,10 @@ pub(crate) fn accept_pending_client_connections(
                         debug!(client_id, err = %err, "client handshake failed");
                     }
                 });
+                if let Err(err) = spawned {
+                    error!(client_id, err = %err, "client refused: cannot start a thread for it");
+                    break;
+                }
             }
             Err(ref err) if err.kind() == io::ErrorKind::WouldBlock => break,
             Err(err) => {
