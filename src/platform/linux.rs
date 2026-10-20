@@ -831,6 +831,25 @@ fn pane_pids_max(env: Option<String>) -> String {
         .unwrap_or_else(|| PANE_PIDS_MAX_DEFAULT.to_string())
 }
 
+/// The subgroup every pane cgroup goes in, beside the server's.
+const PANES_CGROUP_NAME: &str = "panes";
+/// `HERDR_SERVER_PIDS_RESERVE` sets how many of the unit's tasks no pane can
+/// take. A per-pane cap bounds one runaway, but several together could still
+/// fill the unit and leave the server unable to start a thread (2026-10-19).
+const SERVER_PIDS_RESERVE_ENV_VAR: &str = "HERDR_SERVER_PIDS_RESERVE";
+const SERVER_PIDS_RESERVE_DEFAULT: u64 = 8192;
+
+/// The panes subgroup's task cap: the unit's own cap less the server's
+/// reserve, or `None` when the unit is uncapped. Never below a quarter of the
+/// unit's cap, so a reserve set too large cannot starve every pane.
+fn panes_pids_max(unit_pids_max: &str, reserve_env: Option<String>) -> Option<u64> {
+    let unit: u64 = unit_pids_max.trim().parse().ok()?;
+    let reserve = reserve_env
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(SERVER_PIDS_RESERVE_DEFAULT);
+    Some(unit.saturating_sub(reserve).max(unit / 4))
+}
+
 static PANE_CGROUPS: OnceLock<Option<PaneCgroups>> = OnceLock::new();
 
 /// A cgroup of its own for each pane, beside the server's.
@@ -846,7 +865,11 @@ static PANE_CGROUPS: OnceLock<Option<PaneCgroups>> = OnceLock::new();
 /// `<unit>/server`, owned by the service user, and panes go beside it as
 /// `<unit>/pane-<server pid>-<n>`.
 struct PaneCgroups {
+    /// Where new pane cgroups go: `<unit>/panes`, or `<unit>` when the
+    /// subgroup could not be made.
     root: PathBuf,
+    /// The delegated unit's cgroup, the server's parent.
+    unit: PathBuf,
     next: std::sync::atomic::AtomicU64,
 }
 
@@ -869,13 +892,49 @@ impl PaneCgroups {
             );
             return None;
         }
+        // Panes go one level down, in a subgroup capped below the unit, so
+        // the server keeps a reserve of tasks whatever the panes do. Without
+        // it, they go beside the server as before.
+        let unit = root;
+        let panes = unit.join(PANES_CGROUP_NAME);
+        let root = match Self::prepare_panes_subgroup(&unit, &panes) {
+            Ok(()) => panes,
+            Err(err) => {
+                tracing::warn!(
+                    dir = %panes.display(),
+                    err = %err,
+                    "no panes subgroup; panes go beside the server without a reserve"
+                );
+                unit.clone()
+            }
+        };
         let cgroups = Self {
             root,
+            unit,
             next: std::sync::atomic::AtomicU64::new(1),
         };
         cgroups.remove_empty();
         tracing::info!(root = %cgroups.root.display(), "each pane gets its own cgroup");
         Some(cgroups)
+    }
+
+    fn prepare_panes_subgroup(
+        unit: &std::path::Path,
+        panes: &std::path::Path,
+    ) -> std::io::Result<()> {
+        match std::fs::create_dir(panes) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err),
+        }
+        std::fs::write(panes.join("cgroup.subtree_control"), "+memory +pids")?;
+        let unit_max = std::fs::read_to_string(unit.join("pids.max"))?;
+        let reserve = std::env::var(SERVER_PIDS_RESERVE_ENV_VAR).ok();
+        if let Some(limit) = panes_pids_max(&unit_max, reserve) {
+            std::fs::write(panes.join("pids.max"), limit.to_string())?;
+            tracing::info!(limit, unit_max = %unit_max.trim(), "panes capped below the unit");
+        }
+        Ok(())
     }
 
     fn create(&self) -> std::io::Result<PathBuf> {
@@ -898,9 +957,15 @@ impl PaneCgroups {
     /// Recently created ones are left alone: their child may not have joined
     /// yet.
     fn remove_empty(&self) {
-        let Ok(entries) = std::fs::read_dir(&self.root) else {
-            return;
-        };
+        // Pane cgroups from before the panes subgroup sit beside the server.
+        let mut dirs = vec![&self.root];
+        if self.unit != self.root {
+            dirs.push(&self.unit);
+        }
+        let entries = dirs
+            .into_iter()
+            .filter_map(|dir| std::fs::read_dir(dir).ok())
+            .flatten();
         for entry in entries.flatten() {
             let is_pane = entry
                 .file_name()
@@ -1194,6 +1259,19 @@ mod adoption_tests {
         // Never the root of the hierarchy.
         assert_eq!(delegated_pane_cgroup_root("0::/server\n"), None);
         assert_eq!(delegated_pane_cgroup_root("0::/\n"), None);
+    }
+
+    #[test]
+    fn panes_are_capped_below_the_unit_by_the_server_reserve() {
+        assert_eq!(panes_pids_max("70779\n", None), Some(70779 - 8192));
+        assert_eq!(panes_pids_max("70779", Some(" 1000 ".into())), Some(69779));
+        assert_eq!(
+            panes_pids_max("70779", Some("lots".into())),
+            Some(70779 - 8192)
+        );
+        // A reserve near or above the cap still leaves the panes a quarter.
+        assert_eq!(panes_pids_max("10000", Some("9999".into())), Some(2500));
+        assert_eq!(panes_pids_max("max\n", None), None);
     }
 
     #[test]
