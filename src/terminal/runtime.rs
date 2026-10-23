@@ -417,6 +417,10 @@ impl TerminalRuntime {
         self.0.detection_text()
     }
 
+    pub fn claude_input_line(&self) -> Option<crate::detect::input_line::InputLine> {
+        self.0.claude_input_line()
+    }
+
     pub fn terminal_title(&self) -> Option<String> {
         self.0.terminal_title()
     }

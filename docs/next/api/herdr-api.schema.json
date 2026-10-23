@@ -1492,6 +1492,10 @@
         },
         "AgentPromptParams": {
           "properties": {
+            "force": {
+              "description": "Send even when the prompt line holds a draft someone typed. The text\nlands after the draft.",
+              "type": "boolean"
+            },
             "target": {
               "type": "string"
             },
@@ -1539,6 +1543,10 @@
             "format": {
               "$ref": "#/schemas/request/$defs/ReadFormat",
               "default": "text"
+            },
+            "ghost": {
+              "$ref": "#/schemas/request/$defs/GhostText",
+              "description": "What a text read does with ghost text (an agent's autosuggestion)."
             },
             "lines": {
               "format": "uint32",
@@ -2388,6 +2396,26 @@
             "match_event"
           ],
           "type": "object"
+        },
+        "GhostText": {
+          "description": "How a text read treats ghost text: dim text an agent draws after its prompt\nglyph that was never typed, such as Claude Code's suggested reply.",
+          "oneOf": [
+            {
+              "const": "keep",
+              "description": "Print it as if it were screen text.",
+              "type": "string"
+            },
+            {
+              "const": "mark",
+              "description": "Wrap it as `⟨suggestion: …⟩`.",
+              "type": "string"
+            },
+            {
+              "const": "drop",
+              "description": "Leave it out.",
+              "type": "string"
+            }
+          ]
         },
         "IntegrationInstallParams": {
           "properties": {
@@ -6555,6 +6583,17 @@
                 "null"
               ]
             },
+            "input_line": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/success_response/$defs/AgentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The prompt line's draft and suggestion. Only `agent get` fills it, and\nonly for agents whose prompt box can be read."
+            },
             "interactive_ready": {
               "type": "boolean"
             },
@@ -6637,6 +6676,18 @@
             "focused",
             "revision"
           ],
+          "type": "object"
+        },
+        "AgentInput": {
+          "description": "The agent's prompt line: text a person typed and not yet sent, and ghost\ntext the agent suggests. Either is omitted when empty.",
+          "properties": {
+            "draft": {
+              "type": "string"
+            },
+            "suggestion": {
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "AgentManifestInfo": {

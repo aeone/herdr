@@ -494,6 +494,10 @@ impl PaneTerminal {
         self.ghostty.detection_text()
     }
 
+    pub fn claude_input_line(&self) -> Option<crate::detect::input_line::InputLine> {
+        self.ghostty.claude_input_line()
+    }
+
     pub(crate) fn recent_text_snapshot(&self, lines: usize) -> TerminalReadSnapshot {
         self.ghostty.recent_text_snapshot(lines)
     }
@@ -2108,6 +2112,13 @@ impl GhosttyPaneTerminal {
             .unwrap_or_default()
     }
 
+    /// The Claude Code prompt box's typed text and ghost text, from the live
+    /// bottom of the screen. `None` when no prompt box is on screen.
+    pub fn claude_input_line(&self) -> Option<crate::detect::input_line::InputLine> {
+        let core = self.core.lock().ok()?;
+        ghostty_claude_input_line(&core.terminal).ok().flatten()
+    }
+
     pub fn detection_text(&self) -> String {
         self.core
             .lock()
@@ -2819,6 +2830,47 @@ fn ghostty_visible_ansi(core: &GhosttyPaneCore) -> Result<String, crate::ghostty
         (cols.saturating_sub(1), u32::from(rows.saturating_sub(1))),
         false,
     )
+}
+
+fn ghostty_claude_input_line(
+    terminal: &crate::ghostty::Terminal,
+) -> Result<Option<crate::detect::input_line::InputLine>, crate::ghostty::Error> {
+    use crate::detect::input_line::{locate_claude_input_rows, split_claude_input, InputCell};
+
+    let total_rows = terminal.total_rows()?;
+    let rows = usize::from(terminal.rows()?);
+    let cols = terminal.cols()?;
+    if total_rows == 0 || rows == 0 || cols == 0 {
+        return Ok(None);
+    }
+    let first_row = total_rows.saturating_sub(rows);
+    let mut text = Vec::with_capacity(total_rows - first_row);
+    for y in first_row..total_rows {
+        text.push(ghostty_screen_row(terminal, cols, y as u32)?);
+    }
+    let Some(input_rows) = locate_claude_input_rows(&text) else {
+        return Ok(None);
+    };
+    let mut cell_rows = Vec::with_capacity(input_rows.len());
+    let mut soft_wrapped = Vec::with_capacity(input_rows.len());
+    for offset in input_rows {
+        let y = (first_row + offset) as u32;
+        let mut cells = Vec::with_capacity(usize::from(cols));
+        for x in 0..cols {
+            let (wide, graphemes) = terminal.screen_cell(x, y)?;
+            if wide == crate::ghostty::CellWide::SpacerTail {
+                continue;
+            }
+            let text: String = graphemes.into_iter().filter_map(char::from_u32).collect();
+            cells.push(InputCell {
+                text,
+                faint: terminal.screen_cell_faint(x, y)?,
+            });
+        }
+        cell_rows.push(cells);
+        soft_wrapped.push(terminal.screen_row_soft_wrapped(y)?);
+    }
+    Ok(Some(split_claude_input(&cell_rows, &soft_wrapped)))
 }
 
 fn ghostty_detection_text(core: &mut GhosttyPaneCore) -> Result<String, crate::ghostty::Error> {

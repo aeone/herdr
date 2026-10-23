@@ -291,9 +291,9 @@ For the pane-versus-agent model and complete orchestration examples, see [Agent 
 ```bash
 herdr agent list
 herdr agent get <target>
-herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
+herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--ghost keep|mark|drop]
 herdr agent send-keys <target> <key> [key ...]
-herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
+herdr agent prompt <target> <text> [--force] [--wait] [--until STATUS]... [--timeout MS]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent seen <target> [--unseen]
@@ -313,6 +313,8 @@ A successful start returns only after the expected agent owns the same terminal 
 `agent prompt` honors live bracketed-paste mode and sends text followed by encoded Enter after a short delay, including while the agent is working. If the agent is already `blocked`, it returns `agent_blocked` without sending input. With `--wait`, an accepted prompt sent from another non-working state must produce an observed lifecycle change within five seconds or Herdr returns `agent_prompt_stalled`; a caller timeout of five seconds or less keeps the normal `timeout` error. After activity is observed, it waits for the first requested settled status. It does not track individual turns. If the agent is already working, completion of that active turn may satisfy the wait. `--until` narrows the matching states and is rejected unless `--wait` is also present. Standalone `agent wait` returns immediately when the current status matches. Both default to `idle`, `done`, or `blocked`; use `--until unknown` explicitly when needed.
 
 `idle` means ready for input after its tab has been seen in the focused Herdr UI; `done` is the same underlying idle state after unseen background work completes. Focusing that tab or targeting it with `pane focus` / `agent focus` marks it seen; reading it through the CLI does not. `agent seen` marks it seen without focusing anything, for a client that shows the agent somewhere else, and `agent seen --unseen` marks an idle agent unseen so it reads `done` again (a working or blocked agent fails with `agent_not_idle`). On a mirrored agent both are passed on to the host that runs it. `blocked` means Herdr recognized an approval or question UI. `unknown` means an agent is present but Herdr cannot classify it confidently, not that its work succeeded.
+
+For Claude Code panes, Herdr tells typed input apart from ghost text. Claude Code draws its suggested reply (and the empty-prompt hint) dim after the prompt glyph, so in plain text it looks like something typed. `agent get` reports the prompt line as `input_line`: `draft` is text someone typed and has not sent, `suggestion` is the dim ghost text, and either is omitted when empty. `agent read` in text format wraps the ghost text as `⟨suggestion: …⟩` by default; `--ghost drop` leaves it out and `--ghost keep` prints it as screen text. The `detection` source and `--format ansi` are never rewritten. `agent prompt` returns `agent_has_draft` without sending when the prompt line holds a real draft, because the new text would land after it; `--force` sends anyway. A mere suggestion never blocks a prompt: typing replaces it.
 
 `agent send-keys` sends logical terminal keys such as `enter`, `up`, `esc`, or `ctrl+c`. Herdr validates every key before writing any bytes. `agent read` reads the resolved terminal stream, and `agent rename` names an already detected agent.
 

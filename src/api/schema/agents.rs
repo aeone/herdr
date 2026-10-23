@@ -14,6 +14,41 @@ pub struct AgentReadParams {
     pub format: ReadFormat,
     #[serde(default = "super::common::default_true")]
     pub strip_ansi: bool,
+    /// What a text read does with ghost text (an agent's autosuggestion).
+    #[serde(default, skip_serializing_if = "GhostText::is_default")]
+    pub ghost: GhostText,
+}
+
+/// How a text read treats ghost text: dim text an agent draws after its prompt
+/// glyph that was never typed, such as Claude Code's suggested reply.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema, Default,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum GhostText {
+    /// Print it as if it were screen text.
+    Keep,
+    /// Wrap it as `⟨suggestion: …⟩`.
+    #[default]
+    Mark,
+    /// Leave it out.
+    Drop,
+}
+
+impl GhostText {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The agent's prompt line: text a person typed and not yet sent, and ghost
+/// text the agent suggests. Either is omitted when empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentInput {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub draft: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub suggestion: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -201,6 +236,10 @@ pub struct AgentPromptParams {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait: Option<AgentPromptWaitOptions>,
+    /// Send even when the prompt line holds a draft someone typed. The text
+    /// lands after the draft.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub force: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -243,6 +282,10 @@ pub struct AgentInfo {
     pub launch_pending: bool,
     #[serde(default, skip_serializing_if = "super::is_false")]
     pub interactive_ready: bool,
+    /// The prompt line's draft and suggestion. Only `agent get` fills it, and
+    /// only for agents whose prompt box can be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_line: Option<AgentInput>,
     #[serde(default)]
     pub state_change_seq: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]

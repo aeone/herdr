@@ -177,6 +177,44 @@ pub(super) fn read_terminal_snapshot(
     }
 }
 
+/// Rewrites the ghost text a text read picked up from an agent's prompt line.
+///
+/// Each line of `suggestion` is looked up from the bottom up, so only the live
+/// prompt is touched and not an older echo of the same words in scrollback.
+pub(crate) fn apply_ghost_text(
+    text: &str,
+    suggestion: &str,
+    mode: crate::api::schema::GhostText,
+) -> String {
+    use crate::api::schema::GhostText;
+
+    if mode == GhostText::Keep || suggestion.is_empty() {
+        return text.to_string();
+    }
+    let mut text = text.to_string();
+    let mut search_end = text.len();
+    for line in suggestion.lines().rev() {
+        let Some(start) = text[..search_end].rfind(line) else {
+            continue;
+        };
+        let end = start + line.len();
+        let replacement = match mode {
+            GhostText::Mark => format!("⟨suggestion: {line}⟩"),
+            GhostText::Drop | GhostText::Keep => String::new(),
+        };
+        text.replace_range(start..end, &replacement);
+        if mode == GhostText::Drop && (start == text.len() || text[start..].starts_with('\n')) {
+            // The line ends where the ghost text was: drop the blanks before it.
+            let trimmed = text[..start].trim_end_matches([' ', '\u{a0}']).len();
+            text.replace_range(trimmed..start, "");
+            search_end = trimmed;
+            continue;
+        }
+        search_end = start;
+    }
+    text
+}
+
 pub(crate) fn limit_snapshot_lines(
     text: String,
     limit: Option<usize>,
@@ -349,5 +387,44 @@ mod metadata_token_tests {
             .map(|index| (format!("key{index}"), Some("value".into())))
             .collect();
         assert!(normalize_metadata_tokens(too_many).is_err());
+    }
+}
+
+#[cfg(test)]
+mod ghost_text_tests {
+    use super::apply_ghost_text;
+    use crate::api::schema::GhostText;
+
+    #[test]
+    fn marks_the_live_prompt_and_not_an_older_echo() {
+        let text = "\u{276f} it's rebuilt now\nreply\n\u{276f}\u{a0}it's rebuilt now\n";
+        assert_eq!(
+            apply_ghost_text(text, "it's rebuilt now", GhostText::Mark),
+            "\u{276f} it's rebuilt now\nreply\n\u{276f}\u{a0}\u{27e8}suggestion: it's rebuilt now\u{27e9}\n"
+        );
+    }
+
+    #[test]
+    fn drop_trims_the_blank_before_the_removed_text() {
+        let text = "reply\n\u{276f}\u{a0}ship it";
+        assert_eq!(
+            apply_ghost_text(text, "ship it", GhostText::Drop),
+            "reply\n\u{276f}"
+        );
+    }
+
+    #[test]
+    fn keep_and_empty_suggestion_leave_text_alone() {
+        assert_eq!(apply_ghost_text("a b", "b", GhostText::Keep), "a b");
+        assert_eq!(apply_ghost_text("a b", "", GhostText::Drop), "a b");
+    }
+
+    #[test]
+    fn handles_a_suggestion_wrapped_over_rows() {
+        let text = "\u{276f}\u{a0}one two\n  three\nfooter";
+        assert_eq!(
+            apply_ghost_text(text, "one two\nthree", GhostText::Mark),
+            "\u{276f}\u{a0}\u{27e8}suggestion: one two\u{27e9}\n  \u{27e8}suggestion: three\u{27e9}\nfooter"
+        );
     }
 }

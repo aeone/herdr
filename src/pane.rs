@@ -3112,6 +3112,10 @@ impl PaneRuntime {
         self.terminal.detection_text()
     }
 
+    pub fn claude_input_line(&self) -> Option<crate::detect::input_line::InputLine> {
+        self.terminal.claude_input_line()
+    }
+
     pub fn terminal_title(&self) -> Option<String> {
         self.terminal.terminal_title()
     }

@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{
     AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams, AgentSeenParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, Method,
-    PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, GhostText,
+    Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -802,7 +802,7 @@ fn agent_rename(args: &[String]) -> std::io::Result<i32> {
 fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!(
-            "usage: herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]"
+            "usage: herdr agent prompt <target> <text> [--force] [--wait] [--until STATUS]... [--timeout MS]"
         );
         return Ok(2);
     };
@@ -811,11 +811,16 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
     let mut wait = false;
+    let mut force = false;
     let mut until = Vec::new();
     let mut timeout_ms = None;
     let mut index = 2;
     while index < args.len() {
         match args[index].as_str() {
+            "--force" => {
+                force = true;
+                index += 1;
+            }
             "--wait" => {
                 wait = true;
                 index += 1;
@@ -866,6 +871,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
             target: target.clone(),
             text: text.clone(),
             wait: wait.then_some(AgentPromptWaitOptions { until, timeout_ms }),
+            force,
         }),
     })?;
     super::print_response(&response)
@@ -888,7 +894,7 @@ fn agent_send_keys(args: &[String]) -> std::io::Result<i32> {
 
 fn agent_read(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
-        eprintln!("usage: herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi]");
+        eprintln!("usage: herdr agent read <target> [--source visible|recent|recent-unwrapped] [--lines N] [--format text|ansi] [--ansi] [--ghost keep|mark|drop]");
         return Ok(2);
     };
 
@@ -896,6 +902,7 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
     let mut lines = None;
     let mut format = ReadFormat::Text;
     let mut strip_ansi = true;
+    let mut ghost = GhostText::default();
 
     let mut index = 1;
     while index < args.len() {
@@ -930,6 +937,22 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
                 strip_ansi = false;
                 index += 1;
             }
+            "--ghost" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --ghost");
+                    return Ok(2);
+                };
+                ghost = match value.as_str() {
+                    "keep" => GhostText::Keep,
+                    "mark" => GhostText::Mark,
+                    "drop" => GhostText::Drop,
+                    other => {
+                        eprintln!("invalid --ghost value: {other} (expected keep, mark or drop)");
+                        return Ok(2);
+                    }
+                };
+                index += 2;
+            }
             other => {
                 eprintln!("unknown option: {other}");
                 return Ok(2);
@@ -945,6 +968,7 @@ fn agent_read(args: &[String]) -> std::io::Result<i32> {
             lines,
             format,
             strip_ansi,
+            ghost,
         }),
     })?;
     super::print_read_response(&response)
@@ -954,9 +978,9 @@ fn print_agent_help() {
     eprintln!("herdr agent commands:");
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
-    eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
+    eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi] [--ghost keep|mark|drop]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
-    eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
+    eprintln!("  herdr agent prompt <target> <text> [--force] [--wait] [--until STATUS]... [--timeout MS]");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent seen <target> [--unseen]");

@@ -1157,6 +1157,25 @@ impl Terminal {
         Ok((graphemes, style.into()))
     }
 
+    /// Whether a screen row continues onto the next without a line break.
+    pub(crate) fn screen_row_soft_wrapped(&self, y: u32) -> Result<bool, Error> {
+        let grid_ref = self.grid_ref(ghostty_screen_point(0, y))?;
+        Ok(grid_ref_wrap_state(&grid_ref)?.0)
+    }
+
+    /// Whether the cell at a screen coordinate is drawn with SGR 2 (faint).
+    pub(crate) fn screen_cell_faint(&self, x: u16, y: u32) -> Result<bool, Error> {
+        let grid_ref = self.grid_ref(ghostty_screen_point(x, y))?;
+        let mut style = ffi::GhosttyStyle {
+            size: mem::size_of::<ffi::GhosttyStyle>(),
+            ..Default::default()
+        };
+        unsafe {
+            ffi::ghostty_grid_ref_style(&grid_ref, &mut style).into_result()?;
+        }
+        Ok(style.faint)
+    }
+
     pub fn viewport_hyperlink_uri(&self, x: u16, y: u32) -> Result<Option<String>, Error> {
         let grid_ref = self.grid_ref(ghostty_viewport_point(x, y))?;
         grid_ref_hyperlink_uri(&grid_ref)

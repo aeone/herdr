@@ -87,6 +87,7 @@ fn agent_start_and_prompt_requests_round_trip() {
             target: "reviewer".into(),
             text: "review this".into(),
             wait: None,
+            force: false,
         }),
     };
     let prompt_json = serde_json::to_value(&prompt).unwrap();
@@ -105,6 +106,7 @@ fn agent_start_and_prompt_requests_round_trip() {
                 until: vec![AgentStatus::Idle, AgentStatus::Done],
                 timeout_ms: Some(120_000),
             }),
+            force: false,
         }),
     };
     let prompt_and_wait_json = serde_json::to_value(&prompt_and_wait).unwrap();

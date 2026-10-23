@@ -600,6 +600,28 @@ impl App {
         }
     }
 
+    /// The prompt line of an agent whose prompt box can be read (Claude Code):
+    /// what was typed and what is only a suggestion. `None` for other agents
+    /// and when no prompt box is on screen.
+    pub(crate) fn agent_input(
+        &self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+    ) -> Option<crate::api::schema::AgentInput> {
+        let ws = self.state.workspaces.get(ws_idx)?;
+        let pane_state = ws.pane_state(pane_id)?;
+        let terminal = self.state.terminals.get(&pane_state.attached_terminal_id)?;
+        if terminal.effective_known_agent() != Some(crate::detect::Agent::Claude) {
+            return None;
+        }
+        let (runtime, _) = self.lookup_runtime(ws_idx, pane_id)?;
+        let line = runtime.claude_input_line()?;
+        Some(crate::api::schema::AgentInput {
+            draft: line.draft,
+            suggestion: line.suggestion,
+        })
+    }
+
     pub(super) fn agent_info(
         &self,
         ws_idx: usize,
@@ -633,6 +655,7 @@ impl App {
             focused: pane.focused,
             launch_pending: terminal.managed_agent_launch_pending(),
             interactive_ready: terminal.managed_agent_interactive_ready(),
+            input_line: None,
             state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
             cwd: pane.cwd,
             foreground_cwd: pane.foreground_cwd,

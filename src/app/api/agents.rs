@@ -10,6 +10,17 @@ use crate::app::App;
 
 use super::responses::{encode_error, encode_error_body, encode_success};
 
+/// How much of an unsent draft an error message quotes.
+const DRAFT_PREVIEW_CHARS: usize = 120;
+
+fn draft_preview(draft: &str) -> String {
+    let mut preview: String = draft.chars().take(DRAFT_PREVIEW_CHARS).collect();
+    if draft.chars().count() > DRAFT_PREVIEW_CHARS {
+        preview.push('…');
+    }
+    format!("{preview:?}")
+}
+
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
 impl App {
@@ -24,10 +35,13 @@ impl App {
 
     pub(super) fn handle_agent_get(&mut self, id: String, target: AgentTarget) -> String {
         self.reconcile_managed_agent_target(&target.target);
-        let agent = match self.agent_info_for_target(&target.target) {
+        let mut agent = match self.agent_info_for_target(&target.target) {
             Ok(agent) => agent,
             Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
         };
+        if let Ok(resolved) = self.resolve_agent_target(&target.target) {
+            agent.input_line = self.agent_input(resolved.ws_idx, resolved.pane_id);
+        }
 
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
@@ -168,6 +182,22 @@ impl App {
                 ),
             );
         }
+        if !params.force {
+            if let Some(input) = self.agent_input(resolved.ws_idx, resolved.pane_id) {
+                if !input.draft.is_empty() {
+                    return encode_error(
+                        id,
+                        "agent_has_draft",
+                        format!(
+                            "agent {} has unsent typed input ({}); sending would append to it. \
+                             Pass --force to send anyway",
+                            params.target,
+                            draft_preview(&input.draft)
+                        ),
+                    );
+                }
+            }
+        }
         if expected_agent == crate::detect::Agent::GithubCopilot {
             // Copilot ignores synthetic Enter after focus loss until it receives focus gained.
             let focus = match crate::ghostty::encode_focus(crate::ghostty::FocusEvent::Gained) {
@@ -203,12 +233,25 @@ impl App {
         else {
             return agent_not_found(id, &params.target);
         };
-        let snapshot = crate::app::api_helpers::read_terminal_snapshot(
+        let mut snapshot = crate::app::api_helpers::read_terminal_snapshot(
             pane,
             params.source,
             params.format,
             params.lines,
         );
+        // Detection reads stay raw: manifests are tuned against them.
+        if params.format == crate::api::schema::ReadFormat::Text
+            && params.source != crate::api::schema::ReadSource::Detection
+            && params.ghost != crate::api::schema::GhostText::Keep
+        {
+            if let Some(input) = self.agent_input(resolved.ws_idx, resolved.pane_id) {
+                snapshot.text = crate::app::api_helpers::apply_ghost_text(
+                    &snapshot.text,
+                    &input.suggestion,
+                    params.ghost,
+                );
+            }
+        }
 
         encode_success(
             id,
@@ -417,6 +460,7 @@ mod tests {
                 target: public_pane_id,
                 text: "A != B".into(),
                 wait: None,
+                force: false,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -448,6 +492,7 @@ mod tests {
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
+                force: false,
             },
         );
         let raw: SuccessResponse = serde_json::from_str(&raw).unwrap();
@@ -469,6 +514,7 @@ mod tests {
                 target: "opencode".into(),
                 text: "wrong target".into(),
                 wait: None,
+                force: false,
             },
         );
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&rejected).unwrap();
@@ -495,6 +541,7 @@ mod tests {
                 target: "reviewer".into(),
                 text: "unrelated prompt".into(),
                 wait: None,
+                force: false,
             },
         );
 
@@ -534,6 +581,7 @@ mod tests {
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
+                force: false,
             },
         );
         let success: SuccessResponse = serde_json::from_str(&response).unwrap();
@@ -553,6 +601,170 @@ mod tests {
                 .unwrap(),
             Bytes::from_static(b"\r")
         );
+    }
+
+    /// A Claude Code screen: a reply, then the prompt box with `prompt_row`
+    /// drawn between two borders, then the status line.
+    fn claude_screen(prompt_row: &str) -> Vec<u8> {
+        let border = "\u{2500}".repeat(60);
+        format!("\x1b[0mreply text\r\n{border}\r\n{prompt_row}\r\n{border}\r\n  status line")
+            .into_bytes()
+    }
+
+    const SUGGESTION_ROW: &str = "\u{276f}\u{a0}\x1b[0m\x1b[2mit's rebuilt now\x1b[0m";
+    const DRAFT_ROW: &str = "\u{276f}\u{a0}half typed note";
+
+    /// Detecting Claude reads the global agent manifest cache, which the
+    /// manifest tests repoint through `XDG_*`; hold the same lock meanwhile.
+    fn app_with_claude_prompt(
+        prompt_row: &str,
+    ) -> (
+        App,
+        String,
+        tokio::sync::mpsc::Receiver<Bytes>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let guard = crate::config::test_config_env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let (runtime, rx) =
+            crate::terminal::TerminalRuntime::test_with_channel_and_scrollback_bytes(
+                80, 24, 0, b"", 4,
+            );
+        runtime.test_process_pty_bytes(&claude_screen(prompt_row));
+        app.state.insert_test_runtime(pane_id, runtime);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        (app, public_pane_id, rx, guard)
+    }
+
+    fn prompt_params(target: &str, force: bool) -> AgentPromptParams {
+        AgentPromptParams {
+            target: target.into(),
+            text: "next".into(),
+            wait: None,
+            force,
+        }
+    }
+
+    fn error_code(response: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(response).unwrap();
+        value["error"]["code"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn agent_get_reports_suggestion_apart_from_draft() {
+        let (mut app, pane, _rx, env) = app_with_claude_prompt(SUGGESTION_ROW);
+        let response = app.handle_agent_get("req".into(), AgentTarget { target: pane });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info");
+        };
+        let input = agent.input_line.expect("claude prompt box is readable");
+        assert_eq!(input.draft, "");
+        assert_eq!(input.suggestion, "it's rebuilt now");
+
+        drop(env);
+        let (mut app, pane, _rx, _env) = app_with_claude_prompt(DRAFT_ROW);
+        let response = app.handle_agent_get("req".into(), AgentTarget { target: pane });
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::AgentInfo { agent } = success.result else {
+            panic!("expected agent info");
+        };
+        let input = agent.input_line.expect("claude prompt box is readable");
+        assert_eq!(input.draft, "half typed note");
+        assert_eq!(input.suggestion, "");
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_refuses_a_real_draft_unless_forced() {
+        let (mut app, pane, mut rx, _env) = app_with_claude_prompt(DRAFT_ROW);
+
+        let refused = app.handle_agent_prompt("req".into(), prompt_params(&pane, false));
+        assert_eq!(error_code(&refused), "agent_has_draft");
+        assert!(refused.contains("half typed note"));
+        assert!(rx.try_recv().is_err(), "nothing may be written");
+
+        let forced = app.handle_agent_prompt("req".into(), prompt_params(&pane, true));
+        let forced: SuccessResponse = serde_json::from_str(&forced).unwrap();
+        assert!(matches!(
+            forced.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn agent_prompt_goes_ahead_over_a_mere_suggestion() {
+        let (mut app, pane, mut rx, _env) = app_with_claude_prompt(SUGGESTION_ROW);
+
+        let response = app.handle_agent_prompt("req".into(), prompt_params(&pane, false));
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(
+            success.result,
+            ResponseResult::AgentPrompted { .. }
+        ));
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn agent_read_marks_or_drops_ghost_text() {
+        use crate::api::schema::{AgentReadParams, GhostText, ReadFormat, ReadSource};
+
+        let read = |ghost| {
+            let (mut app, pane, _rx, _env) = app_with_claude_prompt(SUGGESTION_ROW);
+            let response = app.handle_agent_read(
+                "req".into(),
+                AgentReadParams {
+                    target: pane,
+                    source: ReadSource::Visible,
+                    lines: None,
+                    format: ReadFormat::Text,
+                    strip_ansi: true,
+                    ghost,
+                },
+            );
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::PaneRead { read } = success.result else {
+                panic!("expected pane read");
+            };
+            read.text
+        };
+
+        assert!(read(GhostText::Keep).contains("\u{276f}\u{a0}it's rebuilt now"));
+        let marked = read(GhostText::Mark);
+        assert!(marked.contains("\u{276f}\u{a0}\u{27e8}suggestion: it's rebuilt now\u{27e9}"));
+        let dropped = read(GhostText::Drop);
+        assert!(!dropped.contains("rebuilt"));
+        assert!(dropped.contains("\n\u{276f}\n"));
+    }
+
+    #[tokio::test]
+    async fn agent_input_is_unknown_outside_claude() {
+        let (mut app, pane, _rx, _env) = app_with_claude_prompt(DRAFT_ROW);
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::OpenCode), AgentState::Idle);
+
+        assert_eq!(app.agent_input(0, pane_id), None);
+        let response = app.handle_agent_prompt("req".into(), prompt_params(&pane, false));
+        assert!(!response.contains("agent_has_draft"));
     }
 
     #[tokio::test]
@@ -618,6 +830,7 @@ mod tests {
                 target: "reviewer".into(),
                 text: "A != B".into(),
                 wait: None,
+                force: false,
             },
         );
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
