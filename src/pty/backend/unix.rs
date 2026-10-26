@@ -44,12 +44,6 @@ pub(crate) fn spawn_with_portable_pty(
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    fn pty_fd_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
 
     fn parent_pty_fd_targets() -> Vec<String> {
         let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
@@ -69,9 +63,32 @@ mod tests {
         parent_pty_fd_targets().len()
     }
 
+    const PTY_FD_CHILD_ENV: &str = "HERDR_PTY_FD_TEST_CHILD";
+
+    /// Counts every pty fd in the process, so any other test opening a pty at the same time
+    /// skews it. The check therefore runs in a child process that executes only this test.
     #[test]
     fn portable_pty_setup_leaves_one_parent_pty_fd() {
-        let _guard = pty_fd_test_lock().lock().expect("pty fd test lock");
+        if std::env::var_os(PTY_FD_CHILD_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "pty::backend::unix::tests::portable_pty_setup_leaves_one_parent_pty_fd",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(PTY_FD_CHILD_ENV, "1")
+                .output()
+                .expect("run pty fd check in a child process");
+            assert!(
+                output.status.success(),
+                "pty fd check failed in child process:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         let before = parent_pty_fd_count();
         let mut cmd = CommandBuilder::new("/bin/cat");
         cmd.env(crate::HERDR_ENV_VAR, crate::HERDR_ENV_VALUE);
