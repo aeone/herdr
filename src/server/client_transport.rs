@@ -1251,8 +1251,10 @@ mod tests {
         });
 
         drop(writer);
+        // The loop blocks on its queue, so it exits as soon as the senders drop; the deadline
+        // only bounds a hang and has to outlast a loaded machine.
         done_rx
-            .recv_timeout(Duration::from_millis(100))
+            .recv_timeout(Duration::from_secs(5))
             .expect("writer exits without polling after senders drop");
     }
 

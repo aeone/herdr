@@ -6362,8 +6362,9 @@ mod tests {
     #[test]
     fn drain_api_requests_returns_promptly_under_sustained_request_pressure() {
         const IN_FLIGHT_CAP: usize = 24;
-        const FLOOD_DURATION: Duration = Duration::from_millis(400);
-        const MAX_ACCEPTABLE_DRAIN_TIME: Duration = Duration::from_millis(150);
+        const FILL_DEADLINE: Duration = Duration::from_secs(10);
+        // Bounds the flood so a drain that never stops fails the assertion below instead of hanging.
+        const MAX_FLOOD_REQUESTS: usize = 2_000;
 
         let (mut server, api_tx) = test_headless_server_with_api_channel(api::EventHub::default());
 
@@ -6379,45 +6380,73 @@ mod tests {
                 .push(crate::workspace::Workspace::test_new(&format!("flood-{i}")));
         }
 
-        let stop_after = Instant::now() + FLOOD_DURATION;
-        let producer = std::thread::spawn(move || {
-            let mut pending: std::collections::VecDeque<std::sync::mpsc::Receiver<String>> =
-                std::collections::VecDeque::new();
-            while Instant::now() < stop_after {
-                if pending.len() >= IN_FLIGHT_CAP {
-                    // Wait for the oldest outstanding request to complete
-                    // before issuing another -- caps the backlog at
-                    // IN_FLIGHT_CAP regardless of how the two threads get
-                    // scheduled, so this reproduces "a bounded pool of
-                    // connections in continuous use", not "an unbounded
-                    // burst", and the fixed drain's cost stays bounded too.
-                    let _ = pending
-                        .pop_front()
-                        .expect("checked non-empty above")
-                        .recv_timeout(Duration::from_secs(2));
+        let stop = Arc::new(AtomicBool::new(false));
+        let sent = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let producer = {
+            let stop = Arc::clone(&stop);
+            let sent = Arc::clone(&sent);
+            std::thread::spawn(move || {
+                let mut pending: std::collections::VecDeque<std::sync::mpsc::Receiver<String>> =
+                    std::collections::VecDeque::new();
+                while !stop.load(Ordering::Acquire)
+                    && sent.load(Ordering::Acquire) < MAX_FLOOD_REQUESTS
+                {
+                    if pending.len() >= IN_FLIGHT_CAP {
+                        // Wait for the oldest outstanding request to complete
+                        // before issuing another -- caps the backlog at
+                        // IN_FLIGHT_CAP regardless of how the two threads get
+                        // scheduled, so this reproduces "a bounded pool of
+                        // connections in continuous use", not "an unbounded
+                        // burst". The short wait keeps the stop flag checked.
+                        match pending
+                            .front()
+                            .expect("checked non-empty above")
+                            .recv_timeout(Duration::from_millis(10))
+                        {
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                            _ => {
+                                pending.pop_front();
+                            }
+                        }
+                    }
+                    pending.push_back(send_flood_request(&api_tx));
+                    sent.fetch_add(1, Ordering::AcqRel);
                 }
-                pending.push_back(send_flood_request(&api_tx));
-            }
-        });
+            })
+        };
 
-        // Let the flood fill to its cap before measuring, so the drain call
-        // below has something queued the instant it starts.
-        std::thread::sleep(Duration::from_millis(20));
+        // Let the flood fill to its cap before draining, so the drain call
+        // below has a full backlog queued the instant it starts. The producer
+        // cannot add to it until a response frees a slot.
+        let fill_started = Instant::now();
+        while server.app.api_rx.len() < IN_FLIGHT_CAP {
+            assert!(
+                fill_started.elapsed() < FILL_DEADLINE,
+                "flood never filled the queue"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let queued = server.app.api_rx.len();
 
-        let started = Instant::now();
         server.drain_api_requests_with_shutdown_check();
-        let elapsed = started.elapsed();
 
+        stop.store(true, Ordering::Release);
         producer.join().expect("flood producer thread");
+        let handled = sent.load(Ordering::Acquire) - server.app.api_rx.len();
 
+        // Count what the drain processed rather than how long it took, so the
+        // check does not depend on how loaded the machine is: the producer
+        // kept sending the whole time, and the drain must still process only
+        // what was already queued and return -- otherwise
+        // accept_client_connections() never gets a turn and every attach
+        // times out. See the iac-28cc infra repo's
+        // docs/investigations/2026-09-03-pandora-attach-timeout-agent-feed-storm.md
+        // (fleet-ops repo, not this one)
+        assert!(handled > 0, "drain processed nothing from a full queue");
         assert!(
-            elapsed < MAX_ACCEPTABLE_DRAIN_TIME,
-            "drain_api_requests_with_shutdown_check took {elapsed:?} while requests kept \
-             arriving (flood ran for {FLOOD_DURATION:?}); it must process only what was \
-             already queued and return -- otherwise accept_client_connections() never gets \
-             a turn and every attach times out. See the iac-28cc infra repo's \
-             docs/investigations/2026-09-03-pandora-attach-timeout-agent-feed-storm.md \
-             (fleet-ops repo, not this one)"
+            handled <= queued,
+            "drain_api_requests_with_shutdown_check processed {handled} requests while \
+             requests kept arriving; only the {queued} already queued may be processed"
         );
 
         shutdown_test_runtimes(&mut server);
@@ -11834,7 +11863,7 @@ next_tab = ""
         assert!(matches!(
             read_server_message(
                 client_control_rx
-                    .recv_timeout(Duration::from_millis(100))
+                    .recv_timeout(Duration::from_secs(5))
                     .expect("mouse capture message")
             ),
             ServerMessage::MouseCapture { enabled: true, .. }
